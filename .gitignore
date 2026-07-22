@@ -5,3 +5,4 @@ venv/
 configs/keys_local.py
 data/cache/
 .vscode/
+.claude/
