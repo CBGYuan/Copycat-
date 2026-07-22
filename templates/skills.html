@@ -1,0 +1,48 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="row">
+  <div class="col-md-4">
+    <h5><i class="fas fa-book"></i> Learned Skills</h5>
+    <div class="list-group">
+      {% for key, sk in skills.items() %}
+      <button class="list-group-item list-group-item-action" onclick="loadForEdit('{{ key }}')">{{ sk.name }}</button>
+      {% else %}
+      <div class="text-muted small">No skills yet — use the "Teach Skill" flow to create one.</div>
+      {% endfor %}
+    </div>
+    <button class="btn btn-sm btn-outline-primary mt-3" onclick="newSkill()"><i class="fas fa-plus"></i> New Blank Skill</button>
+  </div>
+  <div class="col-md-8">
+    <p class="text-muted small">Click a skill on the left, or "New Blank Skill", to open it in the Edit Skill popup (same layout as IntelAvatar's Log Chatbot "Edit Skills Configuration" window).</p>
+  </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+function loadForEdit(key) {
+    fetch(`/skills/get/${key}`).then(r => r.json()).then(d => {
+        if (!d.success) { alert(d.message); return; }
+        const sk = d.skill;
+        sk.skill_key = key;
+        SkillEditor.open(sk, {
+            title: 'Edit Skill',
+            subtitle: sk.name || key,
+            saveUrl: "{{ url_for('skills.save_skill_route') }}",
+            deleteUrl: `/skills/delete/${key}?domain=${sk.domain || 'wifi'}`,
+            extraPayload: {tat_path: sk.tat_path || null, domain: sk.domain || 'wifi'},
+            onSaved: function () { location.reload(); },
+        });
+    });
+}
+
+function newSkill() {
+    SkillEditor.open({}, {
+        title: 'New Blank Skill',
+        saveUrl: "{{ url_for('skills.save_skill_route') }}",
+        extraPayload: {tat_path: null, domain: 'wifi'},
+        onSaved: function () { location.reload(); },
+    });
+}
+</script>
+{% endblock %}

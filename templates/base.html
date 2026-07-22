@@ -1,0 +1,92 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{% block title %}Log Triage & Skill Learning{% endblock %}</title>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+<link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+<link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css" rel="stylesheet">
+<link href="{{ url_for('static', filename='css/style.css') }}" rel="stylesheet">
+</head>
+<body>
+<nav class="navbar navbar-expand-lg app-navbar mb-4">
+  <div class="container-fluid">
+    <a class="navbar-brand" href="{{ url_for('main.index') }}"><i class="fas fa-robot"></i> Log Triage &amp; Skill Learning</a>
+    <button class="navbar-toggler bg-light" type="button" data-bs-toggle="collapse" data-bs-target="#navContent">
+      <span class="navbar-toggler-icon"></span>
+    </button>
+    <div class="collapse navbar-collapse" id="navContent">
+      <ul class="navbar-nav me-auto">
+        <li class="nav-item"><a class="nav-link" href="{{ url_for('log_viewer.index') }}"><i class="fas fa-filter"></i> Log Viewer</a></li>
+        <li class="nav-item"><a class="nav-link" href="{{ url_for('skills.index') }}"><i class="fas fa-book"></i> Skills</a></li>
+      </ul>
+    </div>
+  </div>
+</nav>
+<div class="container-fluid px-4 pb-5">
+{% block content %}{% endblock %}
+</div>
+
+<!-- Shared "Edit Skill" popup — mirrors IntelAvatar Log Chatbot's
+     Edit Skills Configuration modal. Opened via SkillEditor.open(data, opts)
+     from static/js/skill_editor.js; see Log Viewer / Teach Skill / Skills pages. -->
+<div class="skill-modal-overlay" id="skillEditorModal">
+  <div class="skill-modal-card">
+    <div class="skill-modal-header">
+      <div class="skill-modal-heading">
+        <h5 class="mb-0"><i class="fas fa-brain"></i> <span id="skillModalTitle">Edit Skill</span></h5>
+        <div class="skill-modal-subtitle" id="skillModalSubtitle"></div>
+      </div>
+      <button type="button" class="skill-modal-close" id="skm-close">&times;</button>
+    </div>
+    <div class="skill-modal-body">
+      <input type="hidden" id="skm-key">
+      <!-- Shown only when this draft EXTENDS an existing skill (data.diff from
+           /learning/converge's compute_skill_diff) — summarizes what's new
+           before the engineer scrolls down to the (now-highlighted) chips/
+           rules, so the addition isn't just a silent full overwrite. -->
+      <div class="skm-diff-banner" id="skm-diff-banner" style="display:none;"></div>
+      <div class="mb-3">
+        <label class="form-label small fw-bold">Name</label>
+        <input id="skm-name" class="form-control form-control-sm" placeholder="e.g. Connection Flow">
+      </div>
+      <div class="mb-3">
+        <label class="form-label small fw-bold">Description</label>
+        <input id="skm-desc" class="form-control form-control-sm" placeholder="One sentence describing when this skill applies">
+        <div class="desc-strength mt-1"><div class="desc-strength-bar" id="skm-desc-bar"></div></div>
+        <div class="small text-muted" id="skm-desc-label">&nbsp;</div>
+      </div>
+      <div class="mb-3">
+        <label class="form-label small fw-bold">Keywords</label>
+        <div class="chip-box" id="skm-keywords"></div>
+        <input class="form-control form-control-sm mt-1" id="skm-kw-input" placeholder="Type a keyword, press Enter to add">
+      </div>
+      <div class="mb-3">
+        <label class="form-label small fw-bold">Exclusive / Noise terms</label>
+        <div class="chip-box" id="skm-exclusive"></div>
+        <input class="form-control form-control-sm mt-1" id="skm-ex-input" placeholder="Type a noise term, press Enter to add">
+      </div>
+      <div class="mb-2">
+        <label class="form-label small fw-bold">Expert Rules — preamble / context</label>
+        <textarea id="skm-preamble" class="form-control form-control-sm rules-preamble" rows="3" placeholder="Background context that applies to all rules below (optional)"></textarea>
+      </div>
+      <div class="mb-2">
+        <label class="form-label small fw-bold">Expert Rules — numbered rules</label>
+        <div class="rules-list" id="skm-rules"></div>
+        <button type="button" class="btn btn-sm btn-outline-secondary mt-2" id="skm-add-rule"><i class="fas fa-plus"></i> Add rule</button>
+      </div>
+    </div>
+    <div class="skill-modal-footer">
+      <button type="button" class="btn btn-sm btn-outline-danger me-auto" id="skm-delete-btn" style="display:none;"><i class="fas fa-trash"></i> Delete</button>
+      <button type="button" class="btn btn-outline-secondary" id="skm-close-btn" onclick="SkillEditor.close()">Cancel</button>
+      <button type="button" class="btn btn-success" id="skm-save-btn"><i class="fas fa-save"></i> Save Changes</button>
+    </div>
+  </div>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
+<script src="{{ url_for('static', filename='js/skill_editor.js') }}"></script>
+{% block scripts %}{% endblock %}
+</body>
+</html>

@@ -1,0 +1,1041 @@
+/* Color scheme ported from wireless_ce_avatar/IntelAvatar's templates/index.html
+   and NW_analysis.html top-bar so this app looks/feels like the same family. */
+:root {
+  --primary: #0071c5;
+  --primary-light: #4cc2ff;
+  --primary-dark: #005a9e;
+  --accent-purple: #4b3f9c;
+  --bg-soft: #f4f6f8;
+  --border: #d6dbe1;
+  --text-main: #2c2f33;
+  --text-muted: #7a8088;
+  --good: #1db869;
+  --warn: #ffc107;
+  --bad: #d94848;
+}
+
+* { font-family: 'Inter', 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; }
+
+/* Global "one async action at a time" lock (see setBusy() in log_viewer.html)
+   — every element marked data-busy-lock dims + shows a not-allowed cursor
+   while any LLM call or state-mutating fetch is in flight, on top of the
+   browser's native disabled look. */
+[data-busy-lock]:disabled { opacity: 0.55; cursor: not-allowed; }
+
+body { background: var(--bg-soft); color: var(--text-main); }
+
+/* ===== Top bar (gradient banner, replaces the dark bootstrap navbar) ===== */
+.navbar.app-navbar {
+  background: linear-gradient(135deg, var(--primary) 0%, var(--primary-light) 100%) !important;
+  box-shadow: 0 2px 10px rgba(0, 90, 160, 0.25);
+}
+.app-navbar .navbar-brand { font-weight: 700; color: #fff !important; letter-spacing: 0.02em; }
+.app-navbar .nav-link {
+  color: rgba(255, 255, 255, 0.88) !important;
+  font-weight: 500;
+  border-radius: 999px;
+  padding: 6px 14px !important;
+  transition: all 0.2s ease;
+}
+.app-navbar .nav-link:hover,
+.app-navbar .nav-link.active {
+  color: #fff !important;
+  background: rgba(255, 255, 255, 0.16);
+}
+
+/* ===== Cards ===== */
+.card {
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.05);
+}
+.card-header {
+  background: #fff;
+  border-bottom: 1px solid var(--border);
+  font-weight: 600;
+  color: var(--text-main);
+}
+
+/* ===== Primary gradient buttons/links (matches IntelAvatar's action buttons) ===== */
+.btn-primary,
+.btn-success,
+a.btn-primary {
+  background: linear-gradient(120deg, var(--accent-purple), var(--primary-dark), var(--accent-purple));
+  background-size: 200% auto;
+  border: none;
+  border-radius: 999px;
+  font-weight: 600;
+  box-shadow: 0 4px 10px rgba(0, 90, 160, 0.30), inset 0 1px 0 rgba(255, 255, 255, 0.2);
+  transition: all 0.25s ease;
+}
+.btn-primary:hover, .btn-success:hover, a.btn-primary:hover {
+  transform: translateY(-1px) scale(1.02);
+  animation: gradientFlow 3s linear infinite;
+}
+.btn-success { background: linear-gradient(120deg, #15803d, #22c55e, #15803d); background-size: 200% auto; }
+.btn-outline-primary, .btn-outline-secondary, .btn-outline-success, .btn-outline-danger {
+  border-radius: 999px;
+  font-weight: 600;
+}
+
+@keyframes gradientFlow {
+  0% { background-position: 0% center; }
+  100% { background-position: 200% center; }
+}
+
+.alert-success { background: rgba(29, 184, 105, 0.12); border-color: rgba(29, 184, 105, 0.35); color: #0f5132; }
+.alert-warning { background: rgba(255, 193, 7, 0.15); border-color: rgba(255, 193, 7, 0.4); color: #7a5b00; }
+
+.form-select, .form-control { border-radius: 8px; border-color: var(--border); }
+.form-select:focus, .form-control:focus {
+  border-color: var(--primary-light);
+  box-shadow: 0 0 0 2px rgba(76, 194, 255, 0.25);
+}
+
+.list-group-item-action:hover { background: rgba(0, 113, 197, 0.06); }
+
+#previewBox, #chatBox { font-family: Consolas, "Courier New", monospace; }
+
+/* ===== Edit Skill modal (mirrors IntelAvatar Log Chatbot's
+   "Edit Skills Configuration" popup: chip-based keywords/exclusive,
+   description strength meter, numbered expert-rules list) ===== */
+.skill-modal-overlay {
+  display: none;
+  position: fixed;
+  inset: 0;
+  background: rgba(20, 26, 33, 0.55);
+  z-index: 1050;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+}
+.skill-modal-card {
+  background: #fff;
+  border-radius: 14px;
+  width: min(720px, 100%);
+  max-height: 88vh;
+  display: flex;
+  flex-direction: column;
+  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.35);
+  overflow: hidden;
+}
+.skill-modal-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 16px 20px;
+  border-bottom: 1px solid var(--border);
+  background: linear-gradient(135deg, var(--primary) 0%, var(--primary-light) 100%);
+  color: #fff;
+}
+.skill-modal-header h5 { color: #fff; }
+.skill-modal-heading { min-width: 0; overflow: hidden; }
+.skill-modal-heading h5 { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.skill-modal-subtitle {
+  color: rgba(255, 255, 255, 0.85);
+  font-size: 0.76rem;
+  margin-top: 2px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.skill-modal-close {
+  background: transparent;
+  border: none;
+  color: #fff;
+  font-size: 1.4rem;
+  line-height: 1;
+  opacity: 0.85;
+}
+.skill-modal-close:hover { opacity: 1; }
+.skill-modal-body {
+  padding: 18px 20px;
+  overflow-y: auto;
+}
+.skill-modal-footer {
+  display: flex;
+  gap: 10px;
+  justify-content: flex-end;
+  padding: 14px 20px;
+  border-top: 1px solid var(--border);
+  background: #fafbfc;
+}
+
+.desc-strength { height: 5px; border-radius: 3px; background: var(--border); overflow: hidden; }
+.desc-strength-bar { height: 100%; width: 0; transition: width 0.2s ease, background 0.2s ease; background: var(--bad); }
+.desc-strength-bar.weak { background: var(--bad); }
+.desc-strength-bar.fair { background: var(--warn); }
+.desc-strength-bar.good { background: var(--primary-light); }
+.desc-strength-bar.strong { background: var(--good); }
+
+.chip-box {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  min-height: 34px;
+  padding: 6px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg-soft);
+}
+.chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  background: #fff;
+  border: 1px solid var(--primary-light);
+  color: var(--primary-dark);
+  border-radius: 999px;
+  padding: 3px 6px 3px 10px;
+  font-size: 0.8rem;
+  font-weight: 500;
+}
+.chip-x {
+  background: transparent;
+  border: none;
+  color: var(--primary-dark);
+  opacity: 0.6;
+  font-size: 0.95rem;
+  line-height: 1;
+  padding: 0 2px;
+}
+.chip-x:hover { opacity: 1; color: var(--bad); }
+
+.rules-preamble { font-family: Consolas, "Courier New", monospace; font-size: 0.8rem; }
+
+.rules-list { display: flex; flex-direction: column; gap: 8px; }
+.rule-point {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  background: var(--bg-soft);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 8px;
+}
+.rule-badge {
+  flex: 0 0 auto;
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  background: var(--primary);
+  color: #fff;
+  font-size: 0.72rem;
+  font-weight: 700;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  margin-top: 3px;
+}
+.rule-text {
+  flex: 1 1 auto;
+  font-family: Consolas, "Courier New", monospace;
+  font-size: 0.78rem;
+}
+.rule-actions {
+  flex: 0 0 auto;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+.rule-actions .btn { padding: 0 6px; line-height: 1.6; }
+
+/* "Extend an existing skill" review aids — see skill_editor.js's `diff`
+   handling. Without these, saving over an existing skill looks like a
+   silent full overwrite instead of a reviewable addition. */
+.skm-diff-banner {
+  display: flex; align-items: flex-start; gap: 8px;
+  background: #fff8e8; border: 1px solid #f0dfa0; border-radius: 8px;
+  padding: 8px 10px; margin-bottom: 14px; font-size: 0.8rem; color: #6b5300;
+}
+.skm-diff-banner b { color: #4a3a00; }
+.chip.chip-new {
+  border-color: #2fa45a; background: #f1faf3; color: #1e7a40;
+}
+.chip.chip-new::before { content: "NEW "; font-size: 0.62rem; font-weight: 700; opacity: 0.85; }
+.rule-point.rule-point-new {
+  border-color: #2fa45a; background: #f1faf3;
+}
+.rule-point.rule-point-new .rule-badge { background: #2fa45a; }
+.rule-point-new-tag {
+  flex: 0 0 auto; align-self: flex-start; margin-top: 2px;
+  background: #2fa45a; color: #fff; border-radius: 999px;
+  font-size: 0.6rem; font-weight: 700; padding: 1px 6px;
+}
+
+.badge-exclude {
+  flex: 0 0 auto;
+  font-size: 0.6rem;
+  font-weight: 700;
+  color: #fff;
+  background: var(--bad);
+  border-radius: 3px;
+  padding: 0 4px;
+  letter-spacing: 0.03em;
+}
+.btn-remove-filter {
+  flex: 0 0 auto;
+  background: transparent;
+  border: none;
+  color: var(--text-muted);
+  font-size: 0.95rem;
+  line-height: 1;
+  padding: 0 3px;
+}
+.btn-remove-filter:hover { color: var(--bad); }
+
+/* ===== TAT-style Filtered Log pane: sticky line-number gutter + one
+   non-wrapping colored line per entry (horizontal scroll), matching
+   TextAnalysisTool.NET. ===== */
+.tat-log {
+  height: 48vh;
+  overflow: auto;
+  background: #fff;
+  font-family: Consolas, "Courier New", monospace;
+  font-size: 0.68rem;
+  line-height: 1.3;
+  /* Equal-width digits across every row (timestamps + line numbers) so the
+     columns line up even if Consolas isn't installed and a proportional font
+     is substituted. */
+  font-variant-numeric: tabular-nums;
+}
+.tat-log-row { display: flex; white-space: nowrap; }
+.tat-log-row:hover .tat-log-text { filter: brightness(0.94); }
+.tat-log-lineno {
+  position: sticky;
+  left: 0;
+  /* FIXED width (identical for every row) so the timestamp column starts at
+     the exact same x on every line — a min-width lets the gutter grow with the
+     digit count (4- vs 5- vs 6-digit line numbers) and drift the whole row.
+     --lineno-w is set per-render from the widest line number in the preview
+     (renderLogRows), in ch so it tracks the monospace digit advance. box-sizing
+     content-box keeps the padding out of that width. tabular-nums guarantees
+     equal-width digits even if Consolas falls back to a proportional font. */
+  flex: 0 0 auto;
+  box-sizing: content-box;
+  width: var(--lineno-w, 6ch);
+  font-variant-numeric: tabular-nums;
+  padding: 0 8px 0 6px;
+  text-align: right;
+  color: var(--text-muted);
+  background: var(--bg-soft);
+  border-right: 1px solid var(--border);
+  user-select: none;
+}
+/* flex-shrink:0 (not 1 1 auto) is the key fix here: with `white-space: pre`
+   content, a shrinkable flex item gets visually compressed/clipped to fit
+   the row instead of overflowing — which silently defeated the parent's
+   `overflow: auto` and made the pane look like it couldn't "expand
+   horizontally". Fixed width-by-content + no shrink lets long lines push
+   the row wider than the viewport, so the horizontal scrollbar takes over. */
+.tat-log-text { flex: 0 0 auto; padding: 0 8px; white-space: pre; }
+.tat-log-empty { padding: 12px; color: var(--text-muted); font-size: 0.85rem; }
+
+/* Fixed-width (ch-unit, so it lines up in the monospace font) columns for
+   the leading timestamp + up to 4 [bracket] fields of a log line — this is
+   what makes rows actually align like a table instead of each field
+   drifting based on its own content length (see formatLogLine() in the
+   page script). Longer-than-slot content is ellipsized, not wrapped, so one
+   long outlier can't break every other row's alignment. */
+.tat-col {
+  display: inline-block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  vertical-align: top;
+  padding-right: 6px;
+}
+/* 24ch covers the full "MM/DD/YYYY-HH:MM:SS.mmm" (23 chars) timestamp with a
+   hair of slack — anything narrower silently ellipsizes off the hour/minute,
+   which is the whole point of the column. Do not shrink this.
+   No color override here on purpose: the timestamp should read the same as
+   the rest of the line (inherits from .tat-log-text, which is what actually
+   carries the per-filter highlight color), not stand out with its own tint. */
+.tat-col-ts { width: 24ch; }
+.tat-col-id { width: 5ch; }
+.tat-col-mod { width: 15ch; }
+.tat-col-vis { width: 9ch; }
+.tat-col-fn { width: 26ch; }
+.tat-col-msg { white-space: pre; }
+
+/* A driver-log row the event panel jumped to — a brief highlight so the eye
+   lands on the time-matched line after clicking an event. */
+.tat-log-row.is-time-hit { background: #fff3bf !important; outline: 1px solid #f0c000; }
+
+/* ===== System Event Log panel (collapsible, above the driver log) ===== */
+.evt-section {
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-soft);
+}
+.evt-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 5px 10px;
+}
+.evt-toggle {
+  border: none;
+  background: transparent;
+  font-size: 0.8rem;
+  font-weight: 600;
+  cursor: pointer;
+  color: var(--text);
+  padding: 2px 4px;
+}
+.evt-toggle:disabled { color: var(--text-muted); cursor: default; }
+.evt-arrow { display: inline-block; transition: transform 0.15s; }
+.evt-arrow.open { transform: rotate(90deg); }
+.evt-status { flex: 1 1 auto; }
+.evt-pick { flex: 0 0 auto; }
+.evt-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  border-top: 1px solid var(--border);
+}
+.evt-count { margin-left: auto; }
+.evt-tz { color: #b8860b; }
+
+/* Log-pane header badge: this log's own lines had no date (BT's dateless HCI
+   export / WiFi's DDD export) — the DATE was synthesized (anchored on the
+   loaded System Event Log's earliest event, else file mtime); the time-of-day
+   itself is exact. */
+.date-synth-warn {
+  font-size: 0.65rem;
+  font-weight: 600;
+  color: #b8860b;
+  margin-left: 6px;
+}
+.evt-body {
+  max-height: 26vh;
+  overflow: auto;
+  background: #fff;
+}
+.evt-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-family: Consolas, "Courier New", monospace;
+  font-size: 0.7rem;
+  font-variant-numeric: tabular-nums;
+}
+.evt-table thead th {
+  position: sticky;
+  top: 0;
+  background: var(--bg-soft);
+  text-align: left;
+  padding: 4px 8px;
+  border-bottom: 1px solid var(--border);
+  font-weight: 700;
+  z-index: 1;
+}
+.evt-table td { padding: 3px 8px; border-bottom: 1px solid #f0f0f0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.evt-table tbody tr { cursor: pointer; }
+.evt-table tbody tr:hover { background: #eef4ff; }
+.evt-table tbody tr.is-active { background: #dbe9ff; box-shadow: inset 2px 0 0 var(--primary-dark); }
+.evt-msg { padding: 12px; text-align: center; color: var(--text-muted); font-size: 0.72rem; }
+.evt-msg-err { color: #dc2626; }
+.evt-hover-card {
+  position: fixed;
+  z-index: 3000;
+  max-width: 360px;
+  background: #fff;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  box-shadow: 0 6px 24px rgba(0, 0, 0, 0.18);
+  padding: 8px 10px;
+  font-size: 0.72rem;
+  pointer-events: none;
+}
+.evt-hover-card table { width: 100%; border-collapse: collapse; }
+.evt-hover-card th { text-align: left; color: var(--text-muted); font-weight: 600; padding: 2px 8px 2px 0; vertical-align: top; white-space: nowrap; }
+.evt-hover-card td { padding: 2px 0; word-break: break-word; }
+
+/* ===== Compact TAT-style filter table (Modifiers | Pattern | Hits) ===== */
+.tat-filter-table {
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  overflow: hidden;
+  font-size: 0.7rem;
+}
+.tat-filter-head,
+.tat-filter-row {
+  display: grid;
+  grid-template-columns: 44px 1fr 34px 16px;
+  align-items: center;
+}
+.tat-filter-head {
+  background: var(--bg-soft);
+  border-bottom: 1px solid var(--border);
+  font-weight: 600;
+  color: var(--text-muted);
+  font-size: 0.62rem;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
+.tat-filter-head span,
+.tat-filter-row > span { padding: 1px 3px; }
+.tat-filter-head .c-hit,
+.tat-filter-row .c-hit { text-align: right; font-weight: 600; }
+#filterList { max-height: 180px; overflow-y: auto; }
+.tat-filter-row { border-bottom: 1px solid #f0f2f4; line-height: 1.5; }
+.tat-filter-row:hover { background: rgba(0, 113, 197, 0.05); }
+.tat-filter-row .c-mod { display: flex; align-items: center; gap: 2px; }
+.tat-filter-row .c-mod input[type="checkbox"] { width: 12px; height: 12px; margin: 0; }
+.tat-filter-letter { color: var(--text-muted); font-family: Consolas, monospace; margin: 0; font-size: 0.66rem; }
+.tat-filter-pattern {
+  display: inline-block;
+  max-width: 100%;
+  padding: 0 4px;
+  border-radius: 3px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  vertical-align: middle;
+}
+.tat-filter-pattern.is-exclude { color: var(--text-muted); font-style: italic; }
+.tat-filter-empty { padding: 8px; color: var(--text-muted); font-size: 0.72rem; }
+
+/* Auto-detected WiFi vs Bluetooth domain badge, shown once a log is picked. */
+.domain-badge {
+  flex: 0 0 auto;
+  font-size: 0.65rem;
+  font-weight: 700;
+  padding: 2px 7px;
+  border-radius: 999px;
+  letter-spacing: 0.03em;
+}
+.domain-badge.domain-wifi { background: rgba(0, 113, 197, 0.12); color: var(--primary-dark); }
+.domain-badge.domain-bt   { background: rgba(75, 63, 156, 0.14); color: var(--accent-purple); }
+
+/* Conversation-mode toggle in the chat header — ON loads the existing
+   WiFi/BT skills as prior knowledge (interview + export cover only what's NEW
+   beyond them); OFF teaches from scratch. Governs the single Log Round button,
+   the live assessment, and Export. */
+.chat-mode-switch { white-space: nowrap; }
+.chat-mode-switch .form-check-input { cursor: pointer; }
+.chat-mode-switch .form-check-label { cursor: pointer; font-size: 0.72rem; }
+/* Blue when ON, to read as "prior knowledge engaged". */
+.chat-mode-switch .form-check-input:checked {
+  background-color: var(--primary-dark);
+  border-color: var(--primary-dark);
+}
+
+/* Session token-usage counter — the "small place" surfacing what things like
+   the operation-delta trimming and prompt caching actually save. */
+.token-badge {
+  font-size: 0.68rem;
+  font-weight: 600;
+  color: var(--text-muted);
+  background: var(--bg-soft);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 2px 8px;
+  white-space: nowrap;
+}
+
+/* Ask Questions / Converge toolbar — moved up to sit right under the chat
+   header (was a separate card below the chat, easy to miss/scroll past). */
+.chat-toolbar {
+  display: flex;
+  gap: 6px;
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--border);
+  background: #fff;
+}
+.chat-toolbar .btn { flex: 1 1 0; }
+
+/* Readiness score badge (sits between Log Round and Export Skill) — color
+   tracks the same low/mid/high bands as ROUND_SYS_PROMPT's readiness guide
+   in services/learning_service.py, so the UI band matches what the LLM meant. */
+.readiness-badge {
+  flex: 0 0 auto;
+  font-size: 0.68rem;
+  font-weight: 600;
+  border-radius: 999px;
+  padding: 2px 10px;
+  white-space: nowrap;
+  display: flex;
+  align-items: center;
+  border: 1px solid var(--border);
+  color: var(--text-muted);
+  background: var(--bg-soft);
+}
+.readiness-badge.is-low { color: #b02a37; background: #fdeaea; border-color: #f3c2c2; }
+.readiness-badge.is-mid { color: #8a6400; background: #fff6df; border-color: #f0dfa0; }
+.readiness-badge.is-high { color: #146c2e; background: #e7f7ec; border-color: #b9e6c6; }
+.readiness-badge { cursor: pointer; }
+
+/* Readiness / 防呆 details panel — collapsible, sits under the chat toolbar.
+   Coverage bars per skill-goal, still-missing gaps, and the claim-by-claim
+   verified-vs-asserted validation the export gate reads. */
+.chat-body-wrap {
+  position: relative;
+  flex: 1 1 auto;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.readiness-panel {
+  display: flex;
+  flex-direction: column;
+  flex: 0 1 auto;    /* can shrink if the card runs out of room, never grows past its own max-height */
+  /* A floor (not 0) so flexbox can't squeeze this away to nothing when the
+     card is short on space — chatBox has its own 220px floor below, and
+     without a matching one here the panel (not chatBox) always lost that
+     fight first, leaving it too short to show or scroll its content. */
+  min-height: 120px;
+  border-bottom: 1px solid var(--border);
+  background: #fbfcfe;
+  font-size: 0.72rem;
+  max-height: 34vh;
+}
+.readiness-panel-head {
+  display: flex; align-items: center; gap: 6px;
+  padding: 5px 10px; flex: 0 0 auto;
+  border-bottom: 1px solid #eef1f5;
+}
+.readiness-panel-title { font-weight: 700; font-size: 0.68rem; color: #444; text-transform: uppercase; letter-spacing: 0.03em; }
+.readiness-expand-btn {
+  margin-left: auto; border: 1px solid var(--border); background: #fff; color: #555;
+  border-radius: 5px; width: 22px; height: 22px; line-height: 1;
+  display: inline-flex; align-items: center; justify-content: center;
+  font-size: 0.68rem; cursor: pointer;
+}
+.readiness-expand-btn:hover { background: var(--bg-soft); }
+.readiness-body {
+  padding: 8px 10px; overflow-y: auto; flex: 1 1 auto; min-height: 0;
+  /* Keep wheel-scroll momentum contained to this box instead of leaking to
+     the chat/page once it hits the top or bottom edge — without this, a
+     scroll that runs out of room here can look like scrolling "didn't work". */
+  overscroll-behavior: contain;
+}
+
+/* Expanded mode: grow taller (more room to read a long claim-check list)
+   WITHOUT covering the chat — stays a normal flex sibling, so it just pushes
+   chatBox further down instead of overlaying on top of it. chatBox keeps its
+   own min-height floor (see #chatBox), and .card's overflow:hidden below is
+   the hard backstop so nothing can ever visually spill past the card again. */
+.readiness-panel.is-expanded { max-height: 58vh; min-height: 260px; }
+.readiness-panel.is-expanded .readiness-body { font-size: 0.78rem; }
+
+.readiness-empty { color: var(--text-muted); font-style: italic; }
+.readiness-h {
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  color: var(--text-muted);
+  font-size: 0.64rem;
+  margin: 8px 0 3px;
+}
+.readiness-cov { display: flex; flex-direction: column; gap: 3px; }
+.cov-row { display: flex; align-items: center; gap: 6px; }
+.cov-label { flex: 0 0 8.5rem; color: #444; }
+.cov-track { flex: 1 1 auto; height: 7px; background: #e9edf2; border-radius: 999px; overflow: hidden; }
+.cov-fill { display: block; height: 100%; border-radius: 999px; transition: width 0.35s ease; }
+.cov-fill.is-low { background: #d9534f; }
+.cov-fill.is-mid { background: #e0a800; }
+.cov-fill.is-high { background: #2fa45a; }
+.cov-pct { flex: 0 0 2.4rem; text-align: right; color: var(--text-muted); font-variant-numeric: tabular-nums; }
+.readiness-gaps { margin: 0; padding-left: 1.1rem; }
+.readiness-gaps li { margin-bottom: 2px; }
+.readiness-valid { display: flex; flex-direction: column; gap: 4px; }
+.valid-item { display: flex; gap: 6px; padding: 4px 6px; border-radius: 6px; border: 1px solid var(--border); }
+.valid-item.v-ok { background: #f1faf3; border-color: #cfe9d6; }
+.valid-item.v-warn { background: #fff8e8; border-color: #f0e0a8; }
+.valid-item.v-bad { background: #fdeef0; border-color: #f2c6cd; }
+.valid-icon { flex: 0 0 auto; }
+.valid-body { flex: 1 1 auto; min-width: 0; }
+.valid-claim { font-weight: 600; color: #333; }
+.valid-note { color: var(--text-muted); font-size: 0.68rem; }
+
+/* Operation journal (left panel under the filter table) — the edit-by-edit
+   record of what the engineer did, each with its measured effect + a place to
+   capture WHY. */
+.op-journal { border: 1px solid var(--border); border-radius: 6px; overflow: hidden; }
+.op-journal-head {
+  display: flex; align-items: center; gap: 6px;
+  padding: 5px 8px; cursor: pointer; user-select: none;
+  background: var(--bg-soft); font-size: 0.72rem; font-weight: 600; color: #444;
+}
+.op-journal-count {
+  background: #e5e9ef; color: #555; border-radius: 999px;
+  padding: 0 7px; font-size: 0.66rem; font-variant-numeric: tabular-nums;
+}
+.op-journal-why {
+  color: #8a6400; background: #fff6df; border: 1px solid #f0dfa0;
+  border-radius: 999px; padding: 0 7px; font-size: 0.64rem;
+}
+.op-journal-chev { margin-left: auto; color: var(--text-muted); font-size: 0.7rem; }
+.op-journal-list { max-height: 30vh; overflow-y: auto; padding: 4px; }
+.op-empty { color: var(--text-muted); font-style: italic; font-size: 0.72rem; padding: 4px; }
+.op-row {
+  padding: 4px 6px; border-radius: 5px; margin-bottom: 3px;
+  background: #f6f9fc; border-left: 3px solid #9cc3e6; font-size: 0.72rem;
+}
+.op-row.is-exclude { border-left-color: #e0a0a0; background: #fcf6f6; }
+.op-head { display: flex; align-items: baseline; gap: 5px; flex-wrap: wrap; }
+.op-seq { color: var(--text-muted); font-variant-numeric: tabular-nums; }
+.op-verb { color: #666; }
+.op-text { font-weight: 600; color: #222; word-break: break-word; }
+.op-effect { color: var(--text-muted); font-size: 0.66rem; margin-top: 1px; }
+.op-reason { margin-top: 2px; color: #2b5f34; }
+.op-reason-label { font-weight: 600; }
+.op-why-btn {
+  margin-top: 3px; border: 1px dashed #c8a24a; background: #fffdf5;
+  color: #8a6400; border-radius: 999px; padding: 1px 9px; font-size: 0.66rem; cursor: pointer;
+}
+.op-why-btn:hover { background: #fff6df; }
+.op-why-edit { border: none; background: none; color: var(--text-muted); cursor: pointer; padding: 0 4px; }
+.op-reason-box { display: flex; gap: 4px; margin-top: 4px; }
+.op-reason-box input { font-size: 0.72rem; }
+
+/* Small icon-only button (chat header "Steps" trigger) */
+.icon-btn {
+  border: 1px solid var(--border); background: #fff; color: #555;
+  border-radius: 6px; width: 26px; height: 26px; line-height: 1;
+  display: inline-flex; align-items: center; justify-content: center;
+  font-size: 0.78rem; cursor: pointer;
+}
+.icon-btn:hover { background: var(--bg-soft); }
+
+/* Passive red-flag question card — same card family as the interview
+   question cards, but visually distinct (amber) since it's a system-noticed
+   nudge, not something the engineer explicitly asked to be interviewed on. */
+.flag-card { border-color: #f0dfa0 !important; background: #fffdf5; }
+.flag-progress { color: #8a6400 !important; }
+
+/* Step viewer panel (chat header, collapsible) — read-only timeline of filter
+   edits; clicking one scrolls/highlights the chat messages around that edit. */
+.step-panel {
+  display: flex;
+  flex-direction: column;
+  flex: 0 1 auto;
+  /* Same floor as .readiness-panel — see that rule's comment for why this
+     can't be 0. */
+  min-height: 120px;
+  border-bottom: 1px solid var(--border);
+  background: #fbfcfe;
+  max-height: 26vh;
+}
+.step-panel-head {
+  display: flex; align-items: center; gap: 6px;
+  padding: 5px 8px; flex: 0 0 auto;
+  border-bottom: 1px solid #eef1f5;
+}
+.step-panel-title { font-weight: 700; font-size: 0.68rem; color: #444; text-transform: uppercase; letter-spacing: 0.03em; }
+.step-expand-btn {
+  margin-left: auto; border: 1px solid var(--border); background: #fff; color: #555;
+  border-radius: 5px; width: 22px; height: 22px; line-height: 1;
+  display: inline-flex; align-items: center; justify-content: center;
+  font-size: 0.68rem; cursor: pointer;
+}
+.step-expand-btn:hover { background: var(--bg-soft); }
+.step-body {
+  padding: 6px 8px; overflow-y: auto; flex: 1 1 auto; min-height: 0;
+  display: flex; flex-direction: column; gap: 3px;
+  overscroll-behavior: contain;
+}
+/* Expanded mode: same "grow in place, never cover chat" approach as
+   .readiness-panel.is-expanded — see that rule's comment for why. */
+.step-panel.is-expanded { max-height: 58vh; min-height: 260px; }
+.step-panel.is-expanded .step-item { font-size: 0.8rem; padding: 6px 9px; }
+.step-empty { color: var(--text-muted); font-style: italic; font-size: 0.72rem; }
+.step-item {
+  display: flex; align-items: center; gap: 6px; flex-wrap: wrap;
+  text-align: left; border: 1px solid var(--border); border-radius: 5px;
+  background: #fff; padding: 3px 7px; font-size: 0.72rem; cursor: pointer;
+}
+.step-item:hover { background: var(--bg-soft); }
+.step-item.is-exclude { border-left: 3px solid #e0a0a0; }
+.step-item:not(.is-exclude) { border-left: 3px solid #9cc3e6; }
+.step-seq { color: var(--text-muted); font-variant-numeric: tabular-nums; flex: 0 0 auto; }
+.step-text { flex: 1 1 auto; color: #333; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.step-effect { flex: 0 0 auto; color: var(--text-muted); font-size: 0.66rem; }
+.step-msgcount {
+  flex: 0 0 auto; background: #e5e9ef; color: #555; border-radius: 999px;
+  padding: 0 6px; font-size: 0.62rem;
+}
+.step-has-reason {
+  flex: 0 0 auto; color: #146c2e; font-size: 0.62rem; font-weight: 600;
+}
+/* Wraps a step-item (still the click-to-jump target) + its own 🎓 teach and
+   ❓ ask icons side by side — both stop propagation so clicking either never
+   also triggers the row's jump-to-chat behavior. */
+.step-row { display: flex; align-items: stretch; gap: 4px; }
+.step-row .step-item { flex: 1 1 auto; }
+.step-teach-btn, .step-ask-btn {
+  flex: 0 0 auto; border: 1px solid var(--border); background: #fff;
+  border-radius: 5px; width: 26px;
+  display: inline-flex; align-items: center; justify-content: center;
+  font-size: 0.72rem; cursor: pointer;
+}
+.step-teach-btn { color: #6a4fb8; }
+.step-teach-btn:hover { background: #f2eefc; }
+.step-ask-btn { color: var(--primary-dark); font-weight: 700; }
+.step-ask-btn:hover { background: rgba(0, 113, 197, 0.08); }
+.step-teach-btn:disabled, .step-ask-btn:disabled { opacity: 0.5; cursor: default; }
+/* Momentary highlight applied to chat bubbles when jumping to a step. */
+.step-highlight { animation: step-flash 1.8s ease-out; border-radius: 6px; }
+@keyframes step-flash {
+  0% { background: #fff3c4; }
+  100% { background: transparent; }
+}
+
+/* Compact inline "Log" label + status used in the top full-width Log File bar. */
+.tat-inline-label {
+  flex: 0 0 auto;
+  font-size: 0.72rem;
+  font-weight: 600;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
+.path-status-inline {
+  margin-top: 0;
+  white-space: nowrap;
+}
+
+/* ===== Compact path input (Log File / TAT File) — ported from IntelAvatar
+   Log Chatbot's sidebar "Log File" row: single-line input with an overlaid
+   copy icon + a small square browse button, instead of a big pill button
+   with the full path spelled out underneath. ===== */
+.path-input-group { display: flex; gap: 6px; }
+.path-input-wrap { position: relative; flex: 1 1 auto; display: flex; min-width: 0; }
+.path-input-wrap input {
+  padding-right: 26px;
+  font-size: 0.78rem;
+  text-overflow: ellipsis;
+}
+.path-input-copy {
+  position: absolute;
+  top: 50%;
+  right: 4px;
+  transform: translateY(-50%);
+  width: 20px;
+  height: 20px;
+  border: none;
+  background: transparent;
+  color: var(--text-muted);
+  font-size: 0.78rem;
+  line-height: 1;
+  padding: 0;
+  cursor: pointer;
+  opacity: 0.55;
+  border-radius: 4px;
+  transition: opacity 0.15s, background 0.15s, color 0.15s;
+}
+.path-input-copy:hover { opacity: 1; color: var(--primary); }
+.path-input-copy.copied { opacity: 1; color: var(--good); background: rgba(29, 184, 105, 0.12); }
+
+.btn-browse {
+  flex: 0 0 auto;
+  background: var(--bg-soft);
+  color: var(--text-main);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 0 10px;
+  font-size: 0.85rem;
+  cursor: pointer;
+}
+.btn-browse:hover { background: #e0e0e0; }
+
+.path-status {
+  margin-top: 6px;
+  font-size: 0.72rem;
+  padding: 3px 8px;
+  border-radius: 5px;
+  display: none;
+}
+.path-status.ok   { background: rgba(29, 184, 105, 0.12); color: #1a7a3e; display: block; }
+.path-status.warn { background: rgba(255, 193, 7, 0.15); color: #92600a; display: block; }
+
+/* ===== Chat message bubbles — two-color/side split so "who said this" is
+   unmistakable at a glance (see appendMsg in log_viewer.html): user messages
+   sit right-aligned in a primary-tinted bubble, assistant messages sit
+   left-aligned, white with a border. Each bubble optionally carries a
+   step-tag badge (#N or "All") showing which step (or general/session-wide
+   knowledge) it's about — set by the step-context selector for typed
+   messages, or automatically by step-scoped teach/ask/red-flag cards. ===== */
+.chat-row { display: flex; margin-bottom: 8px; }
+.chat-row-user { justify-content: flex-end; }
+.chat-row-assistant { justify-content: flex-start; }
+.chat-bubble {
+  max-width: 88%;
+  border-radius: 10px;
+  padding: 6px 10px;
+}
+.chat-bubble-user {
+  background: var(--primary);
+  color: #fff;
+}
+.chat-bubble-assistant {
+  background: #fff;
+  border: 1px solid var(--border);
+  color: var(--text-main);
+}
+.chat-bubble-meta {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 2px;
+}
+.chat-step-badge {
+  font-size: 0.6rem;
+  font-weight: 700;
+  padding: 1px 6px;
+  border-radius: 999px;
+  letter-spacing: 0.02em;
+  background: rgba(0, 113, 197, 0.14);
+  color: var(--primary-dark);
+}
+.chat-bubble-user .chat-step-badge {
+  background: rgba(255, 255, 255, 0.25);
+  color: #fff;
+}
+.chat-step-badge.is-all {
+  background: rgba(75, 63, 156, 0.14);
+  color: var(--accent-purple);
+}
+.chat-bubble-user .chat-step-badge.is-all { background: rgba(255, 255, 255, 0.25); color: #fff; }
+.chat-bubble-content { font-size: 0.82rem; line-height: 1.4; }
+.chat-bubble-user .chat-bubble-content { white-space: pre-wrap; word-break: break-word; }
+/* Markdown content inherits the surrounding text color instead of forcing
+   its own, so it reads correctly on both the white assistant bubble and (if
+   ever reused) a tinted one. */
+.chat-bubble-content.chat-md { color: inherit; }
+
+/* Step-context selector above the chat input — which step (or "All") the
+   NEXT typed message gets tagged with. See renderStepTagSelector. */
+.step-tag-selector {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-bottom: 6px;
+}
+.step-tag-pill {
+  border: 1px solid var(--border);
+  background: #fff;
+  color: var(--text-muted);
+  border-radius: 999px;
+  padding: 1px 9px;
+  font-size: 0.68rem;
+  font-weight: 600;
+  cursor: pointer;
+}
+.step-tag-pill:hover { border-color: var(--primary-light); }
+.step-tag-pill.is-active {
+  background: var(--primary);
+  border-color: var(--primary);
+  color: #fff;
+}
+
+/* ===== Chat message markdown-lite (headers/bold/code/lists) — see
+   renderMarkdownLite() in log_viewer.html. Kept compact since the chat
+   column itself is narrow. ===== */
+.chat-md { margin-top: 2px; overflow-wrap: break-word; word-break: break-word; }
+.chat-md > div { margin-bottom: 2px; }
+/* A long unbroken run (a compound identifier, a run-on sentence with no
+   spaces in the right place) used to force the whole page to scroll
+   horizontally instead of wrapping inside the chat bubble — this is the
+   actual fix for that; the table rule below handles the specific pipe-table
+   case, this catches everything else. */
+.chat-md, .chat-md * { max-width: 100%; }
+.chat-md-h1, .chat-md-h2, .chat-md-h3 {
+  font-weight: 700;
+  color: var(--primary-dark);
+  margin: 8px 0 4px;
+}
+.chat-md-h1 { font-size: 0.95rem; }
+.chat-md-h2 { font-size: 0.88rem; }
+.chat-md-h3 { font-size: 0.84rem; }
+.chat-md-list { margin: 2px 0 6px; padding-left: 1.3em; }
+.chat-md-list li { margin-bottom: 2px; }
+.chat-md-hr { border: none; border-top: 1px solid var(--border); margin: 8px 0; }
+.chat-md-gap { height: 4px; }
+.chat-md code {
+  background: rgba(0, 113, 197, 0.08);
+  color: var(--primary-dark);
+  padding: 1px 4px;
+  border-radius: 3px;
+  font-size: 0.85em;
+  word-break: break-all;
+}
+/* Markdown pipe-tables (see renderMarkdownLite's table branch). The wrap div
+   scrolls horizontally ON ITS OWN when a table is genuinely wide — that
+   containment is what stops a table from blowing out the whole page (the
+   actual bug being fixed here), while still letting wide tables exist. */
+.chat-md-table-wrap { overflow-x: auto; margin: 4px 0 8px; max-width: 100%; }
+.chat-md-table { border-collapse: collapse; font-size: 0.78em; white-space: nowrap; }
+.chat-md-table th, .chat-md-table td {
+  border: 1px solid var(--border);
+  padding: 3px 7px;
+  text-align: left;
+}
+.chat-md-table thead th {
+  background: var(--bg-soft);
+  font-weight: 700;
+  color: #444;
+}
+.path-status.err  { background: rgba(217, 72, 72, 0.12); color: var(--bad); display: block; }
+
+/* ===== Interactive question cards in the skill-building chat — clickable
+   options (auto-derived by the LLM from the operation delta/stats) plus an
+   always-available custom-answer fallback, same interaction shape as
+   Claude's own AskUserQuestion. See renderQuestionCards() in log_viewer.html. ===== */
+.chat-question-card {
+  background: #fff;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 8px;
+}
+.chat-q-progress { font-size: 0.68rem; color: var(--text-muted); font-weight: 600; text-transform: uppercase; letter-spacing: 0.03em; margin-bottom: 3px; }
+.chat-q-text { font-size: 0.82rem; font-weight: 600; margin-bottom: 8px; }
+/* Left-aligned bordered rows, stacked — not the previous horizontally-wrapped
+   centered pill/bubble buttons, which read as messy and didn't align. */
+.chat-q-opts { display: flex; flex-direction: column; gap: 6px; margin-bottom: 6px; }
+.chat-q-opt {
+  display: block;
+  width: 100%;
+  text-align: left;
+  background: #fff;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 7px 10px;
+  font-size: 0.78rem;
+  font-weight: 500;
+  color: var(--text-main);
+  cursor: pointer;
+  transition: border-color 0.15s, background 0.15s;
+}
+.chat-q-opt:hover { border-color: var(--primary); background: rgba(0, 113, 197, 0.06); }
+.chat-q-opt-other { border-style: dashed; color: var(--text-muted); font-style: italic; }
+.chat-q-opt-other:hover { color: var(--primary-dark); }
+.chat-q-opt-other:hover { background: var(--bg-soft); }
+.chat-q-custom { display: flex; gap: 5px; }
+.chat-q-custom input { font-size: 0.78rem; }
+
+/* "Teach this step" — user-led explain box (see openStepExplainBox): the
+   engineer writes what they noticed + the problem BEFORE any LLM call runs.
+   Purple accent (vs the amber flag-card / blue question-card) marks it as a
+   deliberately-opened teaching action, not a passive notice or an
+   LLM-initiated question. */
+.step-explain-card { border-color: #d9cdf0 !important; background: #fbfaff; }
+.step-explain-input { width: 100%; resize: vertical; margin-bottom: 8px; font-size: 0.8rem; }
+.step-explain-actions { display: flex; gap: 6px; }
+
+/* The LLM's response: a condensed knowledge-core statement for the engineer
+   to confirm, plus its own expert_note (a second opinion) and an optional
+   follow-up — see renderStepConfirmCard. Green accent reads as "ready to
+   confirm", distinct from the purple input card above it. */
+.step-confirm-card { border-color: #b9e6c6 !important; background: #f6fdf8; }
+.step-confirm-core { font-size: 0.86rem; font-weight: 600; color: var(--text-main); margin-bottom: 6px; }
+.step-confirm-note, .step-confirm-followup { font-size: 0.76rem; color: var(--text-muted); margin-bottom: 6px; line-height: 1.4; }
+.step-confirm-note-label { font-weight: 600; color: #444; }
+
+/* "Ask about this step" — the LLM-LED counterpart, always skippable (see
+   askStepQuestion/renderStepAskCard). Blue accent matches the general
+   question-card family it reuses the option/custom-answer layout from. */
+.step-ask-card { border-color: #b7d9f5 !important; background: #f5faff; }
+.step-ask-skip-row { display: flex; justify-content: flex-end; margin-top: 4px; }

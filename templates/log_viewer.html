@@ -1,0 +1,1988 @@
+{% extends "base.html" %}
+{% block content %}
+{% if not llm_ready %}
+<div class="alert alert-warning py-2 mb-3">
+  <i class="fas fa-exclamation-triangle"></i> LLM is not configured yet — Chat and Teach This Scenario will be
+  unavailable until the corporate share's <code>keys.py</code> is reachable, or you create
+  <code>configs/keys_local.py</code> (same schema as your key.py), then restart the app.
+</div>
+{% endif %}
+<div class="row g-2">
+  <!-- Row 1: compact Log File bar, full width -->
+  <div class="col-12">
+    <div class="card">
+      <div class="card-body p-2 d-flex align-items-center gap-2">
+        <span class="tat-inline-label"><i class="fas fa-file-alt"></i> Log</span>
+        <div class="path-input-group flex-grow-1">
+          <div class="path-input-wrap">
+            <input id="logPathInput" type="text" class="form-control form-control-sm" readonly
+                   placeholder="No log file selected" value="{{ state.log_path }}">
+            <button type="button" class="path-input-copy" onclick="copyPath('logPathInput', this)" title="Copy log path" aria-label="Copy log path">📋</button>
+          </div>
+          <button type="button" class="btn-browse" onclick="pickLog()" title="Browse for file">📁</button>
+        </div>
+        <span id="logStatus" class="path-status path-status-inline"></span>
+      </div>
+    </div>
+  </div>
+
+  <!-- Row 2: Filtered Log, full width so it has real room to scroll horizontally -->
+  <div class="col-12">
+    <div class="card">
+      <!-- Collapsible System Event Log (BT captures only) — sits ABOVE the log
+           rows. Each event row click-syncs to the nearest driver-log line by
+           timestamp (and clicking a log line highlights the nearest event).
+           Hidden entirely for WiFi/no-event-log; the "pick" button lets the
+           engineer load one manually when auto-discovery found nothing. -->
+      <div id="evtSection" class="evt-section" style="display:none;">
+        <div class="evt-head">
+          <button id="evtToggleBtn" type="button" class="evt-toggle" onclick="toggleEvtPanel()" disabled
+                  title="System Event Log — click an event to jump the log below to that time">
+            📋 System Event Log <span id="evtArrow" class="evt-arrow">▸</span>
+          </button>
+          <span id="evtStatus" class="evt-status small text-muted"></span>
+          <button type="button" class="btn btn-sm btn-outline-secondary evt-pick" onclick="pickEventLog()"
+                  title="Choose a System Event Log (.evtx/.evt) manually">📁 Event log</button>
+        </div>
+        <div id="evtPanel" class="evt-panel" style="display:none;">
+          <div class="evt-toolbar">
+            <select id="evtSourceFilter" class="form-select form-select-sm w-auto" onchange="evtFilterChanged()">
+              <option value="pci_bt">pci_bt</option>
+              <option value="usb_bt">usb_bt</option>
+              <option value="pci_bt_wifi">pci+wifi</option>
+              <option value="usb_bt_wifi">usb+wifi</option>
+              <option value="all" selected>All</option>
+            </select>
+            <select id="evtLevelFilter" class="form-select form-select-sm w-auto" onchange="evtFilterChanged()">
+              <option value="all">All</option>
+              <option value="warning_error" selected>Warn+Err</option>
+              <option value="information">Info</option>
+            </select>
+            <span id="evtCount" class="evt-count small text-muted"></span>
+            <span class="evt-tz small text-muted" title="Event times are UTC; the driver log below is customer-local, so the jump lands on the nearest line and may be offset by the capture's timezone.">⚠ times are UTC</span>
+          </div>
+          <div id="evtBody" class="evt-body"></div>
+        </div>
+      </div>
+      <!-- Hover card with the full event detail (fixed-position). -->
+      <div id="evtHoverCard" class="evt-hover-card" style="display:none;"></div>
+
+      <div class="card-header py-1 d-flex justify-content-between align-items-center">
+        <span>
+          <span id="logPaneTitle">Log</span> (<span id="matchCount">0</span> of <span id="totalLines">0</span>)
+          <span id="dateSynthWarn" class="date-synth-warn" style="display:none;" title="This log's own lines carry a time-of-day but no date (BT's dateless HCI export / WiFi's DDD export) — the date shown was estimated from the loaded System Event Log's earliest event, or the file's own save time if no event log is loaded. Only the DATE is a guess; the time-of-day is exact.">⚠ date estimated</span>
+        </span>
+        <span id="statsSummary" class="small text-muted"></span>
+      </div>
+      <div id="previewBox" class="tat-log"></div>
+    </div>
+  </div>
+
+  <!-- Row 3: TAT Filter table and Skill-building chat side by side, same row -->
+  <div class="col-lg-5">
+    <div class="card">
+      <div class="card-header py-1"><i class="fas fa-filter"></i> TAT Filter (TextAnalysisTool.NET)</div>
+      <div class="card-body p-2">
+        <div class="path-input-group">
+          <div class="path-input-wrap">
+            <input id="tatPathInput" type="text" class="form-control form-control-sm" readonly
+                   placeholder="No .tat file selected" value="{{ state.tat_path }}">
+            <button type="button" class="path-input-copy" onclick="copyPath('tatPathInput', this)" title="Copy .tat path" aria-label="Copy .tat path">📋</button>
+          </div>
+          <button type="button" class="btn-browse" onclick="pickTat()" title="Browse for .tat file">📁</button>
+        </div>
+        <div id="tatStatus" class="path-status"></div>
+
+        <div class="d-flex align-items-center gap-2 flex-wrap mt-1">
+          <span id="domainBadge" class="domain-badge" style="display:none;"></span>
+          <select id="skillSelect" class="form-select form-select-sm w-auto" data-busy-lock onchange="loadSkill(this.value)"
+                  title="Loading a different skill is locked while any other action is in flight — it only ever changes from a deliberate click.">
+            <option value="">-- or load a learned skill --</option>
+            {% for key, sk in skills.items() %}
+            <option value="{{ key }}" {{ 'selected' if key == state.active_skill_key else '' }}>{{ sk.name }}</option>
+            {% endfor %}
+          </select>
+          <button class="btn btn-sm btn-outline-primary" id="viewSkillBtn" onclick="viewCurrentSkill()" {{ 'disabled' if not state.active_skill_key else '' }}>
+            <i class="fas fa-brain"></i> View Current Skill
+          </button>
+          <div class="ms-auto">
+            <button class="btn btn-sm btn-outline-secondary" onclick="selectAllFilters(true)">All</button>
+            <button class="btn btn-sm btn-outline-secondary" onclick="selectAllFilters(false)">None</button>
+          </div>
+        </div>
+
+        <div class="tat-filter-table mt-1">
+          <div class="tat-filter-head">
+            <span class="c-mod">Mod</span>
+            <span class="c-pat">Pattern (<span id="filterCount">0</span> enabled)</span>
+            <span class="c-hit">Hits</span>
+            <span class="c-del"></span>
+          </div>
+          <div id="filterList"></div>
+        </div>
+
+        <div class="input-group input-group-sm mt-1">
+          <input id="newFilterText" class="form-control" placeholder="Add a filter keyword...">
+          <select id="newFilterType" class="form-select" style="max-width:100px;">
+            <option value="include">Include</option>
+            <option value="exclude">Exclude</option>
+          </select>
+          <button class="btn btn-outline-secondary" onclick="addFilter()"><i class="fas fa-plus"></i></button>
+        </div>
+
+        <!-- Operation journal: the edit-by-edit history of what the engineer
+             did to the filter, each with its measured effect. Un-explained
+             material edits get a "why?" prompt so the reasoning (the real
+             skill) is captured, not just the final keyword list. -->
+        <div class="op-journal mt-2">
+          <div class="op-journal-head" onclick="toggleOpJournal()">
+            <i class="fas fa-list-ol"></i> Operation journal
+            <span id="opJournalCount" class="op-journal-count">0</span>
+            <span id="opJournalWhy" class="op-journal-why" style="display:none;"></span>
+            <i class="fas fa-chevron-down op-journal-chev"></i>
+          </div>
+          <div id="opJournalList" class="op-journal-list" style="display:none;"></div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Skill-building chat — aligned with the TAT Filter card above, wider since this is where the actual work happens -->
+  <div class="col-lg-7">
+    <div class="card" style="min-height:64vh; max-height:84vh; display:flex; flex-direction:column; overflow:hidden;">
+      <div class="card-header py-1 d-flex justify-content-between align-items-center">
+        <span class="d-flex align-items-center gap-2">
+          <span><i class="fas fa-comments"></i> Skill-building chat</span>
+          <!-- Conversation-mode toggle: ON = load the existing WiFi/BT skills
+               as prior knowledge, so the interview + export only cover what's
+               NEW beyond them (no overlapping questions). OFF = teach from
+               scratch, no prior skill consulted. The single Log Round button,
+               the live assessment, and Export all follow this switch. -->
+          <span class="form-check form-switch chat-mode-switch m-0 ms-2" title="ON = load existing WiFi/BT skills as prior knowledge (the interview only asks about what's NEW beyond them, and export stays non-overlapping). OFF = teach from scratch, no prior skill consulted.">
+            <input class="form-check-input" type="checkbox" role="switch" id="priorToggle" onchange="onPriorToggle()">
+            <label class="form-check-label small text-muted" for="priorToggle" id="priorToggleLabel">Load skills</label>
+          </span>
+        </span>
+        <span class="d-flex align-items-center gap-2">
+          <span id="tokenBadge" class="token-badge" title="LLM token usage this session">🪙 0</span>
+          <button id="stepsBtn" type="button" class="icon-btn" onclick="toggleStepPanel()" title="Steps — jump to what was asked/said around a specific filter edit (read-only, doesn't ask anything new)">
+            <i class="fas fa-map-signs"></i>
+          </button>
+          <button class="btn btn-sm btn-outline-secondary" onclick="resetChat()">Clear</button>
+        </span>
+      </div>
+      <div class="chat-toolbar">
+        <!-- Single Log Round button — the CONVERSATION MODE (teach from scratch
+             vs. load existing WiFi/BT skills as prior knowledge) is chosen by
+             the toggle in the header above. This round, the live readiness
+             scoring, and Export all follow that toggle. -->
+        <button id="logRoundBtn" class="btn btn-outline-success btn-sm" data-busy-lock onclick="logFilterRound()" title="Submit the current filter as a round of evidence — analyzes it, asks follow-up questions, and updates the readiness score. Change the filter and click again to log another round; or just keep chatting below. Uses the prior-knowledge toggle in the header.">
+          <i class="fas fa-flag-checkered"></i> Log Round &amp; Analyze
+        </button>
+        <button id="readinessBadge" type="button" class="readiness-badge" onclick="toggleReadinessPanel()" title="Readiness updates after every answer — click for the breakdown of what's covered and what's still missing">🎯 Readiness —</button>
+        <button id="exportSkillBtn" class="btn btn-success btn-sm" data-busy-lock onclick="exportSkill()" title="Turn the rounds + chat so far into reusable skill(s) — follows the prior-knowledge toggle in the header. Splits into multiple skills if the chat spans different knowledge domains; always creates brand-new skills.">
+          <i class="fas fa-file-export"></i> Export Skill
+        </button>
+      </div>
+      <!-- chat-body-wrap: the steps/readiness panels and chatBox are flex
+           siblings here — "expand" just grows a panel's max-height, pushing
+           chatBox further down (never covering it); .card's overflow:hidden
+           is the hard backstop if content ever exceeds available room. -->
+      <div class="chat-body-wrap">
+        <!-- Steps viewer: a read-only timeline of filter edits; clicking one
+             scrolls the chat to whatever was asked/said around that moment —
+             like clicking back through a GPT conversation's checkpoints.
+             Never sends anything, purely navigational. Has its own
+             expand/shrink toggle, same as the readiness panel below. -->
+        <div id="stepPanel" class="step-panel" style="display:none;"></div>
+        <!-- Readiness details: coverage per goal + what's still missing +
+             claim-by-claim verified/asserted validation. Collapsed by
+             default, refreshed after every chat answer (see
+             refreshAssessment()). Has its own expand/shrink toggle to
+             overlay the chat when there's a lot to review. -->
+        <div id="readinessPanel" class="readiness-panel" style="display:none;"></div>
+        <div id="chatBox" class="p-2 flex-grow-1" style="overflow-y:auto; background:#f8f9fa; font-size:0.82rem; min-height:220px;"></div>
+        <div class="card-footer p-2">
+          <!-- Which step (or "All") the next typed message gets tagged with —
+               see renderStepTagSelector/currentStepTag. Step-scoped cards
+               (teach/ask/red-flag) tag their own messages directly and don't
+               touch this. -->
+          <div id="stepTagSelector" class="step-tag-selector"></div>
+          <div class="input-group input-group-sm">
+            <input id="chatInput" class="form-control" data-busy-lock placeholder="Answer / ask…" onkeypress="if(event.key==='Enter') sendMsg();">
+            <button id="chatSendBtn" class="btn btn-primary" data-busy-lock onclick="sendMsg()"><i class="fas fa-paper-plane"></i></button>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+let filterData = {{ state.filters|tojson }};
+let operationData = {{ (state.operations or [])|tojson }};
+let activeSkillKey = {{ (state.active_skill_key or '')|tojson }};
+let currentQuestions = [];
+let currentDraft = null;
+
+// Global "one async action at a time" lock — every control that triggers an
+// LLM call or a state-mutating fetch (Log Round, Export Skill, chat send,
+// step teach/ask, and the skill-select dropdown) is disabled while ANY of
+// them is in flight. This is what stops a stray click mid-request from
+// racing another action — the load-skill dropdown in particular must never
+// change except from a deliberate, isolated user click while nothing else is
+// busy. Elements opt in via the `data-busy-lock` attribute; dynamically
+// created buttons (step teach/ask icons) also check isBusy() at creation time
+// so a re-render mid-request doesn't hand out a fresh enabled button.
+let _busy = false;
+function isBusy() { return _busy; }
+function setBusy(v) {
+    _busy = v;
+    document.querySelectorAll('[data-busy-lock]').forEach(elx => { elx.disabled = v; });
+}
+
+// Which step (or "all" for general/session-wide knowledge) the NEXT typed
+// chat message gets tagged with — set by the step-context pill row above the
+// chat input (see renderStepTagSelector). Step-scoped interactions (teach/ask
+// cards) tag their own messages directly with that step's seq, ignoring this.
+let currentStepTag = 'all';
+
+function escapeHtml(s) {
+    const div = document.createElement('div');
+    div.textContent = s;
+    return div.innerHTML;
+}
+
+// Parse the leading timestamp + up to 4 consecutive [bracketed] fields into
+// FIXED-WIDTH (ch-unit, monospace) columns so rows actually line up like a
+// table — margin-based spacing (the previous approach) can't do this,
+// because "[3]" and "[19]" are different widths, so everything after them
+// drifts out of alignment row to row. Longer-than-slot values are ellipsized
+// rather than breaking the grid. Only the run of brackets immediately after
+// the timestamp is treated as fields; anything after that (including
+// brackets that are part of the free-form message) is left as plain text.
+//
+// Always emits all 5 leading slots (timestamp + 4 tag slots), even when a
+// line has none of them — e.g. a hex-dump/continuation line that wraps under
+// a timestamped line above it. Without this, such lines would have nothing
+// to push their text right, so it'd start flush under the line-number
+// gutter instead of lining up under the *message* column like a real
+// continuation should.
+function formatLogLine(rawText) {
+    const tsMatch = rawText.match(/^(\d{2}\/\d{2}\/\d{4}-\d{2}:\d{2}:\d{2}\.\d{3})\s*/);
+    let rest = rawText;
+    let tsText = '';
+    if (tsMatch) {
+        tsText = tsMatch[1];
+        rest = rawText.slice(tsMatch[0].length);
+    }
+    let tags = [];
+    const tagRun = rest.match(/^((?:\[[^\[\]]*\]\s*){1,4})/);
+    if (tagRun) {
+        tags = tagRun[0].match(/\[[^\[\]]*\]/g) || [];
+        rest = rest.slice(tagRun[0].length);
+    }
+    const slotClasses = ['tat-col-id', 'tat-col-mod', 'tat-col-vis', 'tat-col-fn'];
+    let html = `<span class="tat-col tat-col-ts">${escapeHtml(tsText)}</span>`;
+    for (let i = 0; i < slotClasses.length; i++) {
+        html += `<span class="tat-col ${slotClasses[i]}">${escapeHtml(tags[i] || '')}</span>`;
+    }
+    html += `<span class="tat-col-msg">${escapeHtml(rest)}</span>`;
+    return html;
+}
+
+// Spreadsheet-style letter labels a, b, ... z, aa, ab, ... (TAT "Modifiers" column).
+function letterLabel(n) {
+    let s = '';
+    do { s = String.fromCharCode(97 + (n % 26)) + s; n = Math.floor(n / 26) - 1; } while (n >= 0);
+    return s;
+}
+
+function renderFilters() {
+    const box = document.getElementById('filterList');
+    if (!filterData.length) {
+        box.innerHTML = '<div class="tat-filter-empty">No .tat file or skill loaded yet</div>';
+        document.getElementById('filterCount').textContent = 0;
+        return;
+    }
+    let html = '';
+    let enabledCount = 0;
+    filterData.forEach((f, i) => {
+        if (f.enabled) enabledCount++;
+        // Pattern cell painted with the filter's own colors (same colors that
+        // highlight the matching log lines above), exactly like TAT's filter panel.
+        let patStyle = '';
+        if (f.back_color) patStyle += `background:${f.back_color};`;
+        if (f.fore_color) patStyle += `color:${f.fore_color};`;
+        const patClass = 'tat-filter-pattern' + (f.excluding ? ' is-exclude' : '');
+        const badge = f.excluding ? '<span class="badge-exclude">EXCL</span> ' : '';
+        const hits = (f.hits !== undefined) ? f.hits : '';
+        html += `<div class="tat-filter-row">
+            <span class="c-mod"><input type="checkbox" id="f_${i}" ${f.enabled ? 'checked' : ''} onchange="toggleFilter(${i}, this.checked)"><label for="f_${i}" class="tat-filter-letter">${letterLabel(i)}</label></span>
+            <span class="c-pat"><span class="${patClass}" style="${patStyle}">${badge}${escapeHtml(f.text)}</span></span>
+            <span class="c-hit">${hits}</span>
+            <span class="c-del"><button class="btn-remove-filter" onclick="removeFilter(${i})" title="Remove">&times;</button></span>
+        </div>`;
+    });
+    box.innerHTML = html;
+    document.getElementById('filterCount').textContent = enabledCount;
+}
+
+// ---- Operation journal (left panel) -------------------------------------
+// Every filter edit the engineer makes is recorded server-side with its
+// marginal effect; this renders that timeline and lets them annotate WHY —
+// the reasoning that turns a keyword list into a real skill.
+function syncOps(d) {
+    if (d && d.operations) {
+        operationData = d.operations;
+        renderOperations();
+        surfaceRedFlags();
+        renderStepPanel();
+        renderStepTagSelector();
+    }
+}
+
+// Pill row above the chat input: which step (or "All" for general/session-
+// wide knowledge) the NEXT typed message gets tagged with — see
+// currentStepTag / sendMsg. Step-scoped cards (teach/ask/red-flag) tag their
+// own messages directly and ignore this; it's only for the free-typed box.
+function renderStepTagSelector() {
+    const box = document.getElementById('stepTagSelector');
+    if (!box) return;
+    // If the previously-selected step no longer exists for some reason, fall
+    // back to "all" rather than silently tagging future messages with a
+    // dangling reference.
+    if (currentStepTag !== 'all' && !operationData.some(o => o.seq === currentStepTag)) {
+        currentStepTag = 'all';
+    }
+    box.innerHTML = '';
+    const mkPill = (tag, label, title) => {
+        const b = el('button', 'step-tag-pill' + (currentStepTag === tag ? ' is-active' : ''), label);
+        b.type = 'button';
+        if (title) b.title = title;
+        b.onclick = () => { currentStepTag = tag; renderStepTagSelector(); };
+        return b;
+    };
+    box.appendChild(mkPill('all', 'All', 'Tag the next message as general / session-wide knowledge'));
+    operationData.forEach(o => {
+        if (o.action === 'load_skill' || o.action === 'load_tat') return;
+        box.appendChild(mkPill(o.seq, '#' + o.seq, `Tag the next message as about step #${o.seq} (${o.verb} "${o.label || o.text}")`));
+    });
+}
+
+// ---- Passive red-flag questions ------------------------------------------
+// detect_red_flags() on the server is a deterministic (NO LLM) check that
+// runs on every filter apply — a redundant keyword, a no-op exclude, a big
+// unexplained drop, disabling something load-bearing. This surfaces those as
+// an unprompted question card in chat, same interaction as an interview
+// question but costing zero tokens and firing instantly. Each flag fires
+// once (tracked by "seq:type" so re-syncing the same op list doesn't repeat it).
+const _shownFlags = new Set();
+function surfaceRedFlags() {
+    operationData.forEach(o => {
+        (o.red_flags || []).forEach(flag => {
+            const key = o.seq + ':' + flag.type;
+            if (_shownFlags.has(key)) return;
+            _shownFlags.add(key);
+            showRedFlagCard(o.seq, flag.question);
+        });
+    });
+}
+
+// Renders a chat card whose answer ties back to a SPECIFIC operation's
+// `reason` (via /log_viewer/answer_red_flag, seq+question+answer -> that
+// op's journal reason) — shared by two triggers with different framing:
+//   - the passive red-flag detector (opts omitted): "noticed something"
+//   - the active per-step "🎓 teach" button (opts.badge/opts.icon set):
+//     the engineer explicitly asked to explain this step
+// Either way the underlying mechanic is identical: recording the answer as
+// THAT operation's reason is what makes the Operation journal's "why"
+// indicator update for the right row, and what feeds compact()'s per-edit
+// reason into skill synthesis instead of the answer floating free in chat.
+function showRedFlagCard(seq, question, opts) {
+    opts = opts || {};
+    const badgeText = opts.badge || '🚩 Noticed something — not asked, just flagged';
+    const prefix = opts.icon || '🚩 ';
+    const box = document.getElementById('chatBox');
+    const card = el('div', 'chat-question-card flag-card mb-2');
+    const badge = el('div', 'chat-q-progress flag-progress', badgeText);
+    card.appendChild(badge);
+    card.appendChild(el('div', 'chat-q-text', question));
+
+    const customBox = el('div', 'chat-q-custom');
+    const input = document.createElement('input');
+    input.type = 'text';
+    input.className = 'form-control form-control-sm';
+    input.placeholder = 'Type your answer… (or Dismiss if not relevant)';
+    const sendBtn = el('button', 'btn btn-sm btn-primary');
+    sendBtn.innerHTML = '<i class="fas fa-paper-plane"></i>';
+    const dismissBtn = el('button', 'btn btn-sm btn-outline-secondary', 'Dismiss');
+
+    const submit = (answer) => {
+        if (isBusy()) return;
+        setBusy(true);
+        card.remove();
+        appendMsg('assistant', prefix + question, seq);
+        appendMsg('user', answer, seq);
+        fetch("{{ url_for('log_viewer.answer_red_flag') }}", {
+            method: 'POST', headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({seq: seq, question: question, answer: answer})
+        }).then(r => r.json()).then(d => {
+            setBusy(false);
+            syncOpsQuiet(d); // reason now recorded server-side
+            if (opts.afterSubmit) opts.afterSubmit();
+        }).catch(() => setBusy(false));
+    };
+    input.onkeypress = (e) => { if (e.key === 'Enter' && input.value.trim()) submit(input.value.trim()); };
+    sendBtn.onclick = () => { if (input.value.trim()) submit(input.value.trim()); };
+    dismissBtn.onclick = () => { card.remove(); if (opts.afterSubmit) opts.afterSubmit(); };
+
+    customBox.appendChild(input);
+    customBox.appendChild(sendBtn);
+    customBox.appendChild(dismissBtn);
+    card.appendChild(customBox);
+    box.appendChild(card);
+    box.scrollTop = box.scrollHeight;
+}
+
+// Same as syncOps but skips re-triggering red-flag surfacing / step render —
+// used after answer_red_flag's own response, which only carries the reason
+// update (no new flags to show, panel already reflects the just-answered one).
+function syncOpsQuiet(d) {
+    if (d && d.operations) { operationData = d.operations; renderOperations(); }
+}
+
+// ---- Step viewer -----------------------------------------------------------
+// Read-only timeline: click a step (a filter edit) to jump the chat scroll to
+// whatever was asked/said around that moment. Uses each operation's
+// chat_index (how many chat messages existed at the moment it was recorded)
+// to slice chatHistoryMirror — never sends anything, never asks a new question.
+function toggleStepPanel() {
+    const p = document.getElementById('stepPanel');
+    const opening = (p.style.display === 'none' || !p.style.display);
+    // Only one of {steps, readiness} panel open at a time — both open
+    // together can push the chat card past its max-height and squeeze the
+    // conversation itself, which is exactly what looked "broken" here.
+    if (opening) {
+        const rp = document.getElementById('readinessPanel');
+        rp.style.display = 'none';
+        rp.classList.remove('is-expanded');
+    }
+    // 'flex', not 'block' — the panel's CSS is display:flex (head + scrolling
+    // body); an inline style="display:block" would override that class rule
+    // (inline beats a class selector) and silently break the whole flex/
+    // min-height:0/overflow-y:auto clipping chain, letting content spill
+    // straight past max-height instead of scrolling inside its own box.
+    p.style.display = opening ? 'flex' : 'none';
+    if (!opening) p.classList.remove('is-expanded');
+    if (opening) renderStepPanel();
+}
+
+// Grow the step list's max-height (same mechanism as the readiness panel —
+// see .step-panel.is-expanded) so a long history of edits is actually
+// browsable instead of scrolling a 26vh strip. Never covers the chat — it
+// stays a normal flex sibling and just pushes chatBox further down.
+function toggleStepExpand() {
+    document.getElementById('stepPanel').classList.toggle('is-expanded');
+    renderStepPanel();
+}
+
+function renderStepPanel() {
+    const panel = document.getElementById('stepPanel');
+    if (panel.style.display === 'none') return; // cheap: skip work while collapsed
+    const expanded = panel.classList.contains('is-expanded');
+    panel.innerHTML = '';
+
+    const head = el('div', 'step-panel-head');
+    head.appendChild(el('span', 'step-panel-title', 'Steps'));
+    const expandBtn = el('button', 'step-expand-btn');
+    expandBtn.type = 'button';
+    expandBtn.innerHTML = expanded ? '<i class="fas fa-compress-alt"></i>' : '<i class="fas fa-expand-alt"></i>';
+    expandBtn.title = expanded ? 'Shrink' : 'Expand over chat';
+    expandBtn.onclick = () => toggleStepExpand();
+    head.appendChild(expandBtn);
+    panel.appendChild(head);
+
+    const body = el('div', 'step-body');
+    panel.appendChild(body);
+
+    if (!operationData.length) {
+        body.appendChild(el('div', 'step-empty', 'No filter edits yet this session.'));
+        return;
+    }
+    operationData.forEach((o, i) => {
+        const from = o.chat_index;
+        const to = (i + 1 < operationData.length) ? operationData[i + 1].chat_index : chatHistoryMirror.length;
+        const count = Math.max(0, to - from);
+        const item = el('button', 'step-item' + (o.excluding ? ' is-exclude' : ''));
+        item.type = 'button';
+        item.appendChild(el('span', 'step-seq', '#' + o.seq));
+        item.appendChild(el('span', 'step-text', o.verb + ' "' + (o.label || o.text) + '"'));
+        if (o.effect_phrase) item.appendChild(el('span', 'step-effect', o.effect_phrase));
+        if (o.reason) item.appendChild(el('span', 'step-has-reason', '✓ why'));
+        if (count) item.appendChild(el('span', 'step-msgcount', count + ' msg' + (count === 1 ? '' : 's')));
+        item.title = 'Jump to what was said around this edit';
+        item.onclick = () => jumpToStep(from, to);
+
+        const row = el('div', 'step-row');
+        row.appendChild(item);
+        // "load_skill"/"load_tat" aren't a keyword add/remove with a "why" to
+        // teach — only real filter edits get the teach/ask icons. Two entry
+        // points, engineer's choice: 🎓 = write your own explanation first
+        // (user-led); ❓ = have the LLM ask you one targeted question instead
+        // (LLM-led, always skippable).
+        if (o.action !== 'load_skill' && o.action !== 'load_tat') {
+            const teachBtn = el('button', 'step-teach-btn');
+            teachBtn.type = 'button';
+            teachBtn.innerHTML = '<i class="fas fa-graduation-cap"></i>';
+            teachBtn.title = 'Teach the system why you made this edit (write your own explanation)';
+            teachBtn.disabled = isBusy();
+            teachBtn.onclick = (e) => { e.stopPropagation(); openStepExplainBox(o.seq, teachBtn); };
+            row.appendChild(teachBtn);
+
+            const askBtn = el('button', 'step-ask-btn', '?');
+            askBtn.type = 'button';
+            askBtn.title = 'Ask me about this step (LLM asks a question, skippable)';
+            askBtn.disabled = isBusy();
+            askBtn.onclick = (e) => { e.stopPropagation(); askStepQuestion(o.seq, askBtn); };
+            row.appendChild(askBtn);
+        }
+        body.appendChild(row);
+    });
+}
+
+function jumpToStep(fromIdx, toIdx) {
+    const box = document.getElementById('chatBox');
+    // Clear any previous highlight.
+    box.querySelectorAll('.step-highlight').forEach(n => n.classList.remove('step-highlight'));
+    const kids = box.children;
+    if (fromIdx >= kids.length) {
+        // Nothing was said yet at this point — scroll to end so it's obvious.
+        box.scrollTop = box.scrollHeight;
+        return;
+    }
+    const end = Math.min(toIdx, kids.length);
+    // Flash the BUBBLE itself (not the flex row wrapping it) so the highlight
+    // shows against its own opaque background — see appendMsg's row > bubble
+    // structure. Non-message children (question/explain/confirm cards) have
+    // no .chat-bubble, so fall back to flashing the element itself.
+    for (let i = fromIdx; i < end; i++) {
+        (kids[i].querySelector('.chat-bubble') || kids[i]).classList.add('step-highlight');
+    }
+    kids[fromIdx].scrollIntoView({block: 'center', behavior: 'smooth'});
+}
+
+function toggleOpJournal() {
+    const list = document.getElementById('opJournalList');
+    list.style.display = (list.style.display === 'none' || !list.style.display) ? 'block' : 'none';
+}
+
+function renderOperations() {
+    const list = document.getElementById('opJournalList');
+    document.getElementById('opJournalCount').textContent = operationData.length;
+    // How many material edits still lack a reason — surfaced as a nudge.
+    const why = operationData.filter(o =>
+        !o.reason && o.action !== 'load_skill' && o.action !== 'load_tat' &&
+        (o.action === 'remove' || (o.effect && (o.effect.unique_hits || o.effect.dropped)))
+    ).length;
+    const whyEl = document.getElementById('opJournalWhy');
+    whyEl.style.display = why ? 'inline-block' : 'none';
+    whyEl.textContent = why ? `${why} need “why?”` : '';
+
+    list.innerHTML = '';
+    if (!operationData.length) {
+        list.appendChild(el('div', 'op-empty', 'Your filter edits will be logged here.'));
+        return;
+    }
+    operationData.forEach(o => {
+        const row = el('div', 'op-row' + (o.excluding ? ' is-exclude' : ''));
+        const head = el('div', 'op-head');
+        head.appendChild(el('span', 'op-seq', '#' + o.seq));
+        head.appendChild(el('span', 'op-verb', o.verb));
+        head.appendChild(el('span', 'op-text', o.label || o.text));
+        row.appendChild(head);
+        if (o.effect_phrase) row.appendChild(el('div', 'op-effect', o.effect_phrase));
+
+        const isLoad = o.action === 'load_skill' || o.action === 'load_tat';
+        if (o.reason) {
+            const r = el('div', 'op-reason');
+            r.appendChild(el('span', 'op-reason-label', 'why: '));
+            r.appendChild(document.createTextNode(o.reason));
+            const edit = el('button', 'op-why-edit', '✎');
+            edit.title = 'Edit reason';
+            edit.onclick = () => openReasonBox(o.seq, o.reason);
+            r.appendChild(edit);
+            row.appendChild(r);
+        } else if (!isLoad) {
+            const btn = el('button', 'op-why-btn', 'why did you do this?');
+            btn.onclick = () => openReasonBox(o.seq, '');
+            row.appendChild(btn);
+        }
+        row.id = 'op-row-' + o.seq;
+        list.appendChild(row);
+    });
+}
+
+// Inline reason editor for one journal entry — stores the engineer's WHY so
+// it feeds the interview + synthesis (POST /log_viewer/annotate_operation).
+function openReasonBox(seq, existing) {
+    const row = document.getElementById('op-row-' + seq);
+    if (!row || row.querySelector('.op-reason-box')) return;
+    const box = el('div', 'op-reason-box');
+    const input = document.createElement('input');
+    input.type = 'text';
+    input.className = 'form-control form-control-sm';
+    input.placeholder = 'e.g. periodic housekeeping, not scoring-relevant';
+    input.value = existing || '';
+    const save = el('button', 'btn btn-sm btn-primary', 'Save');
+    const submit = () => {
+        const reason = input.value.trim();
+        fetch("{{ url_for('log_viewer.annotate_operation') }}", {
+            method: 'POST', headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({seq: seq, reason: reason})
+        }).then(r => r.json()).then(d => { if (d.success) syncOps(d); });
+    };
+    input.onkeypress = (e) => { if (e.key === 'Enter') submit(); };
+    save.onclick = submit;
+    box.appendChild(input);
+    box.appendChild(save);
+    row.appendChild(box);
+    input.focus();
+}
+
+// ---- Compact path input helpers (copy-to-clipboard + transient status,
+// mirrors IntelAvatar log_chatbot's Log File sidebar section) ----
+function showPathStatus(elId, msg, type) {
+    const el = document.getElementById(elId);
+    el.className = 'path-status ' + type;
+    el.textContent = msg;
+    if (type === 'ok') {
+        setTimeout(() => {
+            if (el.textContent === msg) { el.className = 'path-status'; el.textContent = ''; }
+        }, 3000);
+    }
+}
+
+function copyPath(inputId, btn) {
+    const val = document.getElementById(inputId).value || '';
+    if (!val.trim()) return;
+    const flash = () => {
+        if (!btn) return;
+        btn.classList.add('copied');
+        setTimeout(() => btn.classList.remove('copied'), 1200);
+    };
+    if (navigator.clipboard) {
+        navigator.clipboard.writeText(val).then(flash).catch(() => {
+            const inp = document.getElementById(inputId);
+            inp.select(); document.execCommand('copy'); flash();
+        });
+    } else {
+        const inp = document.getElementById(inputId);
+        inp.select(); document.execCommand('copy'); flash();
+    }
+}
+
+// Repopulate the skill <select> for the given domain ('wifi' | 'bt') and
+// show a small badge so it's clear which skill set is in play.
+function refreshSkillList(domain) {
+    fetch(`/skills/list?domain=${domain}`).then(r => r.json()).then(d => {
+        if (!d.success) return;
+        const sel = document.getElementById('skillSelect');
+        const current = sel.value;
+        sel.innerHTML = '<option value="">-- or load a learned skill --</option>' +
+            d.skills.map(s => `<option value="${s.key}">${escapeHtml(s.name)}</option>`).join('');
+        if (d.skills.some(s => s.key === current)) sel.value = current;
+
+        const badge = document.getElementById('domainBadge');
+        badge.textContent = domain === 'bt' ? 'BT' : 'WiFi';
+        badge.className = 'domain-badge ' + (domain === 'bt' ? 'domain-bt' : 'domain-wifi');
+        badge.style.display = 'inline-block';
+    });
+}
+
+// Render the log (raw, before any filter — or filtered, once one has run)
+// as TAT-style rows: sticky line-number gutter + column-aligned, optionally
+// colored text.
+function renderLogRows(preview, emptyMessage) {
+    const box = document.getElementById('previewBox');
+    // Size the line-number gutter to the WIDEST line number in this preview so
+    // every row's gutter is identical and the timestamp column starts at the
+    // same x on every line (4- vs 5- vs 6-digit numbers no longer drift the
+    // row). +0.5ch of slack, floored at 4ch so short files still look right.
+    const maxDigits = preview.reduce(
+        (m, p) => Math.max(m, p.line_no != null ? String(p.line_no).length : 0), 0);
+    box.style.setProperty('--lineno-w', Math.max(4, maxDigits + 0.5) + 'ch');
+    box.innerHTML = preview.map(p => {
+        let style = '';
+        if (p.back_color) style += `background:${p.back_color};`;
+        if (p.fore_color) style += `color:${p.fore_color};`;
+        // data-ms = the row's timestamp as epoch ms (or empty) — lets the event
+        // panel jump to the nearest log line by time, and lets a log-row click
+        // find the nearest event.
+        const ms = parseLogTimeMs(p.text);
+        return `<div class="tat-log-row"${ms != null ? ` data-ms="${ms}"` : ''}>` +
+               `<span class="tat-log-lineno">${p.line_no != null ? p.line_no : ''}</span>` +
+               `<span class="tat-log-text" style="${style}">${formatLogLine(p.text)}</span>` +
+               `</div>`;
+    }).join('') || `<div class="tat-log-empty">${emptyMessage || 'Empty file'}</div>`;
+}
+
+// Parse a driver-log line's leading "MM/DD/YYYY-HH:MM:SS.mmm" timestamp into
+// epoch ms (local), or null if the line has none. Used for event↔log sync.
+function parseLogTimeMs(text) {
+    const m = String(text).match(/^(\d{2})\/(\d{2})\/(\d{4})-(\d{2}):(\d{2}):(\d{2})\.(\d{3})/);
+    if (!m) return null;
+    return new Date(+m[3], +m[1] - 1, +m[2], +m[4], +m[5], +m[6], +m[7]).getTime();
+}
+
+// Parse an event-log "YYYY-MM-DD HH:MM:SS" (UTC) timestamp into epoch ms.
+// Matched against parseLogTimeMs() in the same numeric space — see the UTC
+// caveat in the panel: the driver log is customer-local, so a nonzero capture
+// offset shifts the nearest match by that amount.
+function parseEvtTimeMs(text) {
+    const m = String(text).match(/^(\d{4})-(\d{1,2})-(\d{1,2})[ T](\d{1,2}):(\d{2}):(\d{2})/);
+    if (!m) return null;
+    return new Date(+m[1], +m[2] - 1, +m[3], +m[4], +m[5], +m[6]).getTime();
+}
+
+function pickLog() {
+    fetch("{{ url_for('log_viewer.pick_log') }}", {method: 'POST'})
+        .then(r => r.json())
+        .then(d => {
+            if (d.success) {
+                document.getElementById('logPathInput').value = d.log_path;
+                showPathStatus('logStatus', '✔ Log loaded', 'ok');
+                if (d.domain) refreshSkillList(d.domain);
+
+                // Show the log immediately — don't make the engineer wait
+                // for a .tat/skill to be loaded just to see the file.
+                document.getElementById('logPaneTitle').textContent = 'Log';
+                document.getElementById('matchCount').textContent = d.preview.length;
+                document.getElementById('totalLines').textContent = d.total_lines;
+                document.getElementById('statsSummary').textContent =
+                    d.total_lines > d.preview.length
+                        ? `no filter applied yet — first ${d.preview.length} of ${d.total_lines} lines`
+                        : 'no filter applied yet';
+                renderLogRows(d.preview);
+                // BT capture → reveal the event panel (auto-discovered file
+                // enables it; WiFi/none hides it). Reset any open state first.
+                updateEvtSection(d.domain, d.event_log_available);
+                // This log's own lines had no date (dateless BT HCI export /
+                // WiFi DDD export) — the DATE component shown is an estimate
+                // (see the badge's tooltip for the anchor source).
+                document.getElementById('dateSynthWarn').style.display = d.date_synthesized ? 'inline' : 'none';
+
+                if (filterData.length) applyFilter(); // filters already set up — run right away, replaces this raw view
+            } else showPathStatus('logStatus', d.message, 'err');
+        });
+}
+
+// ── System Event Log panel (collapsible, above the log rows) ──────────────
+// Shown only for BT captures. Auto-discovered next to the log or picked
+// manually; rows click-sync to the nearest driver-log line by timestamp.
+let _evtLoaded = false, _evtOpen = false, _evtData = [], _evtLoading = false;
+let _evtOffset = 0, _evtHasMore = false, _evtTotal = 0;
+const _EVT_PAGE = 300;
+
+// Show/hide + enable the event section based on domain + availability.
+function updateEvtSection(domain, available) {
+    const section = document.getElementById('evtSection');
+    const isBt = (domain === 'bt');
+    section.style.display = isBt ? 'block' : 'none';
+    if (!isBt) { _closeEvtPanel(); return; }
+    const btn = document.getElementById('evtToggleBtn');
+    btn.disabled = !available;
+    document.getElementById('evtStatus').textContent = available
+        ? '' : 'no event log found next to this log — pick one →';
+    // A freshly (re)loaded log invalidates any cached events.
+    _evtLoaded = false; _evtData = []; _evtOffset = 0;
+    if (_evtOpen && !available) _closeEvtPanel();
+}
+
+function _closeEvtPanel() {
+    _evtOpen = false;
+    document.getElementById('evtPanel').style.display = 'none';
+    const arrow = document.getElementById('evtArrow');
+    if (arrow) arrow.classList.remove('open');
+}
+
+function pickEventLog() {
+    fetch("{{ url_for('log_viewer.pick_event_log') }}", {method: 'POST'})
+        .then(r => r.json())
+        .then(d => {
+            if (!d.success) { if (d.message !== 'No file selected') alert(d.message); return; }
+            const btn = document.getElementById('evtToggleBtn');
+            btn.disabled = false;
+            document.getElementById('evtStatus').textContent = '';
+            _evtLoaded = false; _evtData = []; _evtOffset = 0;
+            if (!_evtOpen) toggleEvtPanel(); else _evtResetAndFetch();
+        });
+}
+
+function toggleEvtPanel() {
+    const btn = document.getElementById('evtToggleBtn');
+    if (btn.disabled) return;
+    _evtOpen = !_evtOpen;
+    document.getElementById('evtPanel').style.display = _evtOpen ? 'block' : 'none';
+    document.getElementById('evtArrow').classList.toggle('open', _evtOpen);
+    if (_evtOpen && !_evtLoaded) { _evtLoaded = true; _evtResetAndFetch(); }
+}
+
+function evtFilterChanged() { _evtResetAndFetch(); }
+
+function _evtResetAndFetch() {
+    _evtData = []; _evtOffset = 0; _evtHasMore = false;
+    document.getElementById('evtBody').innerHTML =
+        '<p class="evt-msg">Loading…</p>';
+    _evtFetchPage();
+}
+
+function _evtFetchPage() {
+    if (_evtLoading) return;
+    _evtLoading = true;
+    fetch("{{ url_for('log_viewer.parse_event_log') }}", {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({
+            offset: _evtOffset, limit: _EVT_PAGE,
+            source_filter: document.getElementById('evtSourceFilter').value,
+            level_filter: document.getElementById('evtLevelFilter').value,
+        }),
+    })
+        .then(r => r.json())
+        .then(d => {
+            if (d.error) { document.getElementById('evtBody').innerHTML = `<p class="evt-msg evt-msg-err">${escapeHtml(d.error)}</p>`; return; }
+            _evtTotal = d.total || 0;
+            _evtHasMore = d.has_more || false;
+            _evtOffset += (d.events || []).length;
+            _evtData = _evtData.concat(d.events || []);
+            _evtRenderTable(d.time_header || 'Time (UTC)');
+        })
+        .catch(e => { document.getElementById('evtBody').innerHTML = `<p class="evt-msg evt-msg-err">Network error: ${escapeHtml(e.message)}</p>`; })
+        .finally(() => { _evtLoading = false; });
+}
+
+function _evtRenderTable(timeHeader) {
+    const body = document.getElementById('evtBody');
+    if (!_evtData.length) { body.innerHTML = '<p class="evt-msg">No matching events.</p>'; document.getElementById('evtCount').textContent = ''; return; }
+    let html = `<table class="evt-table"><colgroup>
+        <col style="width:150px;"><col style="width:26px;"><col style="width:90px;"><col style="width:48px;">
+      </colgroup><thead><tr>
+        <th>${escapeHtml(timeHeader)}</th><th>Lv</th><th>Source</th><th>ID</th>
+      </tr></thead><tbody>`;
+    for (let i = 0; i < _evtData.length; i++) {
+        const ev = _evtData[i];
+        const dot = (ev.level === 'Error' || ev.level === 'Critical') ? '🔴'
+            : ev.level === 'Warning' ? '🟡' : '🟢';
+        html += `<tr data-evt-idx="${i}">
+            <td>${escapeHtml(ev.time)}</td>
+            <td style="text-align:center;">${dot}</td>
+            <td>${escapeHtml(ev.source)}</td>
+            <td>${escapeHtml(ev.event_id)}</td>
+          </tr>`;
+    }
+    html += '</tbody></table>';
+    body.innerHTML = html;
+    document.getElementById('evtCount').textContent = `${_evtData.length}/${_evtTotal}`;
+
+    body.onscroll = function () {
+        if (!_evtHasMore || _evtLoading) return;
+        if (body.scrollTop + body.clientHeight >= body.scrollHeight * 0.7) _evtFetchPage();
+    };
+    body.querySelectorAll('tr[data-evt-idx]').forEach(function (tr) {
+        tr.addEventListener('click', _onEvtRowClick);
+        tr.addEventListener('mouseenter', _onEvtRowEnter);
+        tr.addEventListener('mouseleave', _onEvtRowLeave);
+    });
+}
+
+// Event row clicked → scroll the driver log to the nearest line by time.
+function _onEvtRowClick(e) {
+    const ev = _evtData[+e.currentTarget.dataset.evtIdx];
+    if (!ev) return;
+    const ms = parseEvtTimeMs(ev.time);
+    if (ms == null) return;
+    document.querySelectorAll('.evt-table tr.is-active').forEach(t => t.classList.remove('is-active'));
+    e.currentTarget.classList.add('is-active');
+    jumpLogToMs(ms);
+}
+
+// Find the driver-log row whose timestamp is closest to `ms`, scroll it into
+// view within the log pane, and flash it. Returns that row (or null).
+function jumpLogToMs(ms) {
+    const box = document.getElementById('previewBox');
+    let best = null, bestDiff = Infinity;
+    box.querySelectorAll('.tat-log-row[data-ms]').forEach(function (row) {
+        const diff = Math.abs(+row.dataset.ms - ms);
+        if (diff < bestDiff) { bestDiff = diff; best = row; }
+    });
+    if (!best) return null;
+    // Scroll within the pane only (not the whole page).
+    box.scrollTop = best.offsetTop - box.clientHeight / 2 + best.offsetHeight / 2;
+    box.querySelectorAll('.tat-log-row.is-time-hit').forEach(r => r.classList.remove('is-time-hit'));
+    best.classList.add('is-time-hit');
+    return best;
+}
+
+function _onEvtRowEnter(e) {
+    const ev = _evtData[+e.currentTarget.dataset.evtIdx];
+    if (!ev) return;
+    const card = document.getElementById('evtHoverCard');
+    const lvColor = (ev.level === 'Error' || ev.level === 'Critical') ? '#dc2626'
+        : ev.level === 'Warning' ? '#ca8a04' : '#16a34a';
+    let h = '<table>';
+    h += `<tr><th>Time</th><td>${escapeHtml(ev.time)}</td></tr>`;
+    h += `<tr><th>Level</th><td style="color:${lvColor};font-weight:600;">${escapeHtml(ev.level)}</td></tr>`;
+    h += `<tr><th>Source</th><td>${escapeHtml(ev.source)}</td></tr>`;
+    h += `<tr><th>ID</th><td>${escapeHtml(ev.event_id)}</td></tr>`;
+    if (ev.message) h += `<tr><th>Message</th><td>${escapeHtml(ev.message)}</td></tr>`;
+    h += '</table>';
+    card.innerHTML = h;
+    const rect = e.currentTarget.getBoundingClientRect();
+    card.style.left = Math.min(rect.right + 8, window.innerWidth - 380) + 'px';
+    let top = rect.top;
+    if (top + 220 > window.innerHeight - 20) top = window.innerHeight - 240;
+    if (top < 60) top = 60;
+    card.style.top = top + 'px';
+    card.style.display = 'block';
+}
+
+function _onEvtRowLeave() { document.getElementById('evtHoverCard').style.display = 'none'; }
+
+// Reverse sync: given a driver-log line's time (ms), highlight + scroll to the
+// nearest event row in the panel. No-op if events aren't loaded yet.
+function jumpEvtToMs(ms) {
+    if (!_evtData.length) return;
+    let bestIdx = -1, bestDiff = Infinity;
+    for (let i = 0; i < _evtData.length; i++) {
+        const evMs = parseEvtTimeMs(_evtData[i].time);
+        if (evMs == null) continue;
+        const diff = Math.abs(evMs - ms);
+        if (diff < bestDiff) { bestDiff = diff; bestIdx = i; }
+    }
+    if (bestIdx < 0) return;
+    const body = document.getElementById('evtBody');
+    const tr = body.querySelector(`tr[data-evt-idx="${bestIdx}"]`);
+    if (!tr) return;
+    body.querySelectorAll('.evt-table tr.is-active').forEach(t => t.classList.remove('is-active'));
+    tr.classList.add('is-active');
+    body.scrollTop = tr.offsetTop - body.clientHeight / 2 + tr.offsetHeight / 2;
+}
+
+function pickTat() {
+    fetch("{{ url_for('log_viewer.pick_tat') }}", {method: 'POST'})
+        .then(r => r.json())
+        .then(d => {
+            if (d.success) {
+                document.getElementById('tatPathInput').value = d.tat_path;
+                showPathStatus('tatStatus', '✔ Filter loaded', 'ok');
+                filterData = d.filters;
+                renderFilters();
+                syncOps(d);
+                if (document.getElementById('logPathInput').value.trim()) applyFilter();
+            } else showPathStatus('tatStatus', d.message, 'err');
+        });
+}
+
+// Only ever fires from the skillSelect dropdown's own onchange — and that
+// dropdown is itself marked data-busy-lock, so it's physically un-clickable
+// while anything else is in flight. The isBusy() guard here is defense in
+// depth against a change event that somehow lands anyway (e.g. a keyboard-
+// driven selection racing a fetch); either way the skill choice can only ever
+// change from a deliberate, isolated user action, never mid-flight.
+function loadSkill(key) {
+    if (!key || isBusy()) return;
+    setBusy(true);
+    fetch("{{ url_for('log_viewer.load_skill') }}", {
+        method: 'POST', headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({skill_key: key})
+    }).then(r => r.json()).then(d => {
+        setBusy(false);
+        if (d.success) {
+            document.getElementById('tatPathInput').value = d.tat_path;
+            document.getElementById('tatPathInput').placeholder = d.tat_path ? '' : '(no .tat file — using built-in keywords)';
+            showPathStatus('tatStatus', '✔ Skill loaded', 'ok');
+            filterData = d.filters;
+            renderFilters();
+            syncOps(d);
+            activeSkillKey = key;
+            document.getElementById('viewSkillBtn').disabled = false;
+            // Loading a named skill auto-switches the conversation into
+            // PRIOR-knowledge mode server-side (see log_viewer_routes.
+            // load_skill) — sync the header toggle so the UI matches, and the
+            // engineer sees why the interview stops asking about content this
+            // skill already covers.
+            if (d.prior_knowledge) {
+                const t = document.getElementById('priorToggle');
+                if (t && !t.checked) t.checked = true;
+            }
+            if (document.getElementById('logPathInput').value.trim()) applyFilter();
+        } else showPathStatus('tatStatus', d.message, 'err');
+    }).catch(() => setBusy(false));
+}
+
+function toggleFilter(idx, enabled) {
+    filterData[idx].enabled = enabled;
+    fetch("{{ url_for('log_viewer.toggle_filter') }}", {
+        method: 'POST', headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({index: idx, enabled: enabled})
+    }).then(r => r.json()).then(d => { renderFilters(); syncOps(d); debounceApplyFilter(); });
+}
+
+function selectAllFilters(val) {
+    const calls = filterData.map((f, i) => {
+        f.enabled = val;
+        return fetch("{{ url_for('log_viewer.toggle_filter') }}", {
+            method: 'POST', headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({index: i, enabled: val})
+        });
+    });
+    renderFilters();
+    Promise.all(calls).then(() => debounceApplyFilter());
+}
+
+// No manual "Run Filter" button — every mutation (add/remove/toggle/load)
+// re-runs the filter itself. None of this ever touches the chat/LLM anymore;
+// the engineer decides when to spend a round via the "Log Round & Analyze"
+// button, or just types in the chat box directly.
+function addFilter() {
+    const input = document.getElementById('newFilterText');
+    const text = input.value.trim();
+    if (!text) return;
+    const excluding = document.getElementById('newFilterType').value === 'exclude';
+    fetch("{{ url_for('log_viewer.add_filter') }}", {
+        method: 'POST', headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({text: text, excluding: excluding})
+    }).then(r => r.json()).then(d => {
+        if (!d.success) { alert(d.message); return; }
+        filterData = d.filters;
+        input.value = '';
+        renderFilters();
+        syncOps(d);
+        if (document.getElementById('logPathInput').value.trim()) applyFilter();
+    });
+}
+
+function removeFilter(idx) {
+    fetch("{{ url_for('log_viewer.remove_filter') }}", {
+        method: 'POST', headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({index: idx})
+    }).then(r => r.json()).then(d => {
+        if (!d.success) { alert(d.message); return; }
+        filterData = d.filters;
+        renderFilters();
+        syncOps(d);
+        if (document.getElementById('logPathInput').value.trim()) applyFilter();
+    });
+}
+
+function applyFilter() {
+    const box = document.getElementById('previewBox');
+    box.innerHTML = '<div class="tat-log-empty">Running filter…</div>';
+    return fetch("{{ url_for('log_viewer.apply_filter') }}", {method: 'POST'})
+        .then(r => r.json())
+        .then(d => {
+            if (!d.success) { box.innerHTML = ''; alert(d.message); return; }
+            document.getElementById('logPaneTitle').textContent = 'Filtered Log';
+            document.getElementById('matchCount').textContent = d.total_matched;
+            document.getElementById('totalLines').textContent = d.total_lines;
+            document.getElementById('statsSummary').textContent =
+                `${d.overlap_count} lines matched 2+ keywords`;
+
+            // Merge hit counts into the filter table (that IS the stats display now).
+            const hitsByText = {};
+            d.per_filter.forEach(f => { hitsByText[f.text] = f.hits; });
+            filterData.forEach(f => { if (f.text in hitsByText) f.hits = hitsByText[f.text]; });
+            renderFilters();
+            syncOps(d); // effects for prior edits are now measured
+
+            renderLogRows(d.preview, 'No lines matched');
+        });
+}
+
+// Debounce rapid successive toggles (e.g. clicking through several
+// checkboxes, or "All"/"None" which flips dozens at once) into a single re-run.
+let _filterDebounceTimer = null;
+function debounceApplyFilter() {
+    if (!document.getElementById('logPathInput').value.trim()) return; // nothing to filter yet
+    if (_filterDebounceTimer) clearTimeout(_filterDebounceTimer);
+    _filterDebounceTimer = setTimeout(() => applyFilter(), 350);
+}
+
+function viewCurrentSkill() {
+    if (!activeSkillKey) return;
+    fetch(`/skills/get/${activeSkillKey}`).then(r => r.json()).then(d => {
+        if (!d.success) { alert(d.message); return; }
+        const sk = d.skill;
+        sk.skill_key = activeSkillKey;
+        SkillEditor.open(sk, {
+            title: 'Current Skill',
+            subtitle: sk.name || activeSkillKey,
+            saveUrl: "{{ url_for('skills.save_skill_route') }}",
+            deleteUrl: `/skills/delete/${activeSkillKey}`,
+            extraPayload: {tat_path: sk.tat_path || null},
+            onSaved: function () { alert('Skill updated.'); },
+        });
+    });
+}
+
+// ---- Chat (reuses the same session-state filtered preview as system context) ----
+
+// Small, SAFE markdown-ish renderer for the LLM's replies (which are full of
+// #/##/### headers, **bold**, `code`, and - bullet lists that were
+// previously dumped as literal text via textContent — that raw-symbol soup
+// was the "排版太亂" complaint). Escapes first (so any stray <, >, & can
+// never become real markup), then only ever introduces a small fixed set of
+// safe tags via regex — no HTML from the model is ever trusted directly.
+// A GitHub-style pipe table: a "| a | b |" header row immediately followed by
+// a "|---|---|" separator row. Without this, the LLM's markdown tables (it
+// writes them often — comparison tables, keyword/skill mappings) fell through
+// to the plain-line branch as literal "| a | b |" text, which is both ugly
+// and, for long rows, the source of the horizontal overflow that broke the
+// page layout (a long unbroken pipe-delimited line with no wrap points).
+const _TABLE_ROW_RE = /^\|.*\|$/;
+const _TABLE_SEP_RE = /^\|?\s*:?-{2,}:?\s*(\|\s*:?-{2,}:?\s*)+\|?$/;
+const _splitTableRow = row => row.trim().replace(/^\||\|$/g, '').split('|').map(c => c.trim());
+
+function renderMarkdownLite(raw) {
+    const esc = escapeHtml(raw);
+    const inlineFmt = s => s
+        .replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
+        .replace(/`([^`]+)`/g, '<code>$1</code>');
+    const lines = esc.split('\n');
+    let html = '';
+    let listMode = null; // 'ul' | 'ol' | null
+    const closeList = () => { if (listMode) { html += `</${listMode}>`; listMode = null; } };
+    for (let i = 0; i < lines.length; i++) {
+        const line = lines[i];
+        if (_TABLE_ROW_RE.test(line.trim()) && i + 1 < lines.length && _TABLE_SEP_RE.test(lines[i + 1].trim())) {
+            closeList();
+            const headCells = _splitTableRow(line);
+            html += '<div class="chat-md-table-wrap"><table class="chat-md-table"><thead><tr>';
+            headCells.forEach(c => { html += `<th>${inlineFmt(c)}</th>`; });
+            html += '</tr></thead><tbody>';
+            i += 2; // consume header + separator
+            while (i < lines.length && _TABLE_ROW_RE.test(lines[i].trim())) {
+                html += '<tr>';
+                _splitTableRow(lines[i]).forEach(c => { html += `<td>${inlineFmt(c)}</td>`; });
+                html += '</tr>';
+                i++;
+            }
+            html += '</tbody></table></div>';
+            i--; // outer loop's i++ accounts for the row this while-loop stopped on
+            continue;
+        }
+        const h3 = line.match(/^### (.*)/);
+        const h2 = line.match(/^## (.*)/);
+        const h1 = line.match(/^# (.*)/);
+        const uli = line.match(/^[-*] (.*)/);
+        const oli = line.match(/^\d+\. (.*)/);
+        if (uli) {
+            if (listMode !== 'ul') { closeList(); html += '<ul class="chat-md-list">'; listMode = 'ul'; }
+            html += `<li>${inlineFmt(uli[1])}</li>`;
+            continue;
+        }
+        if (oli) {
+            if (listMode !== 'ol') { closeList(); html += '<ol class="chat-md-list">'; listMode = 'ol'; }
+            html += `<li>${inlineFmt(oli[1])}</li>`;
+            continue;
+        }
+        closeList();
+        if (h3) { html += `<div class="chat-md-h3">${inlineFmt(h3[1])}</div>`; }
+        else if (h2) { html += `<div class="chat-md-h2">${inlineFmt(h2[1])}</div>`; }
+        else if (h1) { html += `<div class="chat-md-h1">${inlineFmt(h1[1])}</div>`; }
+        else if (line.trim() === '---') { html += '<hr class="chat-md-hr">'; }
+        else if (line.trim() === '') { html += '<div class="chat-md-gap"></div>'; }
+        else { html += `<div>${inlineFmt(line)}</div>`; }
+    }
+    closeList();
+    return html;
+}
+
+// Mirrors chat_history 1:1 as messages are appended (both live and on the
+// initial page-load replay) — the step viewer needs this to slice "what was
+// said between filter edit A and edit B" since chatBox itself only holds DOM
+// nodes, not queryable message data.
+let chatHistoryMirror = [];
+
+// role/content as before, plus stepTag: the step number this message is
+// about, or "all" for general/session-wide knowledge, or omitted/null for
+// legacy untagged messages (no badge shown). User bubbles sit right-aligned
+// in a primary-tinted bubble; assistant bubbles sit left-aligned, white with
+// a border — the two-color/side split makes "who said this" unmistakable at
+// a glance instead of relying on a small "You:"/"AI:" text prefix alone.
+function appendMsg(role, content, stepTag) {
+    const box = document.getElementById('chatBox');
+    const isUser = (role === 'user');
+    const row = el('div', 'chat-row ' + (isUser ? 'chat-row-user' : 'chat-row-assistant'));
+    const bubble = el('div', 'chat-bubble ' + (isUser ? 'chat-bubble-user' : 'chat-bubble-assistant'));
+
+    const tag = (stepTag === undefined) ? null : stepTag;
+    if (tag !== null) {
+        const meta = el('div', 'chat-bubble-meta');
+        const isAll = (tag === 'all');
+        const badge = el('span', 'chat-step-badge' + (isAll ? ' is-all' : ''), isAll ? 'All' : ('#' + tag));
+        badge.title = isAll ? 'General / session-wide knowledge' : `About step #${tag}`;
+        meta.appendChild(badge);
+        bubble.appendChild(meta);
+    }
+
+    const contentEl = el('div', 'chat-bubble-content' + (isUser ? '' : ' chat-md'));
+    if (isUser) {
+        contentEl.textContent = content;
+    } else {
+        contentEl.innerHTML = renderMarkdownLite(content);
+    }
+    bubble.appendChild(contentEl);
+    row.appendChild(bubble);
+    box.appendChild(row);
+    box.scrollTop = box.scrollHeight;
+    chatHistoryMirror.push({role, content, step: tag});
+    return row;
+}
+
+// presetMsg: sent to the LLM. displayMsg: optional short label shown in the
+// bubble instead of a long preset instruction (keeps the auto-kickoff tidy).
+// Small, always-visible session token counter (see services/llm_service.py
+// LLM_helper._record_usage — same numbers also print to the terminal on
+// every call). Session-cumulative, not per-call, since that's the more
+// useful "is this getting expensive" signal while iterating on a skill.
+function updateTokenBadge(sessionUsage) {
+    if (!sessionUsage) return;
+    const badge = document.getElementById('tokenBadge');
+    const k = sessionUsage.total_tokens >= 1000 ? (sessionUsage.total_tokens / 1000).toFixed(1) + 'k' : sessionUsage.total_tokens;
+    badge.textContent = `🪙 ${k}`;
+    badge.title = `${sessionUsage.total_tokens} tokens across ${sessionUsage.calls} LLM call(s) this session`;
+}
+
+// forceTag: overrides the step-context selector for this ONE send — used by
+// Log Round follow-up answers (see showNextQuestionCard), which are always
+// about the whole round, not whatever step the selector happens to be on.
+function sendMsg(presetMsg, displayMsg, forceTag) {
+    if (isBusy()) return;
+    const input = document.getElementById('chatInput');
+    const msg = presetMsg !== undefined ? presetMsg : input.value.trim();
+    if (!msg) return;
+    const tag = forceTag !== undefined ? forceTag : currentStepTag;
+    appendMsg('user', displayMsg !== undefined ? displayMsg : msg, tag);
+    if (presetMsg === undefined) input.value = '';
+    setBusy(true);
+    fetch("{{ url_for('chatbot.send') }}", {
+        method: 'POST', headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({message: msg, step_tag: tag})
+    }).then(r => r.json()).then(d => {
+        setBusy(false);
+        if (d.success) appendMsg('assistant', d.reply, d.step_tag !== undefined ? d.step_tag : tag);
+        else appendMsg('assistant', '⚠️ ' + d.message, tag);
+        if (d.usage) updateTokenBadge(d.usage.session);
+        // Every answer re-scores readiness live (only once a filter has run —
+        // the server skips assessing an empty session). This is what makes the
+        // badge climb as the engineer teaches, instead of freezing between rounds.
+        if (d.success) refreshAssessment();
+    }).catch(e => { setBusy(false); appendMsg('assistant', '⚠️ Network error: ' + e, tag); });
+}
+
+// Live re-assessment after each chat answer: updates the readiness badge +
+// the 防呆 details panel from the whole conversation so far. Cheap, standalone
+// (no new analysis/questions), and a no-op until a filter has been run.
+function refreshAssessment() {
+    fetch("{{ url_for('learning.assess') }}", {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({use_prior_knowledge: priorMode()}),
+    })
+        .then(r => r.json())
+        .then(d => {
+            if (!d.success) return;
+            if (d.usage) updateTokenBadge(d.usage.session);
+            if (d.assessment) applyAssessment(d.assessment);
+        })
+        .catch(() => {}); // a failed background assess shouldn't disrupt the chat
+}
+
+function resetChat() {
+    return fetch("{{ url_for('chatbot.reset') }}", {method: 'POST'}).then(() => {
+        document.getElementById('chatBox').innerHTML = '';
+    });
+}
+
+// The most recent assessment {readiness, coverage, gaps, validation}, kept
+// client-side so the Export gate and the details panel can read it without a
+// refetch. Updated by both Log Round and every chat answer.
+let currentAssessment = null;
+
+// Readiness score badge next to Export Skill — color band matches the
+// readiness guide in services/learning_service.py (_ASSESS_TASKS).
+function updateReadinessBadge(readiness) {
+    const badge = document.getElementById('readinessBadge');
+    if (!readiness || typeof readiness.score !== 'number') {
+        badge.textContent = '🎯 Readiness —';
+        badge.classList.remove('is-low', 'is-mid', 'is-high');
+        return;
+    }
+    const score = readiness.score;
+    badge.textContent = `🎯 Readiness ${score}%`;
+    badge.classList.remove('is-low', 'is-mid', 'is-high');
+    badge.classList.add(score >= 70 ? 'is-high' : score >= 35 ? 'is-mid' : 'is-low');
+}
+
+// Single entry point for a fresh assessment (from /assess or /log_round):
+// updates the badge and re-renders the details panel, and flags the badge
+// when there are unverified/contradiction items so the engineer notices
+// before exporting.
+function applyAssessment(a) {
+    currentAssessment = a || null;
+    updateReadinessBadge(a && a.readiness);
+    renderReadinessPanel(a);
+    const badge = document.getElementById('readinessBadge');
+    const flags = (a && a.validation || []).filter(v => v.status !== 'verified').length;
+    badge.textContent = badge.textContent.replace(/ ⚠.*$/, '');
+    if (flags) badge.textContent += ` ⚠${flags}`;
+}
+
+function toggleReadinessPanel() {
+    const p = document.getElementById('readinessPanel');
+    const opening = (p.style.display === 'none' || !p.style.display);
+    if (opening) {
+        const sp = document.getElementById('stepPanel');
+        sp.style.display = 'none'; // see toggleStepPanel's note
+        sp.classList.remove('is-expanded');
+    }
+    // 'flex', not 'block' — the panel's CSS is display:flex (head + scrolling
+    // body); an inline style="display:block" would override that class rule
+    // (inline beats a class selector) and silently break the whole flex/
+    // min-height:0/overflow-y:auto clipping chain, letting content spill
+    // straight past max-height instead of scrolling inside its own box.
+    p.style.display = opening ? 'flex' : 'none';
+    if (!opening) p.classList.remove('is-expanded');
+}
+
+const _COVER_LABELS = {knowledge: 'Knowledge & rules', scope: 'Scope (non-overlapping)', keywords: 'Minimal keywords'};
+const _VALID_META = {
+    verified:      {icon: '✅', cls: 'v-ok',   label: 'verified from log'},
+    asserted:      {icon: '⚠️', cls: 'v-warn', label: 'stated, not log-verified'},
+    contradiction: {icon: '⛔', cls: 'v-bad',  label: 'contradiction / open item'},
+};
+
+// The readiness details panel: per-goal coverage bars, the still-missing
+// gaps, and the claim-by-claim verified-vs-asserted validation. Built via the
+// DOM (not string concat) so LLM-authored claim text can't break markup. Has
+// its own expand/shrink toggle (readiness-panel-head) — the compact inline
+// form is fine for a quick glance, but once the validation list is long it's
+// nicer to blow it up over the chat than scroll a postage-stamp box.
+function renderReadinessPanel(a) {
+    const panel = document.getElementById('readinessPanel');
+    const expanded = panel.classList.contains('is-expanded');
+    panel.innerHTML = '';
+
+    const head = el('div', 'readiness-panel-head');
+    head.appendChild(el('span', 'readiness-panel-title', 'Readiness details'));
+    const expandBtn = el('button', 'readiness-expand-btn');
+    expandBtn.type = 'button';
+    expandBtn.innerHTML = expanded ? '<i class="fas fa-compress-alt"></i>' : '<i class="fas fa-expand-alt"></i>';
+    expandBtn.title = expanded ? 'Shrink' : 'Expand over chat';
+    expandBtn.onclick = () => toggleReadinessExpand();
+    head.appendChild(expandBtn);
+    panel.appendChild(head);
+
+    const body = el('div', 'readiness-body');
+    panel.appendChild(body);
+
+    if (!a || (!a.readiness && !(a.gaps || []).length && !(a.validation || []).length)) {
+        body.appendChild(el('div', 'readiness-empty', 'Log a round or answer a question to assess readiness.'));
+        return;
+    }
+    const cov = a.coverage || {};
+    if (Object.keys(cov).length) {
+        const box = el('div', 'readiness-cov');
+        ['knowledge', 'scope', 'keywords'].forEach(k => {
+            const v = typeof cov[k] === 'number' ? cov[k] : 0;
+            const row = el('div', 'cov-row');
+            row.appendChild(el('span', 'cov-label', _COVER_LABELS[k]));
+            const track = el('span', 'cov-track');
+            const fill = el('span', 'cov-fill');
+            fill.style.width = v + '%';
+            fill.classList.add(v >= 70 ? 'is-high' : v >= 35 ? 'is-mid' : 'is-low');
+            track.appendChild(fill);
+            row.appendChild(track);
+            row.appendChild(el('span', 'cov-pct', v + '%'));
+            box.appendChild(row);
+        });
+        body.appendChild(box);
+    }
+    const gaps = a.gaps || [];
+    if (gaps.length) {
+        body.appendChild(el('div', 'readiness-h', "Still missing"));
+        const ul = el('ul', 'readiness-gaps');
+        gaps.forEach(g => ul.appendChild(el('li', null, g)));
+        body.appendChild(ul);
+    }
+    const validation = a.validation || [];
+    if (validation.length) {
+        body.appendChild(el('div', 'readiness-h', "Claim check"));
+        const list = el('div', 'readiness-valid');
+        validation.forEach(v => {
+            const meta = _VALID_META[v.status] || _VALID_META.asserted;
+            const item = el('div', 'valid-item ' + meta.cls);
+            item.appendChild(el('span', 'valid-icon', meta.icon));
+            const vbody = el('div', 'valid-body');
+            vbody.appendChild(el('div', 'valid-claim', v.claim));
+            vbody.appendChild(el('div', 'valid-note', meta.label + (v.note ? ' — ' + v.note : '')));
+            item.appendChild(vbody);
+            list.appendChild(item);
+        });
+        body.appendChild(list);
+    }
+}
+
+// Grow the readiness panel's max-height (see .readiness-panel.is-expanded)
+// for reading a long validation/gaps list comfortably, or shrink it back to
+// the compact inline form. Stays a normal flex sibling of chatBox — never
+// overlays on top of it.
+function toggleReadinessExpand() {
+    document.getElementById('readinessPanel').classList.toggle('is-expanded');
+    renderReadinessPanel(currentAssessment);
+}
+
+// tiny DOM helper
+function el(tag, cls, text) {
+    const n = document.createElement(tag);
+    if (cls) n.className = cls;
+    if (text != null) n.textContent = text;
+    return n;
+}
+
+// Explicit, on-demand: the engineer clicks this once they've set the filter
+// the way they want and are submitting it as a round of evidence. One LLM
+// call does three things at once — analyzes what this round's filter/delta
+// actually captures, asks 1-3 grounded follow-up questions (structured, same
+// "pick an option or type your own" shape as Claude's own AskUserQuestion),
+// and self-scores overall readiness to export. Reusable: change the filter
+// and click again to log another round, or just keep typing in the chat box
+// without clicking anything — both feed the same chat_history the eventual
+// Export Skill step reads from.
+// The header toggle is the single source of truth for the conversation mode:
+// checked = load the existing WiFi/BT skills as prior knowledge (interview only
+// probes what's NEW beyond them; export stays non-overlapping); unchecked =
+// teach from scratch. Every LLM-triggering call (log round, live assess,
+// export) sends this value so the whole conversation stays in one mode.
+function priorMode() {
+    const t = document.getElementById('priorToggle');
+    return !!(t && t.checked);
+}
+
+// When the toggle flips mid-conversation, tell the server right away so the
+// auto-fired background assess (and a page reload) reflect the new mode even
+// before the next Log Round.
+function onPriorToggle() {
+    fetch("{{ url_for('learning.set_mode') }}", {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({use_prior_knowledge: priorMode()}),
+    }).catch(() => {});
+}
+
+// Single Log Round button — runs analysis in whatever mode the header toggle
+// is set to. Reusable: change the filter and click again for another round.
+function logFilterRound() {
+    if (isBusy()) return;
+    const btn = document.getElementById('logRoundBtn');
+    const label = btn.innerHTML;
+    setBusy(true);
+    btn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Analyzing…';
+    const restore = () => { setBusy(false); btn.innerHTML = label; };
+    fetch("{{ url_for('learning.log_round') }}", {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({use_prior_knowledge: priorMode()}),
+    })
+        .then(r => r.json())
+        .then(d => {
+            restore();
+            if (!d.success) { alert(d.message); return; }
+            if (d.usage) updateTokenBadge(d.usage.session);
+            if (d.assessment) applyAssessment(d.assessment);
+            appendMsg('assistant', `**Round ${d.round}:** ${d.analysis}`, 'all');
+            if (d.questions && d.questions.length) renderQuestionCards(d.questions);
+        })
+        .catch(e => { restore(); alert('Failed: ' + e); });
+}
+
+// "Teach this step" — USER-LED: clicking a step's 🎓 icon (see
+// renderStepPanel) opens a box where the ENGINEER writes first — what key
+// thing they noticed, what the problem/reasoning was — instead of the LLM
+// firing a question. Submitting sends that straight to /learning/confirm_step,
+// which records it as this operation's reason immediately, then the LLM
+// condenses it into a confirmable knowledge-core statement + adds its own
+// expert perspective (see renderStepConfirmCard). Uses the same
+// prior-knowledge toggle as Log Round (see priorMode()) so PRIOR mode keeps
+// the knowledge core distinct from an already-loaded skill's own content.
+function openStepExplainBox(seq, anchorBtn) {
+    if (isBusy() || anchorBtn.disabled) return;
+    const box = document.getElementById('chatBox');
+    const card = el('div', 'chat-question-card step-explain-card mb-2');
+    card.appendChild(el('div', 'chat-q-progress', `🎓 Teaching step #${seq}`));
+    card.appendChild(el('div', 'chat-q-text', 'What key thing did you notice — and what was the problem?'));
+
+    const textarea = document.createElement('textarea');
+    textarea.className = 'form-control form-control-sm step-explain-input';
+    textarea.rows = 3;
+    textarea.placeholder = 'e.g. "Mcc floods the log with periodic housekeeping noise unrelated to roam scoring — excluding it here is safe because..."';
+
+    const actions = el('div', 'step-explain-actions');
+    const submitBtn = el('button', 'btn btn-sm btn-primary', 'Submit');
+    const cancelBtn = el('button', 'btn btn-sm btn-outline-secondary', 'Cancel');
+    actions.appendChild(submitBtn);
+    actions.appendChild(cancelBtn);
+
+    cancelBtn.onclick = () => card.remove();
+    const submit = () => {
+        const explanation = textarea.value.trim();
+        if (!explanation) return;
+        submitStepExplanation(seq, explanation, card);
+    };
+    submitBtn.onclick = submit;
+    textarea.onkeydown = (e) => {
+        if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); submit(); }
+    };
+
+    card.appendChild(textarea);
+    card.appendChild(actions);
+    box.appendChild(card);
+    box.scrollTop = box.scrollHeight;
+    textarea.focus();
+}
+
+function submitStepExplanation(seq, explanation, card) {
+    if (isBusy()) return;
+    setBusy(true);
+    const submitBtn = card.querySelector('.step-explain-actions .btn-primary');
+    submitBtn.disabled = true;
+    const label = submitBtn.textContent;
+    submitBtn.textContent = 'Submitting…';
+    fetch("{{ url_for('learning.confirm_step') }}", {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({seq: seq, explanation: explanation}),
+    })
+        .then(r => r.json())
+        .then(d => {
+            setBusy(false);
+            // `d.operations` is present whenever the reason was actually
+            // saved server-side — annotate_reason runs BEFORE the LLM call,
+            // so even an LLM failure still lands here (see confirm_step's
+            // except-branch), not the "hard failure" branch below. Only a
+            // genuine pre-save failure (unknown operation) skips it.
+            if (d.operations) {
+                card.remove();
+                appendMsg('user', explanation, seq);
+                if (d.usage) updateTokenBadge(d.usage.session);
+                syncOpsQuiet(d); // updates the step's "✓ why" indicator
+                if (!d.success) {
+                    appendMsg('assistant', `⚠️ Reason saved, but couldn't get a knowledge-core summary: ${d.message}`, seq);
+                    return;
+                }
+                if (d.llm_unavailable) return; // reason saved; nothing more to show
+                renderStepConfirmCard(seq, d.knowledge_core, d.expert_note, d.follow_up_question);
+                return;
+            }
+            // Nothing was saved (e.g. the operation vanished mid-edit) — keep
+            // the card open with the engineer's text intact so they can retry
+            // instead of losing what they wrote.
+            submitBtn.disabled = false; submitBtn.textContent = label;
+            alert(d.message);
+        })
+        .catch(e => {
+            setBusy(false);
+            submitBtn.disabled = false; submitBtn.textContent = label;
+            alert('Failed: ' + e);
+        });
+}
+
+// The LLM's response to a step explanation: a condensed, CONFIRMABLE
+// knowledge-core statement (✓ Confirm just acknowledges it — the underlying
+// reason is already saved) plus the LLM's own expert_note (a second opinion,
+// shown read-only), and an optional follow-up question the engineer can
+// choose to address by adding more (never forced — this flow is user-led).
+function renderStepConfirmCard(seq, knowledgeCore, expertNote, followUp) {
+    const box = document.getElementById('chatBox');
+    const card = el('div', 'chat-question-card step-confirm-card mb-2');
+    card.appendChild(el('div', 'chat-q-progress', `🧠 Knowledge core — step #${seq}`));
+    card.appendChild(el('div', 'step-confirm-core', knowledgeCore));
+    if (expertNote) {
+        const note = el('div', 'step-confirm-note');
+        note.appendChild(el('span', 'step-confirm-note-label', '💭 Expert note: '));
+        note.appendChild(document.createTextNode(expertNote));
+        card.appendChild(note);
+    }
+    if (followUp) {
+        const fu = el('div', 'step-confirm-followup');
+        fu.appendChild(el('span', 'step-confirm-note-label', '❓ Optionally worth clarifying: '));
+        fu.appendChild(document.createTextNode(followUp));
+        card.appendChild(fu);
+    }
+
+    const actions = el('div', 'step-explain-actions');
+    const confirmBtn = el('button', 'btn btn-sm btn-success', '✓ Looks right');
+    const refineBtn = el('button', 'btn btn-sm btn-outline-secondary', '✎ Add more');
+    confirmBtn.onclick = () => card.remove();
+    refineBtn.onclick = () => {
+        card.remove();
+        openStepExplainBox(seq, {disabled: false}); // reopen for additional clarification
+    };
+    actions.appendChild(confirmBtn);
+    actions.appendChild(refineBtn);
+    card.appendChild(actions);
+
+    box.appendChild(card);
+    box.scrollTop = box.scrollHeight;
+}
+
+// "Ask about this step" — the LLM-LED counterpart to 🎓's user-led explain
+// box: clicking a step's ❓ icon (see renderStepPanel) has the LLM fire ONE
+// targeted question about that edit instead of the engineer writing first.
+// Always skippable — this is a secondary entry point for whoever would rather
+// answer a question than compose free text, never a forced interruption.
+function askStepQuestion(seq, btn) {
+    if (isBusy() || btn.disabled) return;
+    setBusy(true);
+    const label = btn.innerHTML;
+    btn.innerHTML = '<i class="fas fa-spinner fa-spin"></i>';
+    fetch("{{ url_for('learning.ask_step') }}", {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({seq: seq}),
+    })
+        .then(r => r.json())
+        .then(d => {
+            setBusy(false);
+            btn.innerHTML = label;
+            if (!d.success) { alert(d.message); return; }
+            if (d.usage) updateTokenBadge(d.usage.session);
+            renderStepAskCard(seq, d.question);
+        })
+        .catch(e => { setBusy(false); btn.innerHTML = label; alert('Failed: ' + e); });
+}
+
+// Renders the ❓ question with the SAME options/custom-answer shape as
+// showNextQuestionCard, plus an explicit Skip. Skipping is purely client-side
+// (dismiss, no backend call — nothing was asked "out loud" to the model to
+// walk back). Answering posts to /learning/answer_step_question, which tags
+// both messages with this step and only fills the reason if it's still empty.
+function renderStepAskCard(seq, q) {
+    const box = document.getElementById('chatBox');
+    const card = el('div', 'chat-question-card step-ask-card mb-2');
+    card.appendChild(el('div', 'chat-q-progress', `❓ Step #${seq}`));
+    card.appendChild(el('div', 'chat-q-text', q.question));
+
+    const customBox = el('div', 'chat-q-custom');
+    if (q.type === 'choice' && q.options && q.options.length) {
+        customBox.style.display = 'none';
+        const optsBox = el('div', 'chat-q-opts');
+        q.options.forEach(opt => {
+            const b = el('button', 'chat-q-opt', opt);
+            b.type = 'button';
+            b.onclick = () => submitStepAnswer(seq, q.question, opt, card);
+            optsBox.appendChild(b);
+        });
+        const otherBtn = el('button', 'chat-q-opt chat-q-opt-other', 'Other…');
+        otherBtn.type = 'button';
+        otherBtn.onclick = () => {
+            optsBox.style.display = 'none';
+            customBox.style.display = 'flex';
+            customBox.querySelector('input').focus();
+        };
+        optsBox.appendChild(otherBtn);
+        card.appendChild(optsBox);
+    } else {
+        customBox.style.display = 'flex';
+    }
+
+    const input = document.createElement('input');
+    input.type = 'text';
+    input.className = 'form-control form-control-sm';
+    input.placeholder = 'Type your answer…';
+    input.onkeypress = (e) => {
+        if (e.key === 'Enter' && input.value.trim()) submitStepAnswer(seq, q.question, input.value.trim(), card);
+    };
+    const sendBtn = el('button', 'btn btn-sm btn-primary');
+    sendBtn.type = 'button';
+    sendBtn.innerHTML = '<i class="fas fa-paper-plane"></i>';
+    sendBtn.onclick = () => { if (input.value.trim()) submitStepAnswer(seq, q.question, input.value.trim(), card); };
+    const skipBtn = el('button', 'btn btn-sm btn-outline-secondary', 'Skip');
+    skipBtn.type = 'button';
+    skipBtn.onclick = () => card.remove();
+
+    customBox.appendChild(input);
+    customBox.appendChild(sendBtn);
+    customBox.appendChild(skipBtn);
+    card.appendChild(customBox);
+    // Choice-type questions show Skip alongside the options too, not only
+    // inside the (initially hidden) custom-answer row.
+    if (q.type === 'choice' && q.options && q.options.length) {
+        const skipRow = el('div', 'step-ask-skip-row');
+        const skip2 = el('button', 'btn btn-sm btn-outline-secondary', 'Skip');
+        skip2.type = 'button';
+        skip2.onclick = () => card.remove();
+        skipRow.appendChild(skip2);
+        card.appendChild(skipRow);
+    }
+
+    box.appendChild(card);
+    box.scrollTop = box.scrollHeight;
+}
+
+function submitStepAnswer(seq, question, answer, card) {
+    if (isBusy()) return;
+    setBusy(true);
+    fetch("{{ url_for('learning.answer_step_question') }}", {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({seq: seq, question: question, answer: answer}),
+    })
+        .then(r => r.json())
+        .then(d => {
+            setBusy(false);
+            card.remove();
+            if (!d.success) { alert(d.message); return; }
+            appendMsg('assistant', `❓ ${question}`, seq);
+            appendMsg('user', answer, seq);
+            syncOpsQuiet(d); // updates the step's "✓ why" indicator (only if it was previously empty)
+        })
+        .catch(e => { setBusy(false); alert('Failed: ' + e); });
+}
+
+// Whatever number of questions the LLM returns in one batch, show them ONE
+// at a time — a card is only for the current question; answering it (click
+// an option, or type + send) removes it and reveals the next, rather than
+// dumping every question into the chat at once.
+function renderQuestionCards(questions) {
+    appendMsg('assistant', 'Follow-up — pick an option or type your own:', 'all');
+    showNextQuestionCard(questions.slice(), 0, questions.length);
+}
+
+function showNextQuestionCard(queue, doneCount, total) {
+    if (!queue.length) return;
+    const q = queue.shift();
+    const box = document.getElementById('chatBox');
+
+    const card = document.createElement('div');
+    card.className = 'chat-question-card mb-2';
+
+    const progress = document.createElement('div');
+    progress.className = 'chat-q-progress';
+    progress.textContent = `Question ${doneCount + 1} of ${total}`;
+    card.appendChild(progress);
+
+    const qText = document.createElement('div');
+    qText.className = 'chat-q-text';
+    qText.textContent = q.question;
+    card.appendChild(qText);
+
+    const advance = () => showNextQuestionCard(queue, doneCount + 1, total);
+    // forceTag 'all': these are Log Round follow-ups, about the whole round —
+    // not whatever step the step-context selector happens to be set to.
+    const finish = (answerText) => { card.remove(); sendMsg(answerText, undefined, 'all'); advance(); };
+
+    const customBox = document.createElement('div');
+    customBox.className = 'chat-q-custom';
+
+    if (q.type === 'choice' && q.options && q.options.length) {
+        customBox.style.display = 'none';
+        const optsBox = document.createElement('div');
+        optsBox.className = 'chat-q-opts';
+        q.options.forEach(opt => {
+            const b = document.createElement('button');
+            b.type = 'button';
+            b.className = 'chat-q-opt';
+            b.textContent = opt;
+            b.onclick = () => finish(opt);
+            optsBox.appendChild(b);
+        });
+        const otherBtn = document.createElement('button');
+        otherBtn.type = 'button';
+        otherBtn.className = 'chat-q-opt chat-q-opt-other';
+        otherBtn.textContent = 'Other…';
+        otherBtn.onclick = () => {
+            optsBox.style.display = 'none';
+            customBox.style.display = 'flex';
+            customBox.querySelector('input').focus();
+        };
+        optsBox.appendChild(otherBtn);
+        card.appendChild(optsBox);
+    } else {
+        customBox.style.display = 'flex';
+    }
+
+    const input = document.createElement('input');
+    input.type = 'text';
+    input.className = 'form-control form-control-sm';
+    input.placeholder = 'Type your answer…';
+    input.onkeypress = (e) => {
+        if (e.key === 'Enter') { const v = input.value.trim(); if (v) finish(v); }
+    };
+    const sendBtn = document.createElement('button');
+    sendBtn.type = 'button';
+    sendBtn.className = 'btn btn-sm btn-primary';
+    sendBtn.innerHTML = '<i class="fas fa-paper-plane"></i>';
+    sendBtn.onclick = () => { const v = input.value.trim(); if (v) finish(v); };
+    customBox.appendChild(input);
+    customBox.appendChild(sendBtn);
+    card.appendChild(customBox);
+
+    box.appendChild(card);
+    box.scrollTop = box.scrollHeight;
+}
+
+// ---- Export a skill from the rounds/chat gathered so far, open the Edit Skill modal ----
+// Pre-export 防呆 gate: if readiness is still low, or the assessment flagged
+// claims that aren't log-verified (or open contradictions), spell that out and
+// let the engineer decide — export is a hint-gated action, never hard-blocked.
+//
+// /learning/converge can return MORE THAN ONE draft when the conversation
+// actually covered several mutually-exclusive scenarios (see
+// SYNTHESIS_SYS_PROMPT's split rule) — draftQueue/draftTotal step the
+// engineer through each one's Edit Skill review/save in turn instead of only
+// ever handling a single draft.
+let draftQueue = [];
+let draftTotal = 0;
+
+// Single export — it follows the SESSION conversation mode already chosen via
+// the two Log Round buttons (state.prior_knowledge server-side), so there's no
+// mode switch here. Always creates brand-new skills; splits into several when
+// the chat spans distinct knowledge domains.
+function exportSkill() {
+    const btn = document.getElementById('exportSkillBtn');
+    // Guard FIRST, before the confirm() dialog even opens — a native
+    // confirm() blocks the page but a fast double-click still queues a
+    // second click event that fires the instant the dialog closes; checking
+    // disabled state up front (rather than only after the dialog) is what
+    // actually stops a second /learning/converge call from firing (which is
+    // exactly what produced the duplicate skill entries seen earlier). Also
+    // checks the GLOBAL lock so Export can't start while Log Round, a chat
+    // send, or a step teach/ask is still in flight, and vice versa.
+    if (btn.disabled || isBusy()) return;
+
+    if (currentAssessment) {
+        const score = (currentAssessment.readiness || {}).score;
+        const flagged = (currentAssessment.validation || []).filter(v => v.status !== 'verified');
+        const gaps = currentAssessment.gaps || [];
+        const warnings = [];
+        if (typeof score === 'number' && score < 60)
+            warnings.push(`• Readiness is only ${score}% — the skill may be thin.`);
+        if (flagged.length)
+            warnings.push(`• ${flagged.length} claim(s) are NOT verified from this log (will be exported as domain knowledge, not proven fact):\n` +
+                flagged.map(v => `    - ${v.claim}`).join('\n'));
+        if (gaps.length)
+            warnings.push(`• ${gaps.length} open item(s) still unanswered:\n` + gaps.map(g => `    - ${g}`).join('\n'));
+        if (warnings.length &&
+            !confirm("Export anyway?\n\n" + warnings.join('\n\n') +
+                     "\n\nYou can still edit everything in the next screen before saving.")) {
+            return;
+        }
+    }
+    if (btn.disabled || isBusy()) return; // re-check: a queued second click could have landed during confirm()
+    const label = btn.innerHTML;
+    btn.disabled = true;
+    setBusy(true);
+    btn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Exporting…';
+    const restore = () => { btn.disabled = false; setBusy(false); btn.innerHTML = label; };
+    fetch("{{ url_for('learning.converge') }}", {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({use_prior_knowledge: priorMode()}),
+    })
+        .then(r => r.json())
+        .then(d => {
+            restore();
+            if (!d.success) { alert(d.message); return; }
+            if (d.usage) updateTokenBadge(d.usage.session);
+            draftQueue = (d.drafts || []).slice();
+            draftTotal = draftQueue.length;
+            if (!draftTotal) { alert('Nothing to export.'); return; }
+            if (draftTotal > 1) {
+                alert(`This session covers ${draftTotal} mutually-exclusive scenarios — ` +
+                      `you'll review and save them one at a time, starting now.`);
+            }
+            openNextDraft();
+        })
+        .catch(e => { restore(); alert('Export failed: ' + e); });
+}
+
+// Pop the next queued draft into the Edit Skill modal. Every draft is a
+// brand-new skill (no extend/diff routing) — its `domain` (WiFi/BT) tells
+// /learning/save which local file to file it in. When the LLM split the
+// conversation into several distinct-domain skills, they're reviewed/saved
+// one at a time via draftQueue.
+function openNextDraft() {
+    if (!draftQueue.length) return;
+    const idx = draftTotal - draftQueue.length + 1;
+    const draft = draftQueue.shift();
+    currentDraft = draft;
+
+    // Every draft is a new skill. `note` (if present) explains what distinct
+    // scenario it isolates — in "Export vs WiFi/BT" mode that's the
+    // non-overlap rationale; surface it before the editor opens.
+    const countLabel = draftTotal > 1 ? ` (${idx} of ${draftTotal})` : '';
+    if (draft.note) {
+        alert('New skill' + countLabel + `: "${draft.name}"\n\n${draft.note}`);
+    }
+    SkillEditor.open(draft, {
+        title: 'New Skill' + countLabel,
+        subtitle: draft.name + ' — review before saving',
+        saveUrl: "{{ url_for('learning.save') }}",
+        onSaved: function (d2) {
+            alert('Skill saved!' + (draftQueue.length ? ` Now reviewing the next one (${draftQueue.length} left)…` : ''));
+            activeSkillKey = d2.skill_key;
+            document.getElementById('viewSkillBtn').disabled = false;
+            if (draftQueue.length) {
+                openNextDraft();
+                return;
+            }
+            applyAssessment(null); // server reset round_count/assessment on save
+            const rp = document.getElementById('readinessPanel');
+            rp.style.display = 'none';
+            rp.classList.remove('is-expanded');
+        },
+    });
+}
+
+renderFilters();
+renderOperations();
+renderStepTagSelector();
+{% if state.log_domain %}refreshSkillList({{ state.log_domain|tojson }});{% endif %}
+// Restore the event-log panel from server state on reload (BT only).
+updateEvtSection({{ (state.log_domain or '')|tojson }}, {{ (state.event_log_path|length > 0)|tojson }});
+document.getElementById('dateSynthWarn').style.display = {{ (state.log_date_anchor|length > 0)|tojson }} ? 'inline' : 'none';
+// Log row clicked → highlight + scroll to the nearest event (reverse sync);
+// only meaningful while the event panel is open. Delegated so it survives every
+// renderLogRows() re-render.
+document.getElementById('previewBox').addEventListener('click', function (e) {
+    if (!_evtOpen) return;
+    const row = e.target.closest('.tat-log-row[data-ms]');
+    if (!row) return;
+    jumpEvtToMs(+row.dataset.ms);
+});
+// Restore the prior-knowledge toggle from server state on reload.
+document.getElementById('priorToggle').checked = {{ state.prior_knowledge|tojson }};
+{% if session_usage %}updateTokenBadge({{ session_usage|tojson }});{% endif %}
+{% if state.last_readiness or state.last_gaps or state.last_validation %}
+applyAssessment({
+    readiness: {{ (state.last_readiness or {})|tojson }},
+    coverage: {{ (state.last_coverage or {})|tojson }},
+    gaps: {{ (state.last_gaps or [])|tojson }},
+    validation: {{ (state.last_validation or [])|tojson }},
+});
+{% endif %}
+// Replay any chat history from a prior page load through appendMsg (rather
+// than server-rendering it as plain text) so it gets the same markdown
+// rendering + step-tag badge as live messages. Older sessions saved before
+// message tagging existed have no `step` field — appendMsg's stepTag param
+// is `undefined` for those (not "all"), which correctly renders NO badge
+// rather than mislabeling old messages as general knowledge they were never
+// actually confirmed to be.
+({{ state.chat_history|tojson }}).forEach(m => appendMsg(m.role, m.content, m.step));
+</script>
+{% endblock %}

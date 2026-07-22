@@ -1,0 +1,7 @@
+__pycache__/
+*.pyc
+.venv/
+venv/
+configs/keys_local.py
+data/cache/
+.vscode/
