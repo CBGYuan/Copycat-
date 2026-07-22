@@ -295,21 +295,6 @@ def apply_filter():
     })
 
 
-@log_viewer_bp.route("/annotate_operation", methods=["POST"])
-def annotate_operation():
-    """Store the engineer's stated reason for one journal entry — from the
-    inline 'why?' box next to that edit. This reason then feeds both the
-    interview context and the final skill synthesis, so the captured judgment
-    isn't lost."""
-    data = request.get_json(silent=True) or {}
-    seq = data.get("seq")
-    reason = data.get("reason", "")
-    state = session_store.get_state()
-    if not isinstance(seq, int) or not operation_journal.annotate_reason(state, seq, reason):
-        return jsonify({"success": False, "message": "Unknown operation"}), 400
-    return jsonify({"success": True, "operations": operation_journal.payload(state)})
-
-
 @log_viewer_bp.route("/answer_red_flag", methods=["POST"])
 def answer_red_flag():
     """Answer to a PASSIVELY-triggered question (see operation_journal.

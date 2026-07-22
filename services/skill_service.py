@@ -32,14 +32,22 @@ end-to-end (app_config.skills / app_config.bt_skills) — see
 load_shared_skills()'s return shape.
 """
 import glob
+import json
 import os
 import re
+from datetime import datetime
 from typing import Dict, List, Optional
 
 import yaml
 from pydantic import BaseModel, Field
 
 from configs import path_configs
+
+# How many prior-version snapshots to keep per skill in `version_history`
+# before the oldest is dropped — the audit trail is a rolling window, not an
+# unbounded log, so a skill edited hundreds of times doesn't bloat the YAML.
+# (Same rolling-window idea as AutoSkill's maintenance version history.)
+_HISTORY_LIMIT = 30
 
 
 class Skill(BaseModel):
@@ -49,6 +57,48 @@ class Skill(BaseModel):
     exclusive: List[str] = Field(default_factory=list)
     tat_path: Optional[str] = None
     expert_rules: str = ""
+    # AutoSkill-style versioning (Phase 1): `version` is bumped one patch level
+    # on every UPDATE to an existing skill (see save_skill), and a snapshot of
+    # the PRE-edit state is pushed onto `version_history` — giving the skill an
+    # inspectable, roll-back-able evolution trail instead of silently
+    # overwriting. A brand-new skill starts at "0.1.0" with an empty history.
+    version: str = "0.1.0"
+    version_history: List[dict] = Field(default_factory=list)
+
+
+def _now_iso() -> str:
+    """Seconds-precision local timestamp for a version snapshot's `saved_at`."""
+    return datetime.now().isoformat(timespec="seconds")
+
+
+def _bump_patch(version: str) -> str:
+    """Increment the patch component of a semver-ish "MAJOR.MINOR.PATCH"
+    string (0.1.0 -> 0.1.1). Anything not shaped like three integers resets to
+    "0.1.1" — a safe, monotonic-ish default. Ported from AutoSkill's
+    maintenance._bump_patch so learned skills iterate the same way."""
+    parts = [p for p in str(version or "").split(".") if p.strip().isdigit()]
+    if len(parts) != 3:
+        return "0.1.1"
+    major, minor, patch = int(parts[0]), int(parts[1]), int(parts[2])
+    return f"{major}.{minor}.{patch + 1}"
+
+
+def _coerce_history(raw_hist) -> List[dict]:
+    """Read `version_history` back from YAML tolerantly: it's normally stored
+    as a JSON string inside a `|` block scalar (see _dump_skills_yaml — keeps
+    the hand-rolled writer simple and the multi-line expert_rules snapshots
+    from bloating the file), but a hand-edited plain-YAML list is accepted too.
+    Anything unparseable degrades to an empty trail rather than raising."""
+    if isinstance(raw_hist, list):
+        return [dict(h) for h in raw_hist if isinstance(h, dict)]
+    if isinstance(raw_hist, str) and raw_hist.strip():
+        try:
+            parsed = json.loads(raw_hist)
+            if isinstance(parsed, list):
+                return [dict(h) for h in parsed if isinstance(h, dict)]
+        except Exception:
+            pass
+    return []
 
 
 def _parse_skills_yaml(raw: dict) -> Dict[str, Skill]:
@@ -64,6 +114,8 @@ def _parse_skills_yaml(raw: dict) -> Dict[str, Skill]:
                 exclusive=val.get("exclusive") or [],
                 tat_path=val.get("tat_path"),
                 expert_rules=val.get("expert_rules", ""),
+                version=str(val.get("version") or "0.1.0"),
+                version_history=_coerce_history(val.get("version_history")),
             )
         except Exception as e:
             print(f"⚠️  Skipping invalid skill '{key}': {e}")
@@ -174,6 +226,9 @@ def _skill_to_raw(skill: Skill) -> dict:
         entry["exclusive"] = skill.exclusive
     if skill.tat_path:
         entry["tat_path"] = skill.tat_path
+    entry["version"] = skill.version or "0.1.0"
+    if skill.version_history:
+        entry["version_history"] = skill.version_history
     return entry
 
 
@@ -190,7 +245,9 @@ _SKILLS_YAML_HEADER = (
     "#   name: skill name\n"
     "#   description: a brief description of the skill\n"
     "#   keywords: use \"-\" to represent each keyword\n"
-    "#   expert_rules: use \"|\" to start a multi-line string"
+    "#   expert_rules: use \"|\" to start a multi-line string\n"
+    "#   version: semver-ish patch, auto-bumped on each edit\n"
+    "#   version_history: rolling JSON audit trail of prior versions"
 )
 
 
@@ -235,6 +292,17 @@ def _dump_skills_yaml(skills_raw: dict) -> str:
             out.append(_yaml_block_literal(expert_rules, indent=4))
         if entry.get("tat_path"):
             out.append(f"  tat_path: {_yaml_dq(entry['tat_path'])}")
+        # Versioning fields last, so the hand-authored name/description/
+        # keywords/expert_rules stay in their familiar order at the top and the
+        # audit fields sit at the bottom. version_history is serialized as
+        # single-line JSON inside a `|` block: it round-trips cleanly through
+        # yaml.safe_load + json.loads (see _coerce_history) without the
+        # hand-rolled writer needing to emit nested list-of-dict YAML.
+        out.append(f"  version: {_yaml_dq(entry.get('version') or '0.1.0')}")
+        history = entry.get("version_history") or []
+        if history:
+            out.append("  version_history: |")
+            out.append(_yaml_block_literal(json.dumps(history, ensure_ascii=False), indent=4))
         out.append("")
     return "\n".join(out).rstrip("\n") + "\n"
 
@@ -286,6 +354,34 @@ def save_skill(skill_key: Optional[str], skill: Skill, domain: str = "wifi",
         while key in raw:
             key = f"{base_key}_{i}"
             i += 1
+        # Brand-new skill: start the version line at 0.1.0 with an empty trail,
+        # unless the caller deliberately supplied one already.
+        if not (skill.version or "").strip():
+            skill.version = "0.1.0"
+    else:
+        # UPDATE of an existing skill: push a snapshot of the PRE-edit state
+        # onto the history trail and bump the patch version. The old state is
+        # read from `raw[key]` (the currently-stored entry in the merged view),
+        # NOT from the incoming `skill` (which is the just-edited NEW state) —
+        # so the trail records what the skill looked like before this save,
+        # even when the caller rebuilt the Skill without carrying version
+        # fields through (e.g. the Edit-Skill modal's save payload). This makes
+        # save_skill the single source of truth for version bumping regardless
+        # of what the route passes in.
+        old_entry = raw[key]
+        old_version = str(old_entry.get("version") or "0.1.0")
+        history = _coerce_history(old_entry.get("version_history"))
+        history.append({
+            "version": old_version,
+            "name": old_entry.get("name", ""),
+            "description": old_entry.get("description", ""),
+            "keywords": list(old_entry.get("keywords") or []),
+            "exclusive": list(old_entry.get("exclusive") or []),
+            "expert_rules": old_entry.get("expert_rules", ""),
+            "saved_at": _now_iso(),
+        })
+        skill.version = _bump_patch(old_version)
+        skill.version_history = history[-_HISTORY_LIMIT:]
 
     raw[key] = _skill_to_raw(skill)
     _write_skills_yaml(raw, domain)

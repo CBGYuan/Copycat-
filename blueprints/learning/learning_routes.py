@@ -446,26 +446,48 @@ def assess():
 
 @learning_bp.route("/converge", methods=["POST"])
 def converge():
-    """Synthesize one or more BRAND-NEW skill drafts from the chat interview +
-    operation-pattern stats. The whole back-and-forth in the chat panel IS
-    the interview, so no separate Q&A step — the chat history is already
-    folded into the context block that synthesize_skill_draft reads.
+    """Synthesize one or more skill drafts from the chat interview +
+    operation-pattern stats, then route EACH draft through the Phase 2
+    retrieval-assisted maintenance decision (learning_service.route_draft) —
+    add / merge / discard, advisory only. The whole back-and-forth in the
+    chat panel IS the interview, so no separate Q&A step — the chat history
+    is already folded into the context block that synthesize_skill_draft
+    reads.
 
     It follows the conversation mode from the header prior-knowledge toggle
     (sent as `use_prior_knowledge`, falling back to the stored
-    state.prior_knowledge) — the export isn't a separate mode switch:
-      • FRESH — no prior-knowledge base is consulted at all. The conversation
-        is split into skills purely by the distinct knowledge domains it
-        covers; nothing is compared against already-saved skills.
+    state.prior_knowledge):
+      • FRESH — no prior-knowledge base is consulted during SYNTHESIS. The
+        conversation is split into drafts purely by the distinct knowledge
+        domains it covers.
       • PRIOR — the SAME-domain (WiFi vs BT, from state.log_domain) existing
-        skills are shown ONLY so the new skills stay mutually exclusive from
-        them. Still creates fresh skills — it never edits, extends, or adds
-        rules onto an existing skill.
+        skills are shown to synthesis ONLY so drafts stay mutually exclusive
+        from them.
+    Either mode may split the conversation into several drafts.
 
-    Either way the LLM may split the conversation into several drafts when it
-    genuinely covers more than one mutually-exclusive scenario, and every
-    draft is filed as a NEW skill (skill_key=None) — there is no extend/diff
-    routing anymore."""
+    Independently of that toggle, EVERY draft (FRESH or PRIOR) is then routed
+    through route_draft(), which decides per-draft whether it should become a
+    new skill or fold into an existing one:
+      - Tier 0 (continuity): state.active_skill_key — the ONE skill the
+        engineer explicitly loaded this session — is checked FIRST, in
+        isolation, but still has to pass a real similarity/judge gate before
+        a merge is suggested. This is a SEPARATE signal from the PRIOR-mode
+        toggle above: PRIOR only shapes what gets asked/extracted during the
+        interview so it doesn't re-cover known ground; continuity decides
+        WHERE the resulting draft should be filed at export time.
+      - Tier 1 (retrieval): the general domain-wide search, used whenever
+        Tier 0 doesn't apply or doesn't clear its own bar.
+    route_draft also grounds BOTH the judge and any merge in this session's
+    actual filter_stats (unique_hits/dropped per keyword — see
+    learning_service.keyword_quality_map) — a newly-merged keyword/exclude
+    term that measured zero marginal contribution this run is held back into
+    `low_value_keywords`/`low_value_exclusive` on the draft instead of being
+    silently unioned in, so a merge only ever adds keywords actually earning
+    their place, not just anything that sounded plausible in conversation.
+
+    The route's decision (`judge`) is attached to each draft for the frontend
+    to display — it never writes anything by itself; the engineer still
+    confirms/edits in the Edit-Skill modal before Save persists it."""
     llm_helper = app_config.llm_helper
     if not llm_helper or not llm_helper.is_ready:
         return jsonify({"success": False, "message": "LLM is not configured yet."}), 503
@@ -492,13 +514,23 @@ def converge():
     except Exception as e:
         return jsonify({"success": False, "message": f"LLM call failed: {e}"}), 500
 
-    drafts = result.get("drafts") or []
-    for draft in drafts:
-        # Every draft is a brand-new skill — the save route mints a fresh key.
-        draft["skill_key"] = None
+    raw_drafts = result.get("drafts") or []
+    pool = _skill_pool(domain)
+    # Only trust the continuity hint when the loaded skill actually belongs
+    # to THIS export's domain — a WiFi active_skill_key must never be checked
+    # against a BT draft (or vice versa); _skill_pool already keeps the two
+    # pools disjoint, so a cross-domain key simply won't be found in `pool`.
+    continuity_key = state.active_skill_key or None
+
+    drafts = []
+    for draft in raw_drafts:
         draft["domain"] = domain
         if state.tat_path:
             draft.setdefault("tat_path", state.tat_path)
+        routed = learning_service.route_draft(
+            llm_helper, draft, pool, continuity_key, filter_stats=state.filter_stats)
+        routed["domain"] = domain
+        drafts.append(routed)
 
     state.skill_draft = drafts
     return jsonify({
@@ -527,7 +559,18 @@ def save():
     except Exception as e:
         return jsonify({"success": False, "message": f"Invalid skill data: {e}"}), 400
 
-    skill_key = data.get("skill_key") or (state.active_skill_key if domain != "bt" else None) or None
+    # skill_key comes ONLY from what the frontend actually sends — the Edit-
+    # Skill modal pre-fills it from route_draft()'s judged decision when the
+    # engineer is looking at a suggested merge (see converge()), and it's
+    # null for a fresh "New Skill" draft. This used to also fall back to
+    # state.active_skill_key (whatever skill happened to be loaded as this
+    # session's filter baseline) whenever the payload's own skill_key was
+    # empty — which silently overwrote that loaded skill on EVERY "New
+    # Skill" export with zero similarity check, the exact opposite of what
+    # the UI told the engineer they were saving. That fallback is gone:
+    # merging onto an existing skill now only ever happens through a real
+    # judged decision the engineer can see and reject in the modal first.
+    skill_key = data.get("skill_key") or None
     # Snapshot the FULL currently-loaded merged view (shared baseline + this
     # engineer's contribution + previous local edits) into the local file,
     # not just this one skill — see skill_service.save_skill's docstring.

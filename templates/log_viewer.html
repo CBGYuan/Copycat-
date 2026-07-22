@@ -129,20 +129,6 @@
           </select>
           <button class="btn btn-outline-secondary" onclick="addFilter()"><i class="fas fa-plus"></i></button>
         </div>
-
-        <!-- Operation journal: the edit-by-edit history of what the engineer
-             did to the filter, each with its measured effect. Un-explained
-             material edits get a "why?" prompt so the reasoning (the real
-             skill) is captured, not just the final keyword list. -->
-        <div class="op-journal mt-2">
-          <div class="op-journal-head" onclick="toggleOpJournal()">
-            <i class="fas fa-list-ol"></i> Operation journal
-            <span id="opJournalCount" class="op-journal-count">0</span>
-            <span id="opJournalWhy" class="op-journal-why" style="display:none;"></span>
-            <i class="fas fa-chevron-down op-journal-chev"></i>
-          </div>
-          <div id="opJournalList" class="op-journal-list" style="display:none;"></div>
-        </div>
       </div>
     </div>
   </div>
@@ -203,13 +189,10 @@
         <div id="readinessPanel" class="readiness-panel" style="display:none;"></div>
         <div id="chatBox" class="p-2 flex-grow-1" style="overflow-y:auto; background:#f8f9fa; font-size:0.82rem; min-height:220px;"></div>
         <div class="card-footer p-2">
-          <!-- Which step (or "All") the next typed message gets tagged with —
-               see renderStepTagSelector/currentStepTag. Step-scoped cards
-               (teach/ask/red-flag) tag their own messages directly and don't
-               touch this. -->
-          <div id="stepTagSelector" class="step-tag-selector"></div>
+          <div id="stepTagDropdown" class="step-tag-dropdown" style="display:none;"></div>
           <div class="input-group input-group-sm">
             <input id="chatInput" class="form-control" data-busy-lock placeholder="Answer / ask…" onkeypress="if(event.key==='Enter') sendMsg();">
+            <button id="stepTagBtn" type="button" class="btn btn-outline-secondary step-tag-compact-btn" onclick="toggleStepTagDropdown()" title="Tag this message with a step (#N) or mark as general knowledge (All)">All</button>
             <button id="chatSendBtn" class="btn btn-primary" data-busy-lock onclick="sendMsg()"><i class="fas fa-paper-plane"></i></button>
           </div>
         </div>
@@ -330,46 +313,53 @@ function renderFilters() {
     document.getElementById('filterCount').textContent = enabledCount;
 }
 
-// ---- Operation journal (left panel) -------------------------------------
 // Every filter edit the engineer makes is recorded server-side with its
-// marginal effect; this renders that timeline and lets them annotate WHY —
-// the reasoning that turns a keyword list into a real skill.
+// marginal effect; the Steps panel (chat header) is what surfaces that
+// timeline and lets them teach WHY via the 🎓 flow.
 function syncOps(d) {
     if (d && d.operations) {
         operationData = d.operations;
-        renderOperations();
         surfaceRedFlags();
         renderStepPanel();
         renderStepTagSelector();
     }
 }
 
-// Pill row above the chat input: which step (or "All" for general/session-
-// wide knowledge) the NEXT typed message gets tagged with — see
-// currentStepTag / sendMsg. Step-scoped cards (teach/ask/red-flag) tag their
-// own messages directly and ignore this; it's only for the free-typed box.
+// Compact tag button next to the send button: shows current tag ("All" or
+// "#N"); clicking it toggles a small dropdown of all available steps.
+// Step-scoped cards (teach/red-flag) tag their own messages directly and
+// ignore this; it's only for the free-typed chat box.
 function renderStepTagSelector() {
-    const box = document.getElementById('stepTagSelector');
-    if (!box) return;
-    // If the previously-selected step no longer exists for some reason, fall
-    // back to "all" rather than silently tagging future messages with a
-    // dangling reference.
+    const dropdown = document.getElementById('stepTagDropdown');
+    const btn = document.getElementById('stepTagBtn');
+    if (!dropdown || !btn) return;
     if (currentStepTag !== 'all' && !operationData.some(o => o.seq === currentStepTag)) {
         currentStepTag = 'all';
     }
-    box.innerHTML = '';
+    btn.textContent = currentStepTag === 'all' ? 'All' : '#' + currentStepTag;
+
+    dropdown.innerHTML = '';
     const mkPill = (tag, label, title) => {
         const b = el('button', 'step-tag-pill' + (currentStepTag === tag ? ' is-active' : ''), label);
         b.type = 'button';
         if (title) b.title = title;
-        b.onclick = () => { currentStepTag = tag; renderStepTagSelector(); };
+        b.onclick = () => {
+            currentStepTag = tag;
+            renderStepTagSelector();
+            dropdown.style.display = 'none';
+        };
         return b;
     };
-    box.appendChild(mkPill('all', 'All', 'Tag the next message as general / session-wide knowledge'));
+    dropdown.appendChild(mkPill('all', 'All', 'Tag as general / session-wide knowledge'));
     operationData.forEach(o => {
         if (o.action === 'load_skill' || o.action === 'load_tat') return;
-        box.appendChild(mkPill(o.seq, '#' + o.seq, `Tag the next message as about step #${o.seq} (${o.verb} "${o.label || o.text}")`));
+        dropdown.appendChild(mkPill(o.seq, '#' + o.seq, `Tag as about step #${o.seq} (${o.verb} "${o.label || o.text}")`));
     });
+}
+
+function toggleStepTagDropdown() {
+    const dd = document.getElementById('stepTagDropdown');
+    dd.style.display = dd.style.display === 'none' ? 'flex' : 'none';
 }
 
 // ---- Passive red-flag questions ------------------------------------------
@@ -451,7 +441,7 @@ function showRedFlagCard(seq, question, opts) {
 // used after answer_red_flag's own response, which only carries the reason
 // update (no new flags to show, panel already reflects the just-answered one).
 function syncOpsQuiet(d) {
-    if (d && d.operations) { operationData = d.operations; renderOperations(); }
+    if (d && d.operations) { operationData = d.operations; renderStepPanel(); }
 }
 
 // ---- Step viewer -----------------------------------------------------------
@@ -537,17 +527,10 @@ function renderStepPanel() {
             const teachBtn = el('button', 'step-teach-btn');
             teachBtn.type = 'button';
             teachBtn.innerHTML = '<i class="fas fa-graduation-cap"></i>';
-            teachBtn.title = 'Teach the system why you made this edit (write your own explanation)';
+            teachBtn.title = 'Teach this step — write your explanation, then LLM may ask a follow-up';
             teachBtn.disabled = isBusy();
             teachBtn.onclick = (e) => { e.stopPropagation(); openStepExplainBox(o.seq, teachBtn); };
             row.appendChild(teachBtn);
-
-            const askBtn = el('button', 'step-ask-btn', '?');
-            askBtn.type = 'button';
-            askBtn.title = 'Ask me about this step (LLM asks a question, skippable)';
-            askBtn.disabled = isBusy();
-            askBtn.onclick = (e) => { e.stopPropagation(); askStepQuestion(o.seq, askBtn); };
-            row.appendChild(askBtn);
         }
         body.appendChild(row);
     });
@@ -572,84 +555,6 @@ function jumpToStep(fromIdx, toIdx) {
         (kids[i].querySelector('.chat-bubble') || kids[i]).classList.add('step-highlight');
     }
     kids[fromIdx].scrollIntoView({block: 'center', behavior: 'smooth'});
-}
-
-function toggleOpJournal() {
-    const list = document.getElementById('opJournalList');
-    list.style.display = (list.style.display === 'none' || !list.style.display) ? 'block' : 'none';
-}
-
-function renderOperations() {
-    const list = document.getElementById('opJournalList');
-    document.getElementById('opJournalCount').textContent = operationData.length;
-    // How many material edits still lack a reason — surfaced as a nudge.
-    const why = operationData.filter(o =>
-        !o.reason && o.action !== 'load_skill' && o.action !== 'load_tat' &&
-        (o.action === 'remove' || (o.effect && (o.effect.unique_hits || o.effect.dropped)))
-    ).length;
-    const whyEl = document.getElementById('opJournalWhy');
-    whyEl.style.display = why ? 'inline-block' : 'none';
-    whyEl.textContent = why ? `${why} need “why?”` : '';
-
-    list.innerHTML = '';
-    if (!operationData.length) {
-        list.appendChild(el('div', 'op-empty', 'Your filter edits will be logged here.'));
-        return;
-    }
-    operationData.forEach(o => {
-        const row = el('div', 'op-row' + (o.excluding ? ' is-exclude' : ''));
-        const head = el('div', 'op-head');
-        head.appendChild(el('span', 'op-seq', '#' + o.seq));
-        head.appendChild(el('span', 'op-verb', o.verb));
-        head.appendChild(el('span', 'op-text', o.label || o.text));
-        row.appendChild(head);
-        if (o.effect_phrase) row.appendChild(el('div', 'op-effect', o.effect_phrase));
-
-        const isLoad = o.action === 'load_skill' || o.action === 'load_tat';
-        if (o.reason) {
-            const r = el('div', 'op-reason');
-            r.appendChild(el('span', 'op-reason-label', 'why: '));
-            r.appendChild(document.createTextNode(o.reason));
-            const edit = el('button', 'op-why-edit', '✎');
-            edit.title = 'Edit reason';
-            edit.onclick = () => openReasonBox(o.seq, o.reason);
-            r.appendChild(edit);
-            row.appendChild(r);
-        } else if (!isLoad) {
-            const btn = el('button', 'op-why-btn', 'why did you do this?');
-            btn.onclick = () => openReasonBox(o.seq, '');
-            row.appendChild(btn);
-        }
-        row.id = 'op-row-' + o.seq;
-        list.appendChild(row);
-    });
-}
-
-// Inline reason editor for one journal entry — stores the engineer's WHY so
-// it feeds the interview + synthesis (POST /log_viewer/annotate_operation).
-function openReasonBox(seq, existing) {
-    const row = document.getElementById('op-row-' + seq);
-    if (!row || row.querySelector('.op-reason-box')) return;
-    const box = el('div', 'op-reason-box');
-    const input = document.createElement('input');
-    input.type = 'text';
-    input.className = 'form-control form-control-sm';
-    input.placeholder = 'e.g. periodic housekeeping, not scoring-relevant';
-    input.value = existing || '';
-    const save = el('button', 'btn btn-sm btn-primary', 'Save');
-    const submit = () => {
-        const reason = input.value.trim();
-        fetch("{{ url_for('log_viewer.annotate_operation') }}", {
-            method: 'POST', headers: {'Content-Type': 'application/json'},
-            body: JSON.stringify({seq: seq, reason: reason})
-        }).then(r => r.json()).then(d => { if (d.success) syncOps(d); });
-    };
-    input.onkeypress = (e) => { if (e.key === 'Enter') submit(); };
-    save.onclick = submit;
-    box.appendChild(input);
-    box.appendChild(save);
-    row.appendChild(box);
-    input.focus();
 }
 
 // ---- Compact path input helpers (copy-to-clipboard + transient status,
@@ -1521,6 +1426,11 @@ function logFilterRound() {
 // the knowledge core distinct from an already-loaded skill's own content.
 function openStepExplainBox(seq, anchorBtn) {
     if (isBusy() || anchorBtn.disabled) return;
+    // Sync the send-row step-tag button to whatever step is being taught, so
+    // anything typed in the main chat box while this box is open (or after
+    // "Continue teaching" reopens it) is tagged to the same step by default.
+    currentStepTag = seq;
+    renderStepTagSelector();
     const box = document.getElementById('chatBox');
     const card = el('div', 'chat-question-card step-explain-card mb-2');
     card.appendChild(el('div', 'chat-q-progress', `🎓 Teaching step #${seq}`));
@@ -1617,24 +1527,49 @@ function renderStepConfirmCard(seq, knowledgeCore, expertNote, followUp) {
         note.appendChild(document.createTextNode(expertNote));
         card.appendChild(note);
     }
-    if (followUp) {
-        const fu = el('div', 'step-confirm-followup');
-        fu.appendChild(el('span', 'step-confirm-note-label', '❓ Optionally worth clarifying: '));
-        fu.appendChild(document.createTextNode(followUp));
-        card.appendChild(fu);
-    }
 
+    // Primary actions: confirm done, or reopen explain box to keep teaching
     const actions = el('div', 'step-explain-actions');
     const confirmBtn = el('button', 'btn btn-sm btn-success', '✓ Looks right');
-    const refineBtn = el('button', 'btn btn-sm btn-outline-secondary', '✎ Add more');
+    const continueBtn = el('button', 'btn btn-sm btn-outline-primary', '＋ Continue teaching');
     confirmBtn.onclick = () => card.remove();
-    refineBtn.onclick = () => {
-        card.remove();
-        openStepExplainBox(seq, {disabled: false}); // reopen for additional clarification
-    };
+    continueBtn.onclick = () => { card.remove(); openStepExplainBox(seq, {disabled: false}); };
     actions.appendChild(confirmBtn);
-    actions.appendChild(refineBtn);
+    actions.appendChild(continueBtn);
     card.appendChild(actions);
+
+    // Optional LLM follow-up question — interactive: answer sends to chat with
+    // this step's tag; skip just dismisses the sub-section (card stays).
+    if (followUp) {
+        const fuSection = el('div', 'step-confirm-followup-section');
+        fuSection.appendChild(el('div', 'step-confirm-note-label', '❓ Follow-up:'));
+        fuSection.appendChild(el('div', 'chat-q-text', followUp));
+        const fuRow = el('div', 'step-explain-actions');
+        const fuInput = document.createElement('input');
+        fuInput.type = 'text';
+        fuInput.className = 'form-control form-control-sm';
+        fuInput.placeholder = 'Answer… or skip';
+        const fuSend = el('button', 'btn btn-sm btn-primary');
+        fuSend.type = 'button';
+        fuSend.innerHTML = '<i class="fas fa-paper-plane"></i>';
+        const fuSkip = el('button', 'btn btn-sm btn-outline-secondary', 'Skip');
+        fuSkip.type = 'button';
+        const submitFollowUp = () => {
+            const ans = fuInput.value.trim();
+            if (!ans) return;
+            appendMsg('assistant', '❓ ' + followUp, seq);
+            card.remove();
+            sendMsg(ans, undefined, seq);
+        };
+        fuInput.onkeypress = (e) => { if (e.key === 'Enter') submitFollowUp(); };
+        fuSend.onclick = submitFollowUp;
+        fuSkip.onclick = () => fuSection.remove();
+        fuRow.appendChild(fuInput);
+        fuRow.appendChild(fuSend);
+        fuRow.appendChild(fuSkip);
+        fuSection.appendChild(fuRow);
+        card.appendChild(fuSection);
+    }
 
     box.appendChild(card);
     box.scrollTop = box.scrollHeight;
@@ -1922,16 +1857,50 @@ function openNextDraft() {
     const draft = draftQueue.shift();
     currentDraft = draft;
 
-    // Every draft is a new skill. `note` (if present) explains what distinct
-    // scenario it isolates — in "Export vs WiFi/BT" mode that's the
-    // non-overlap rationale; surface it before the editor opens.
+    // Phase 2: each draft carries a `judge` field from learning_service.
+    // route_draft — an ADVISORY add/merge/discard suggestion, never applied
+    // without the engineer seeing and confirming it here. `source` tells
+    // them WHY: "continuity" = this continues the skill they explicitly
+    // loaded this session; "retrieval" = it matched an existing skill found
+    // by the general domain-wide search.
+    const judge = draft.judge || null;
     const countLabel = draftTotal > 1 ? ` (${idx} of ${draftTotal})` : '';
-    if (draft.note) {
-        alert('New skill' + countLabel + `: "${draft.name}"\n\n${draft.note}`);
+    let title, subtitle;
+    const infoLines = [];
+
+    if (judge && judge.action === 'merge' && judge.target_skill_key) {
+        title = 'Merge into Existing Skill' + countLabel;
+        subtitle = `${judge.target_skill_name} (existing, v${judge.target_skill_version})`;
+        const why = judge.source === 'continuity'
+            ? 'Continues the skill you loaded this session'
+            : 'Matched an existing skill';
+        infoLines.push(`🔗 ${why}: ${judge.reason}\n\nNew keywords/rules are highlighted green below — everything else from "${judge.target_skill_name}" is kept. Prefer a fresh skill instead? Clear the "Skill key" field before saving.`);
+    } else if (judge && judge.action === 'discard') {
+        title = 'New Skill' + countLabel;
+        subtitle = draft.name + ' — ⚠ possibly redundant, review before saving';
+        infoLines.push(`⚠️ This may duplicate an existing skill: ${judge.reason}\n\nYou can still save it as new if you disagree.`);
+    } else {
+        title = 'New Skill' + countLabel;
+        subtitle = draft.name + ' — review before saving';
+    }
+    // Phase 3: keywords/excludes the merge held BACK because this session's
+    // actual filter stats measured zero marginal contribution (unique_hits/
+    // dropped == 0) — never silently unioned in, but also never silently
+    // dropped; the engineer sees exactly what was left out and why, and can
+    // still add any of them back by hand via the modal's own "+" chip input.
+    const heldBack = [...(draft.low_value_keywords || []), ...(draft.low_value_exclusive || [])];
+    if (heldBack.length) {
+        infoLines.push(`ℹ️ Not auto-added — matched 0 unique lines this session: ${heldBack.join(', ')}. Add manually below if you still want them.`);
+    }
+    // `note` (if present) explains what distinct scenario a multi-draft
+    // split isolates — surfaced alongside the judge's reasoning, if any.
+    if (draft.note) infoLines.push(draft.note);
+    if (infoLines.length) {
+        alert(`"${draft.name}"${countLabel}\n\n${infoLines.join('\n\n')}`);
     }
     SkillEditor.open(draft, {
-        title: 'New Skill' + countLabel,
-        subtitle: draft.name + ' — review before saving',
+        title: title,
+        subtitle: subtitle,
         saveUrl: "{{ url_for('learning.save') }}",
         onSaved: function (d2) {
             alert('Skill saved!' + (draftQueue.length ? ` Now reviewing the next one (${draftQueue.length} left)…` : ''));
@@ -1949,8 +1918,16 @@ function openNextDraft() {
     });
 }
 
+// Close the step-tag dropdown when clicking outside the btn/dropdown area.
+document.addEventListener('click', function(e) {
+    const btn = document.getElementById('stepTagBtn');
+    const dd = document.getElementById('stepTagDropdown');
+    if (dd && btn && !btn.contains(e.target) && !dd.contains(e.target)) {
+        dd.style.display = 'none';
+    }
+});
+
 renderFilters();
-renderOperations();
 renderStepTagSelector();
 {% if state.log_domain %}refreshSkillList({{ state.log_domain|tojson }});{% endif %}
 // Restore the event-log panel from server state on reload (BT only).

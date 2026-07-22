@@ -37,9 +37,11 @@ The "teach the system" learning loop:
 """
 import json
 import re
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 from utils.json_utils import parse_json_loose
+from . import skill_retrieval
+from .skill_service import Skill
 
 # The three goals every skill-building question / synthesis is steering toward.
 # Kept in one place so the interview and the synthesis prompts stay aligned.
@@ -834,4 +836,372 @@ def synthesize_skill_draft(llm_helper, context: Dict, qa_pairs: List[Dict],
     drafts = [_normalize_skill_draft(d, context) for d in raw_list if isinstance(d, dict)] or \
         [_normalize_skill_draft({}, context)]
     return {"drafts": drafts}
+
+
+# ============================================================================
+# Phase 2 — AutoSkill-style retrieval-assisted skill management
+# (Agent C retrieval -> Agent B judge -> Agent D baseline merge)
+#
+# synthesize_skill_draft() above always hands back a BRAND-NEW draft; this
+# section decides, per draft, whether that draft should actually become a
+# new skill, fold into an existing one, or be flagged as likely redundant —
+# advisory only, never auto-writing: the caller (learning_routes.converge)
+# attaches the decision to the draft and the engineer still confirms/edits
+# in the Edit-Skill modal before anything is saved.
+#
+# Two DISTINCT signals feed the decision, deliberately kept separate:
+#   - continuity: `state.active_skill_key`, the ONE skill the engineer
+#     explicitly loaded this session as a filter baseline. Strong intent
+#     signal, but NOT auto-trusted — it still has to pass the same
+#     similarity + judge gate as anything else (see route_draft's Tier 0).
+#     A candidate that drifted onto an unrelated topic mid-session must not
+#     be force-merged into whatever happened to be loaded at the start.
+#   - retrieval: Agent C's domain-wide top-M search (skill_retrieval), used
+#     whenever continuity doesn't apply or doesn't pass its own gate.
+# ============================================================================
+
+JUDGE_SYS_PROMPT = """\
+You are the Skill Set Manager for a Wi-Fi/BT log-analysis skill library.
+Task: decide how to file a newly synthesized candidate skill given the most
+similar EXISTING skills already in the library (same domain).
+
+Output ONLY strict JSON, no markdown, no commentary:
+{"action": "add"|"merge"|"discard", "target_skill_key": "<key or null>", "reason": "<one short sentence>"}
+
+Decide in this order:
+1. Capability-overlap gate: if the candidate targets the SAME diagnostic
+   scenario as an existing skill (same root-cause family / same log pattern
+   it isolates), after ignoring wording or keyword-order differences, action
+   MUST be "merge" into that skill's key — never "add".
+2. Discard gate: choose "discard" ONLY if the candidate adds nothing beyond
+   what an existing skill already fully covers (same keywords, same rules,
+   no new constraint). A candidate with even one genuinely new keyword or
+   rule should be "merge", not "discard".
+3. Otherwise, if the candidate is a genuinely distinct diagnostic scenario
+   from every skill shown (different root cause / different log signature),
+   choose "add".
+
+If "candidate_keyword_quality" is present, it is GROUND-TRUTH measured
+evidence from actually running the candidate's keywords against this
+session's real log — not the model's own guess. unique_hits=0 on an include
+keyword means it matched zero lines that weren't ALREADY caught by another
+enabled keyword this session (redundant, even if it reads as novel);
+dropped=0 on an exclude term means it removed nothing. Weigh this evidence
+heavily in the discard gate: a candidate whose EVERY keyword measures zero
+is much stronger discard evidence than wording/description similarity alone
+— prefer discard/merge over add in that case even if the topic looks new.
+
+Rules:
+- target_skill_key MUST be one of the keys in "existing_skills" when action
+  is "merge"; null for "add"/"discard".
+- Never invent a key that was not shown to you.
+- Keep "reason" under 20 words and concrete (name the overlapping capability
+  or what's new)."""
+
+
+def judge_candidate(llm_helper, draft: Dict, neighbors: List[Tuple[str, Skill, float]],
+                     quality: Optional[Dict[str, Dict]] = None) -> Dict:
+    """Agent B — decides add/merge/discard for one synthesized draft against
+    a SHORT list of its most similar existing skills (see
+    skill_retrieval.retrieve_top_m / route_draft's Tier 0+1). Returns
+    {"action", "target_skill_key", "reason"}.
+
+    `quality` (see keyword_quality_map) is optional GROUNDED evidence — this
+    session's actual per-keyword unique_hits/dropped counts — folded into the
+    prompt as "candidate_keyword_quality" so the discard gate can lean on
+    real log data instead of judging novelty from wording alone. This is the
+    signal a generic text-only judge (AutoSkill's own) structurally can't
+    have, since it never sees the underlying log.
+
+    Fails closed to "add" (the pre-Phase-2 behavior) on any parse failure, an
+    unavailable LLM, an empty neighbor list, or an invented/unknown
+    target_skill_key — a wrong merge onto the wrong skill silently corrupts
+    that skill's content, which is a worse failure mode than an extra "add"
+    the engineer can manually clean up later. Every uncertain path defaults
+    to the safe side."""
+    if not neighbors:
+        return {"action": "add", "target_skill_key": None,
+                "reason": "No sufficiently similar existing skill."}
+    if llm_helper is None or not getattr(llm_helper, "is_ready", True):
+        return {"action": "add", "target_skill_key": None,
+                "reason": "LLM unavailable; defaulted to add."}
+
+    valid_keys = {key for key, _sk, _sc in neighbors}
+    existing_for_llm = [
+        {"key": key, "name": sk.name, "description": sk.description,
+         "keywords": sk.keywords, "exclusive": sk.exclusive, "similarity": sc}
+        for key, sk, sc in neighbors
+    ]
+    payload = {
+        "candidate": {
+            "name": draft.get("name"), "description": draft.get("description"),
+            "keywords": draft.get("keywords"), "exclusive": draft.get("exclusive"),
+        },
+        "existing_skills": existing_for_llm,
+    }
+    if quality:
+        candidate_terms = list(draft.get("keywords") or []) + list(draft.get("exclusive") or [])
+        term_quality = {t: quality[t] for t in candidate_terms if t in quality}
+        if term_quality:
+            payload["candidate_keyword_quality"] = term_quality
+    user_content = json.dumps(payload, ensure_ascii=False)
+
+    try:
+        raw = llm_helper.chat(
+            messages=[{"role": "user", "content": user_content}],
+            system_content=JUDGE_SYS_PROMPT,
+            temperature=0.0,
+            max_tokens=300,
+        )
+        obj = parse_json_loose(raw) or {}
+        action = str(obj.get("action") or "add").strip().lower()
+        if action not in ("add", "merge", "discard"):
+            action = "add"
+        target = str(obj.get("target_skill_key") or "").strip() or None
+        if action == "merge" and target not in valid_keys:
+            # Guardrail: never trust a merge onto a key that wasn't actually
+            # shown to the model — treat as "add" instead of guessing.
+            action, target = "add", None
+        return {"action": action, "target_skill_key": target,
+                "reason": str(obj.get("reason") or "").strip()}
+    except Exception as e:
+        return {"action": "add", "target_skill_key": None,
+                "reason": f"Judge call failed ({e}); defaulted to add."}
+
+
+def _dedupe_ci(base: List[str], additions: List[str]) -> Tuple[List[str], List[str]]:
+    """Case-insensitive union of `additions` onto `base`, preserving base's
+    existing order first. Returns (merged_list, actually_new_items) — the
+    second is what the Edit-Skill modal highlights green (see basic_merge_
+    draft's `diff` output)."""
+    seen = {b.lower() for b in base if b}
+    new_items: List[str] = []
+    for item in additions or []:
+        item = str(item or "").strip()
+        if not item or item.lower() in seen:
+            continue
+        seen.add(item.lower())
+        new_items.append(item)
+    return list(base) + new_items, new_items
+
+
+def keyword_quality_map(filter_stats: Optional[Dict]) -> Dict[str, Dict]:
+    """Text -> {"hits", "unique_hits", "dropped"} from the session's last
+    compute_filter_stats() result (state.filter_stats). This is the grounded,
+    zero-LLM-cost evidence Phase 3 uses to tell a genuinely load-bearing new
+    keyword apart from one that only LOOKS novel in the conversation but
+    contributed nothing measurable this session — the differentiator a
+    generic AutoSkill-style merge (LLM guesswork only) can't have, since it
+    has no access to the actual log at all. Returns {} for missing/empty
+    stats so every caller can treat "no evidence" and "evidence says keep"
+    uniformly (see basic_merge_draft's default-to-keep policy below)."""
+    if not filter_stats:
+        return {}
+    out: Dict[str, Dict] = {}
+    for pf in filter_stats.get("per_filter", []) or []:
+        text = str(pf.get("text") or "").strip()
+        if text:
+            out[text] = {
+                "hits": pf.get("hits"),
+                "unique_hits": pf.get("unique_hits"),
+                "dropped": pf.get("dropped"),
+            }
+    return out
+
+
+def basic_merge_draft(existing: Skill, draft: Dict, quality: Optional[Dict[str, Dict]] = None) -> Dict:
+    """Agent D — DETERMINISTIC baseline merge (no LLM), safe by construction:
+    it can only ADD to `existing`, never silently drop or overwrite its
+    content. A smarter LLM-assisted semantic-union merge (matching AutoSkill's
+    Pmerge — proper conflict resolution, stale-detail pruning) is a later
+    phase; this is the guardrail that makes "merge" safe to ship without that
+    yet existing.
+
+      - keywords / exclusive: case-insensitive union, existing's own order
+        kept first so the modal's chip order doesn't jump around. A NEW
+        keyword/exclude-term is only added to the live merged list when
+        `quality` (see keyword_quality_map) shows it's actually load-bearing
+        this session — unique_hits > 0 for an include, dropped > 0 for an
+        exclude. One measured as CONTRIBUTING NOTHING (unique_hits == 0 /
+        dropped == 0) is held out into `low_value_keywords`/
+        `low_value_exclusive` instead — informational only, never silently
+        discarded, the engineer can still add it back by hand in the modal.
+        A keyword `quality` has no data for (not enabled this round, or no
+        filter run at all) defaults to KEEP — absence of evidence is not
+        evidence of redundancy, so it's never penalized on that basis alone.
+      - description: kept from `existing` (the skill's stable identity)
+        unless the draft's is clearly more complete (>10% longer) — a thin
+        one-off candidate description must never overwrite a carefully
+        scoped existing one.
+      - expert_rules: existing's rules kept verbatim; only genuinely NEW
+        lines from the draft (not already present, case-insensitive) are
+        appended below a blank-line separator. Nothing from `existing` is
+        ever removed here.
+      - name: kept from `existing` — a merge must never rename a skill out
+        from under its established key/identity.
+
+    Also attaches `diff` = {new_keywords, new_exclusive, rules_added_text} —
+    the EXACT shape templates/log_viewer.html's Edit-Skill modal already
+    knows how to render as a green "NEW" highlight banner (see
+    skill_editor.js's renderDiffBanner, built for this, previously unused
+    because nothing ever produced a diff). `new_keywords`/`new_exclusive`
+    here are the CONFIRMED ones actually present in `keywords`/`exclusive`
+    below — low-value ones are reported separately, never as a green chip."""
+    quality = quality or {}
+
+    def _split_by_quality(candidates: List[str], zero_field: str) -> Tuple[List[str], List[str]]:
+        """(confirmed, low_value) — a candidate is low-value only when
+        `quality` has a definite measurement AND that measurement is exactly
+        zero; missing/unmeasured/None keeps it confirmed (see docstring)."""
+        confirmed, low_value = [], []
+        for kw in candidates:
+            q = quality.get(kw)
+            measured = q.get(zero_field) if q else None
+            if measured is not None and int(measured) == 0:
+                low_value.append(kw)
+            else:
+                confirmed.append(kw)
+        return confirmed, low_value
+
+    all_new_keywords_base, all_new_keywords = _dedupe_ci(existing.keywords, draft.get("keywords") or [])
+    all_new_exclusive_base, all_new_exclusive = _dedupe_ci(existing.exclusive, draft.get("exclusive") or [])
+    confirmed_kw, low_value_kw = _split_by_quality(all_new_keywords, "unique_hits")
+    confirmed_ex, low_value_ex = _split_by_quality(all_new_exclusive, "dropped")
+
+    merged_keywords = list(existing.keywords) + confirmed_kw
+    merged_exclusive = list(existing.exclusive) + confirmed_ex
+
+    draft_desc = str(draft.get("description") or "").strip()
+    description = existing.description
+    if draft_desc and len(draft_desc) > len(existing.description.strip()) * 1.1:
+        description = draft_desc
+
+    existing_rules = (existing.expert_rules or "").strip()
+    draft_rules = str(draft.get("expert_rules") or "").strip()
+    rules_added_text = ""
+    if draft_rules:
+        existing_norm = existing_rules.lower()
+        new_lines = [ln for ln in draft_rules.split("\n")
+                     if ln.strip() and ln.strip().lower() not in existing_norm]
+        rules_added_text = "\n".join(new_lines)
+    expert_rules = f"{existing_rules}\n\n{rules_added_text}".strip() if rules_added_text else existing_rules
+
+    merged = dict(draft)
+    merged["name"] = existing.name
+    merged["description"] = description
+    merged["keywords"] = merged_keywords
+    merged["exclusive"] = merged_exclusive
+    merged["expert_rules"] = expert_rules
+    merged["diff"] = {
+        "new_keywords": confirmed_kw,
+        "new_exclusive": confirmed_ex,
+        "rules_added_text": rules_added_text,
+    }
+    merged["low_value_keywords"] = low_value_kw
+    merged["low_value_exclusive"] = low_value_ex
+    return merged
+
+
+# Tier 0 (continuity) thresholds — deliberately more permissive than Tier 1's
+# retrieval floor, since an explicit "the engineer loaded this skill this
+# session" action is stronger evidence than incidental lexical overlap.
+_CONTINUITY_MIN_SCORE = 0.15    # below this, don't even ask the judge about it
+_CONTINUITY_FORCE_SCORE = 0.55  # above this, skip the extra judge call entirely
+# Tier 1 (general retrieval) floor — a neighbor below this is noise, not
+# worth spending a judge call on.
+_RETRIEVAL_MIN_SCORE = 0.12
+
+
+def route_draft(llm_helper, draft: Dict, pool: Dict[str, Skill],
+                 continuity_skill_key: Optional[str] = None,
+                 filter_stats: Optional[Dict] = None) -> Dict:
+    """Agent B+C+D entry point for ONE synthesized draft. Returns the
+    (possibly merge-rewritten) draft dict with an attached `judge` field:
+        {"action": "add"|"merge"|"discard", "target_skill_key": str|None,
+         "target_skill_name": str|None, "target_skill_version": str|None,
+         "reason": str, "source": "continuity"|"retrieval"}
+    and, for "merge", `skill_key` set to the target so the Edit-Skill modal
+    opens in edit-existing mode with the merged (see basic_merge_draft)
+    content pre-filled instead of a blank new draft.
+
+    Tier 0 — continuity: if `continuity_skill_key` (state.active_skill_key,
+    the ONE skill the engineer explicitly loaded this session) is set, check
+    ONLY that skill first, in isolation. A high-confidence match skips the
+    LLM call entirely (cheap, since it's a single deterministic score); a
+    moderate match still asks the judge to confirm same-capability before
+    committing. Either way this is a strong-but-verified signal, never a
+    blind override.
+
+    Tier 1 — retrieval: runs whenever Tier 0 doesn't apply (nothing loaded,
+    draft's domain mismatch) or doesn't clear its own bar (low score, or the
+    judge disagreed) — Agent C searches the WHOLE domain pool and Agent B
+    judges among the top matches, same as a from-scratch FRESH-mode export.
+
+    `filter_stats` (state.filter_stats, the session's last compute_filter_
+    stats() result) is optional grounded evidence — see keyword_quality_map —
+    fed to BOTH the judge (as discard-gate evidence) and the merge (to hold
+    back newly-added keywords/excludes that measured zero marginal value this
+    session rather than blindly unioning everything). None/missing degrades
+    gracefully to Phase 2's plain-union behavior."""
+    quality = keyword_quality_map(filter_stats)
+    ruled_out: set = set()
+
+    if continuity_skill_key and continuity_skill_key in pool:
+        continuity_skill = pool[continuity_skill_key]
+        score = skill_retrieval.score_against(draft, continuity_skill)
+        if score >= _CONTINUITY_MIN_SCORE:
+            if score >= _CONTINUITY_FORCE_SCORE:
+                decision = {
+                    "action": "merge", "target_skill_key": continuity_skill_key,
+                    "reason": f"Continues the pre-loaded skill \"{continuity_skill.name}\" "
+                              f"(similarity {score:.2f}).",
+                }
+            else:
+                decision = judge_candidate(
+                    llm_helper, draft, [(continuity_skill_key, continuity_skill, score)], quality)
+            if decision["action"] == "merge" and decision.get("target_skill_key") == continuity_skill_key:
+                return _apply_judge_decision(draft, decision, pool, source="continuity", quality=quality)
+            # Judge looked at the pre-loaded skill specifically and said "not
+            # the same capability" — don't re-litigate it in Tier 1 with the
+            # exact same evidence; let it compete fairly (or not at all) among
+            # the general neighbors instead.
+            ruled_out.add(continuity_skill_key)
+
+    neighbors = skill_retrieval.retrieve_top_m(draft, pool, top_m=3, exclude_keys=ruled_out)
+    neighbors = [n for n in neighbors if n[2] >= _RETRIEVAL_MIN_SCORE]
+    decision = judge_candidate(llm_helper, draft, neighbors, quality)
+    return _apply_judge_decision(draft, decision, pool, source="retrieval", quality=quality)
+
+
+def _apply_judge_decision(draft: Dict, decision: Dict, pool: Dict[str, Skill], source: str,
+                           quality: Optional[Dict[str, Dict]] = None) -> Dict:
+    """Turns a judge decision into the final draft shape the route sends to
+    the frontend — folds the merge (Agent D) when applicable, and always
+    attaches a `judge` field so the Edit-Skill modal can explain the
+    suggestion regardless of which action was chosen."""
+    action = decision.get("action") or "add"
+    target_key = decision.get("target_skill_key")
+    target = pool.get(target_key) if target_key else None
+
+    if action == "merge" and target is not None:
+        merged = basic_merge_draft(target, draft, quality)
+        merged["skill_key"] = target_key
+        merged["judge"] = {
+            "action": "merge", "target_skill_key": target_key,
+            "target_skill_name": target.name, "target_skill_version": target.version,
+            "reason": decision.get("reason") or "", "source": source,
+        }
+        return merged
+
+    # add / discard / merge-with-missing-target (guardrail) all keep the
+    # draft AS-IS — discard is advisory only: the engineer still gets the
+    # modal and can save it as a new skill if they disagree with the judge.
+    out = dict(draft)
+    out["skill_key"] = None
+    out["judge"] = {
+        "action": action if action in ("add", "discard") else "add",
+        "target_skill_key": None, "target_skill_name": None, "target_skill_version": None,
+        "reason": decision.get("reason") or "", "source": source,
+    }
+    return out
 

@@ -1,48 +1,188 @@
-# Log Triage & Skill Learning
+# Copycat — Log Triage & Self-Evolving Skill Learning
 
-一個獨立於 [wireless_ce_avatar/IntelAvatar](https://github.com/kj-fang/wireless_ce_avatar) 之外的精簡版系統，保留其中三個核心能力：
+A standalone Flask app for triaging Wi-Fi/Bluetooth driver logs and turning
+an engineer's filtering + debugging judgment into reusable, versioned
+**skills** an LLM can apply on the next log. It's a trimmed-down,
+independently-built sibling of
+[wireless_ce_avatar/IntelAvatar](https://github.com/kj-fang/wireless_ce_avatar),
+keeping only the log-viewing/filtering + chat + skill-learning line, with the
+skill lifecycle rebuilt around ideas from
+[**AutoSkill**](https://github.com/ECNU-ICALK/AutoSkill) (*"Experience-Driven
+Lifelong Learning via Skill Self-Evolution"*): retrieval-assisted skill
+management, an add/merge/discard judge, and versioned merging — grounded in
+this project's own filter statistics rather than text similarity alone.
 
-1. **Log Viewer** — 手動選擇 log 檔與 `.tat` 過濾檔（TextAnalysisTool.NET 格式），勾選/排除關鍵字後即時預覽過濾結果（等同工程師現在用的 log 系統）。
-2. **Chatbot** — 針對目前過濾出來的 log 內容與 LLM 對話分析。
-3. **Teach Skill（學習迴圈）** — 系統觀察你目前使用的過濾情境（tat 關鍵字 + 過濾結果 + 對話紀錄），主動提出幾個釐清問題；你回答後，LLM 會把知識整理成 `data/skills/skills.yaml` 裡的一筆 skill（`keywords` / `exclusive` / `expert_rules`），可再手動編輯後儲存。之後這些 skill 可在 Log Viewer 直接載入重用。
+## What it does
 
-移除了原本 IntelAvatar 中與本次需求無關的部分（case number 下載、BSOD、BT/NW 專用流程、ETL 自動化、SendTo 整合等），只保留 log 檢視/過濾 + chatbot + skill 學習這條主線，並改用**手動檔案選擇**（因為 `\\infs089.iil.intel.com\...\log_parser_data\filter` 這類共用磁碟機在你的環境連不到）。
+### 1. Log Viewer
+- Manually pick a driver log (`.log`, `.hci.txt`, DDD export, …) and an
+  optional `.tat` filter file (**TextAnalysisTool.NET**'s native XML format —
+  `enabled` / `excluding` / `case_sensitive` / `regex` / colors, fully
+  respected).
+- WiFi vs Bluetooth is auto-detected from the picked log (filename hints,
+  then a content sniff), which switches the skill dropdown to the right pool
+  and normalizes dateless BT `.hci.txt` / WiFi DDD timestamp formats into one
+  canonical shape.
+- Include/exclude keywords, checkbox-toggle, or load an existing skill's
+  keyword set as the starting filter — every edit re-runs the filter and is
+  recorded with its *measured marginal effect*: hit count, unique
+  contribution, noise dropped, and its top co-firing keyword — powering
+  everything downstream instead of re-scanning the log.
+- A collapsible **System Event Log** panel (BT captures) auto-discovers the
+  matching Windows System event export next to the driver log; rows
+  click-sync to the nearest driver-log line by timestamp, and vice versa.
+- A deterministic (zero-LLM-cost) **red-flag detector** notices a redundant
+  keyword, a no-op exclude, a suspiciously large expansion/drop, or removing
+  something load-bearing — and surfaces it as an inline question the instant
+  it happens.
 
-## 安裝
+### 2. Skill-Building Chat
+- Claude-style layout: your messages sit in a right-aligned bubble; the
+  assistant's replies flow as plain full-width Markdown text.
+- **Log Round & Analyze** — one LLM call that analyzes the current filter
+  state, asks 1–3 grounded follow-up questions (structured choice-or-custom,
+  same shape as Claude's own `AskUserQuestion`), and self-scores readiness
+  (0–100) plus per-goal coverage (knowledge / scope / minimal-keywords) and a
+  claim-by-claim verified-vs-asserted validation — so a threshold the
+  engineer stated but the log never proved can't silently be exported as
+  fact.
+- **Per-step teaching** — click 🎓 on any filter edit in the Steps panel to
+  explain, in your own words, why you made it; the LLM condenses it into a
+  confirmable knowledge-core statement, adds its own expert second opinion,
+  and may ask one interactive follow-up (answer or skip) without losing the
+  thread of what step it's about.
+- Every message is tagged with the step it concerns (`#N`) or `All` for
+  general knowledge, via a compact selector next to Send — replay after a
+  page reload preserves the same tags.
+- Two independent modes, chosen per export: **FRESH** (teach from scratch,
+  nothing else consulted) or **PRIOR** (same-domain existing skills shown so
+  the interview only asks about what's genuinely new).
+
+### 3. Export → Self-Evolving Skill Lifecycle (AutoSkill-integrated)
+Exporting doesn't just dump a new file — every synthesized draft goes through
+a retrieval → judge → merge pipeline, **advisory only**: nothing is written
+until you confirm in the Edit-Skill modal.
+
+- **Versioning** — every skill carries a `version` (bumped on each edit) and
+  a rolling `version_history` snapshot of its pre-edit state, so a skill's
+  evolution is inspectable and auditable, not silently overwritten.
+- **Retrieval-assisted maintenance decision** (add / merge / discard) — a
+  lightweight keyword-set retriever narrows the field to the few most
+  similar existing skills, then an LLM judge decides:
+  - **Tier 0 — continuity**: if you explicitly loaded a skill this session,
+    it's checked first, in isolation — strong intent signal, but still
+    gated by a real similarity/judge check, never blindly trusted (a session
+    that drifts onto an unrelated topic won't get force-merged into whatever
+    happened to be loaded at the start).
+  - **Tier 1 — retrieval**: otherwise, the whole domain pool is searched for
+    the closest matches.
+  - Every uncertain path (parse failure, an invented target key, an
+    unavailable LLM) fails closed to **add** — a wrong merge silently
+    corrupts an existing skill, which is a strictly worse outcome than one
+    extra draft to clean up later.
+- **Data-grounded merge** — merging is a safe, deterministic union (never
+  overwrites or drops existing content), and it's *validated against this
+  session's actual filter statistics*: a newly-proposed keyword that matched
+  zero unique lines this run (`unique_hits == 0`) — or an exclude term that
+  dropped nothing (`dropped == 0`) — is held back from the auto-merge instead
+  of blindly unioned in, with the reason shown so you can still add it back
+  by hand. This is the one signal a text-only judge structurally can't have,
+  since it never sees the underlying log.
+- The Edit-Skill modal shows exactly what's being proposed — a brand-new
+  skill, or a merge into a named existing one (with new keywords/rules
+  highlighted green) — before anything touches disk.
+
+### 4. Skill Library
+A standalone page listing every learned skill (WiFi ∪ BT) with the same
+Edit-Skill modal — inspect, hand-edit keywords/exclusive/expert_rules, or
+delete.
+
+## Architecture
+
+```
+app.py                     Flask entry point — registers all blueprints
+configs/
+  global_configs.py        App-wide state (LLM helper, loaded skill pools)
+  path_configs.py           Key + shared-skill-drive paths
+  set_up_app.py             Startup: configure LLM, load skill sources
+blueprints/
+  main/                     Landing page
+  log_viewer/                Log/filter picking, apply_filter, event log, red-flag Q&A
+  chatbot/                   Free-form chat send/reset (step-tagged)
+  learning/                   Log Round, per-step teach/ask, readiness, converge/save
+  skills/                     Skill library CRUD
+services/
+  llm_service.py               LLM_helper — Anthropic/OpenAI-compatible client,
+                                 token usage tracking, prompt caching
+  session_store.py             Per-browser-session working state
+  event_log_service.py         Windows System Event Log (.evt/.evtx) reader
+  skill_service.py             Skill model + YAML read/write, versioning
+  skill_retrieval.py           Agent C — keyword-set similarity retrieval
+  learning_service.py          Interview prompts, readiness assessment,
+                                 skill synthesis, judge (Agent B),
+                                 stat-validated merge (Agent D)
+utils/
+  tat_parser.py                 .tat XML parsing + filter/stats engine
+  operation_journal.py          Per-edit journal with measured effect + red flags
+  file_picker.py, browser_utils.py, helpers.py, json_utils.py
+templates/, static/           log_viewer.html (main workbench), skills.html,
+                                shared skill_editor.js modal, style.css
+data/skills/
+  skills.yaml, bt_skills.yaml   Locally learned skill knowledge base
+```
+
+## Setup
 
 ```powershell
 pip install -r requirements.txt
 ```
 
-## 設定 LLM（GNAI / Anthropic 相容端點）
+## Configure the LLM (GNAI / Anthropic-compatible endpoint)
 
-連線方式與 IntelAvatar 相同：優先讀取公司共用資料夾的 `keys.py`（`gnaigpt_token` / `gnaigpt_url` / `gnaigpt_model`），若連不到，改用本機設定檔開發測試 —— 直接把你自己的 `key.py` 內容存成 `configs\keys_local.py`（同 schema，已 gitignore）：
+Same resolution order as IntelAvatar: a corporate shared `keys.py` is tried
+first; if unreachable, drop your own key file in as
+`configs/keys_local.py` (same schema, gitignored):
 
-```powershell
-# 建立 configs\keys_local.py，內容同你的 key.py：
-#   gnaigpt_token = "..."
-#   gnaigpt_url   = "https://gnai.intel.com/api/providers/anthropic"
-#   gnaigpt_model = "claude-4-6-sonnet"
+```python
+# configs/keys_local.py
+gnaigpt_token = "..."
+gnaigpt_url   = "https://gnai.intel.com/api/providers/anthropic"
+gnaigpt_model = "claude-4-6-sonnet"
 ```
 
-`configs/path_configs.py` 中的 `KEY_PATH_prim` / `KEY_PATH_bkup` 已指向與 IntelAvatar 相同的共用路徑，VPN 可連到時會自動優先使用共用資料夾的 key.py。
+`configs/path_configs.py`'s `KEY_PATH_prim` / `KEY_PATH_bkup` point at the
+same shared drive locations as IntelAvatar; whichever resolves first (local
+override → primary share → backup share) wins.
 
-## 執行
+## Run
 
 ```powershell
 python app.py
 ```
 
-開啟 http://127.0.0.1:5000
+Opens automatically in Chrome on a freshly-picked free port (never a fixed
+`:5000`, so a leftover process from an earlier run can't collide with it).
 
-## 目錄結構
+## Skill data model
 
+Each entry in `data/skills/{skills,bt_skills}.yaml`:
+
+```yaml
+<skill_key>:
+  name: "..."
+  description: "..."          # mutually exclusive from other skills' scope
+  keywords:                     # minimal include-keyword set
+    - "..."
+  exclusive:                    # noise terms to drop
+    - "..."
+  expert_rules: |               # numbered domain knowledge / hard rules
+    1. ...
+  version: "0.1.3"
+  version_history: |            # rolling JSON audit trail (pre-edit snapshots)
+    [...]
 ```
-app.py                  Flask 進入點
-configs/                連線設定、全域狀態
-services/               LLM 連線、skill 儲存、log 過濾、學習迴圈邏輯
-utils/                  .tat 解析、檔案選擇對話框、共用工具
-blueprints/             main / log_viewer / chatbot / learning / skills
-templates/, static/     前端頁面
-data/skills/skills.yaml 已學習的 skill 知識庫（keywords/exclusive/expert_rules）
-```
+
+Shared corporate skill sources (`skills_config/{skills,bt_skills}.yaml`,
+per-engineer `user_contributions/`) are merged read-only into the running
+app at startup; anything saved through the UI only ever writes to the local
+`data/skills/` files above, never back to the shared drive.
