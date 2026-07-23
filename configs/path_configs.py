@@ -13,25 +13,54 @@ KEY_PATH_prim = r"\\pgsfls0101.gar.corp.intel.com\symstore\CMAttachments\JIRA\WI
 KEY_PATH_bkup = r"\\infs089.iil.intel.com\HOME\WirelessCE\Intel_WirelessCE_Avatar\key\keys.py"
 
 # ---- local data dirs (skill knowledge base, session cache) ----
+# data/skills/ splits into two clearly separate folders so it's obvious on
+# disk which is which — never mixed into one file the way the original
+# single skills.yaml/bt_skills.yaml pair used to be:
+#
+#   local/          — THIS engineer's own copycat-originated skills. The
+#                      only files this app ever WRITES to (skill_service.
+#                      save_skill/delete_skill). Genuinely owned content —
+#                      commit it to git like any other work product.
+#   shared_cache/    — a READ-ONLY local mirror of the shared corp drive
+#                      (skills_config/), refreshed automatically on every
+#                      app startup (see skill_service.refresh_shared_cache,
+#                      called from set_up_app.set_up). Never hand-edited,
+#                      never written to by save_skill/delete_skill. If the
+#                      shared drive is unreachable at startup (VPN down),
+#                      the refresh is a no-op and the app falls back to
+#                      whatever was cached from the last successful sync —
+#                      shared skills don't just vanish because the network
+#                      dropped mid-session. Regenerated content — gitignored.
 DATA_DIR = os.path.join(PROJECT_ROOT, "data")
 SKILLS_DIR = os.path.join(DATA_DIR, "skills")
-SKILLS_YAML_PATH = os.path.join(SKILLS_DIR, "skills.yaml")
+
+SKILLS_LOCAL_DIR = os.path.join(SKILLS_DIR, "local")
+SKILLS_YAML_PATH = os.path.join(SKILLS_LOCAL_DIR, "skills.yaml")
 # Local BT counterpart to SKILLS_YAML_PATH above — WITHOUT this, any
 # BT-domain skill learned/edited through the UI used to get written into the
 # WiFi-only file above and then silently show up merged into the *WiFi* pool
 # (see skill_service.save_skill's `domain` param), which is exactly the
 # WiFi/BT architecture mismatch this file exists to prevent.
-SKILLS_BT_YAML_PATH = os.path.join(SKILLS_DIR, "bt_skills.yaml")
+SKILLS_BT_YAML_PATH = os.path.join(SKILLS_LOCAL_DIR, "bt_skills.yaml")
 CACHE_DIR = os.path.join(DATA_DIR, "cache")
 
-# ---- shared skill knowledge base (same corp share as the key.py backup path
-# above) — read-only inputs merged into app_config at startup. Confirmed
-# layout on \\infs089...: skills.yaml (WiFi baseline), bt_skills.yaml
-# (Bluetooth), user_contributions\<username>__skills_<date>.yaml (personal
-# overrides, one file per engineer). We only ever READ from here — anything
-# saved/edited through the UI goes to SKILLS_YAML_PATH above, never back to
-# this shared drive.
+# ---- shared skill knowledge base — the actual live corp share (same share
+# as the key.py backup path above). Confirmed layout on \\infs089...:
+# skills.yaml (WiFi baseline), bt_skills.yaml (Bluetooth),
+# user_contributions\<username>__skills_<date>.yaml (personal overrides, one
+# file per engineer). We only ever READ from here — nothing saved/edited
+# through the UI is ever written back to this share; see SKILLS_CACHE_*
+# below for the local mirror everything else in this app actually reads.
 SKILLS_SHARE_DIR = r"\\infs089.iil.intel.com\HOME\WirelessCE\Intel_WirelessCE_Avatar\log_parser_data\skills_config"
 SKILLS_SHARE_WIFI_PATH = os.path.join(SKILLS_SHARE_DIR, "skills.yaml")
 SKILLS_SHARE_BT_PATH = os.path.join(SKILLS_SHARE_DIR, "bt_skills.yaml")
 SKILLS_SHARE_USER_CONTRIB_DIR = os.path.join(SKILLS_SHARE_DIR, "user_contributions")
+
+# ---- local mirror of the shared drive above (see the module comment on
+# SKILLS_LOCAL_DIR) — this is what load_shared_skills() actually reads for
+# the "shared_wifi"/"bt"/"contribution" sources; refresh_shared_cache() is
+# what keeps it in sync with the live share on every app startup.
+SKILLS_CACHE_DIR = os.path.join(SKILLS_DIR, "shared_cache")
+SKILLS_CACHE_WIFI_PATH = os.path.join(SKILLS_CACHE_DIR, "skills.yaml")
+SKILLS_CACHE_BT_PATH = os.path.join(SKILLS_CACHE_DIR, "bt_skills.yaml")
+SKILLS_CACHE_USER_CONTRIB_DIR = os.path.join(SKILLS_CACHE_DIR, "user_contributions")

@@ -278,9 +278,11 @@ a.btn-primary {
   background: transparent;
   border: none;
   color: var(--text-muted);
-  font-size: 0.95rem;
+  font-size: 0.8rem;
   line-height: 1;
-  padding: 0 3px;
+  width: 16px;
+  height: 16px;
+  padding: 0;
 }
 .btn-remove-filter:hover { color: var(--bad); }
 
@@ -461,7 +463,9 @@ a.btn-primary {
 .tat-filter-head,
 .tat-filter-row {
   display: grid;
-  grid-template-columns: 44px 1fr 34px 16px;
+  /* Hits column widened 28px -> 42px — real hit counts run into the
+     thousands (e.g. "2528"), and 28px was clipping the digits. */
+  grid-template-columns: 32px 1fr 42px 18px;
   align-items: center;
 }
 .tat-filter-head {
@@ -473,10 +477,15 @@ a.btn-primary {
   text-transform: uppercase;
   letter-spacing: 0.03em;
 }
+/* min-width:0 stops a column's content (e.g. the pattern text or the remove
+   button) from forcing its grid track wider than declared and spilling into
+   the neighboring column — this is what caused the remove "x" to overlap
+   the Hits number. */
 .tat-filter-head span,
-.tat-filter-row > span { padding: 1px 3px; }
+.tat-filter-row > span { padding: 1px 3px; min-width: 0; overflow: hidden; }
 .tat-filter-head .c-hit,
-.tat-filter-row .c-hit { text-align: right; font-weight: 600; }
+.tat-filter-row .c-hit { text-align: right; font-weight: 600; white-space: nowrap; }
+.tat-filter-row .c-del { display: flex; align-items: center; justify-content: center; padding: 0; }
 #filterList { max-height: 180px; overflow-y: auto; }
 .tat-filter-row { border-bottom: 1px solid #f0f2f4; line-height: 1.5; }
 .tat-filter-row:hover { background: rgba(0, 113, 197, 0.05); }
@@ -496,6 +505,38 @@ a.btn-primary {
 .tat-filter-pattern.is-exclude { color: var(--text-muted); font-style: italic; }
 .tat-filter-empty { padding: 8px; color: var(--text-muted); font-size: 0.72rem; }
 
+/* Add-filter buttons — two explicit Include/Exclude buttons (replacing a
+   dropdown + separate "+" button) so choosing the type and submitting is
+   one click instead of two. Small text + icon keeps them from crowding the
+   already-narrow filter card. */
+/* Selector needs 2 class tokens (not just .btn-filter-add) to out-specificity
+   Bootstrap's ".input-group-sm > .btn" rule, which otherwise wins and forces
+   these back to 0.875rem regardless of source order. */
+.input-group .btn-filter-add {
+  flex: 0 0 auto;
+  font-size: 0.62rem;
+  font-weight: 600;
+  padding: 0 6px;
+  white-space: nowrap;
+  border-radius: 5px;
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+}
+.input-group .btn-filter-add i { font-size: 0.62rem; }
+.btn-filter-include {
+  color: var(--primary-dark);
+  background: #eaf1fc;
+  border: 1px solid #c3d9f5;
+}
+.btn-filter-include:hover { background: #dde9fa; border-color: var(--primary-light); }
+.btn-filter-exclude {
+  color: var(--bad);
+  background: #fdecec;
+  border: 1px solid #f3c6c6;
+}
+.btn-filter-exclude:hover { background: #fbdcdc; border-color: var(--bad); }
+
 /* Auto-detected WiFi vs Bluetooth domain badge, shown once a log is picked. */
 .domain-badge {
   flex: 0 0 auto;
@@ -507,6 +548,27 @@ a.btn-primary {
 }
 .domain-badge.domain-wifi { background: rgba(0, 113, 197, 0.12); color: var(--primary-dark); }
 .domain-badge.domain-bt   { background: rgba(75, 63, 156, 0.14); color: var(--accent-purple); }
+
+/* All/None bulk-toggle buttons — shrunk down, they're a minor convenience
+   next to the skill picker/View Current Skill, not worth the same visual
+   weight as those. */
+.tat-mini-btn {
+  font-size: 0.68rem;
+  font-weight: 600;
+  padding: 1px 9px;
+  line-height: 1.6;
+}
+
+/* "-- or load a learned skill --" dropdown — was width:auto, which sizes to
+   its widest option text and overflowed past the (now narrower) TAT Filter
+   card. Shrink it to fit and ellipsize instead. */
+.skill-select-narrow {
+  flex: 1 1 auto;
+  min-width: 0;
+  max-width: 100%;
+  font-size: 0.72rem;
+  text-overflow: ellipsis;
+}
 
 /* Conversation-mode toggle in the chat header — ON loads the existing
    WiFi/BT skills as prior knowledge (interview + export cover only what's NEW
@@ -534,20 +596,22 @@ a.btn-primary {
   white-space: nowrap;
 }
 
-/* Ask Questions / Converge toolbar — moved up to sit right under the chat
-   header (was a separate card below the chat, easy to miss/scroll past). */
-.chat-toolbar {
-  display: flex;
-  gap: 6px;
-  padding: 6px 8px;
-  border-bottom: 1px solid var(--border);
-  background: #fff;
+/* Log Round & Analyze, compacted into the header's icon row (was a full
+   pill button in its own toolbar) — a subtle blue tint distinguishes it
+   from the purely neutral Clear/Steps icons since it triggers an LLM call,
+   not just a UI toggle. */
+.icon-btn-accent {
+  color: var(--primary-dark);
+  background: #eaf1fc;
+  border-color: #c3d9f5;
 }
-.chat-toolbar .btn { flex: 1 1 0; }
+.icon-btn-accent:hover { background: #dde9fa; border-color: var(--primary-light); }
 
-/* Readiness score badge (sits between Log Round and Export Skill) — color
-   tracks the same low/mid/high bands as ROUND_SYS_PROMPT's readiness guide
-   in services/learning_service.py, so the UI band matches what the LLM meant. */
+/* Readiness score badge — color tracks the same low/mid/high bands as
+   ROUND_SYS_PROMPT's readiness guide in services/learning_service.py, so the
+   UI band matches what the LLM meant. Border/background suppressed when
+   nested in .session-menu (see below) so it blends into that pill instead of
+   showing as its own separate badge. */
 .readiness-badge {
   flex: 0 0 auto;
   font-size: 0.68rem;
@@ -560,15 +624,60 @@ a.btn-primary {
   border: 1px solid var(--border);
   color: var(--text-muted);
   background: var(--bg-soft);
+  cursor: pointer;
 }
-.readiness-badge.is-low { color: #b02a37; background: #fdeaea; border-color: #f3c2c2; }
-.readiness-badge.is-mid { color: #8a6400; background: #fff6df; border-color: #f0dfa0; }
-.readiness-badge.is-high { color: #146c2e; background: #e7f7ec; border-color: #b9e6c6; }
-.readiness-badge { cursor: pointer; }
+.readiness-badge.is-low { color: #b02a37; }
+.readiness-badge.is-mid { color: #8a6400; }
+.readiness-badge.is-high { color: #146c2e; }
 
-/* Readiness / 防呆 details panel — collapsible, sits under the chat toolbar.
-   Coverage bars per skill-goal, still-missing gaps, and the claim-by-claim
-   verified-vs-asserted validation the export gate reads. */
+/* Session menu — token usage + Readiness trigger, bottom-left under TAT
+   Filter. One cohesive pill (shared border/background) instead of two
+   separate flat badges, with a trailing chevron so it reads as a menu that
+   opens something, not just a static readout. Clicking it (or the chevron)
+   opens the Readiness popover anchored right here — see .readiness-panel. */
+.session-menu {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--bg-soft);
+  padding: 2px 8px 2px 2px;
+  gap: 2px;
+}
+.session-menu .token-badge {
+  border: none; background: transparent; padding: 0 4px 0 6px;
+}
+.session-menu .readiness-badge {
+  border: none; background: transparent; padding: 0 2px;
+}
+.session-menu .readiness-badge.is-low,
+.session-menu .readiness-badge.is-mid,
+.session-menu .readiness-badge.is-high { background: transparent; }
+.session-menu-chevron {
+  color: var(--text-muted);
+  font-size: 0.58rem;
+  cursor: pointer;
+  padding: 0 2px;
+}
+
+/* Export Skill, shrunk from a full-width green bar into a compact pill in
+   the chat header — same green "success" family as Readiness's high-score
+   state (readiness-badge.is-high) for a consistent, muted-not-shouting
+   accent instead of a solid loud fill. */
+.export-skill-compact {
+  font-size: 0.7rem;
+  font-weight: 700;
+  padding: 2px 10px;
+  border-radius: 999px;
+  color: #146c2e;
+  background: #e7f7ec;
+  border: 1px solid #b9e6c6;
+  white-space: nowrap;
+}
+.export-skill-compact:hover { background: #d8f1e0; border-color: #9fdcb0; }
+.export-skill-compact:disabled { opacity: 0.55; }
+
 .chat-body-wrap {
   position: relative;
   flex: 1 1 auto;
@@ -577,33 +686,35 @@ a.btn-primary {
   min-height: 0;
 }
 
+/* Readiness / 防呆 details — floating popover anchored under the session-menu
+   pill (bottom-left, under TAT Filter) instead of an inline panel pushing
+   chat content down. Coverage bars per skill-goal, still-missing gaps, and
+   the claim-by-claim verified-vs-asserted validation the export gate reads. */
 .readiness-panel {
   display: flex;
   flex-direction: column;
-  flex: 0 1 auto;    /* can shrink if the card runs out of room, never grows past its own max-height */
-  /* A floor (not 0) so flexbox can't squeeze this away to nothing when the
-     card is short on space — chatBox has its own 220px floor below, and
-     without a matching one here the panel (not chatBox) always lost that
-     fight first, leaving it too short to show or scroll its content. */
-  min-height: 120px;
-  border-bottom: 1px solid var(--border);
-  background: #fbfcfe;
+  position: absolute;
+  top: calc(100% + 6px);
+  left: 0;
+  width: 280px;
+  max-width: 80vw;
+  /* Fallback cap — toggleReadinessPanel() sets a precise inline max-height
+     each time it opens, so this only matters for the brief moment before
+     that runs (or if JS somehow doesn't). */
+  max-height: 42vh;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: #fff;
+  box-shadow: 0 10px 28px rgba(0, 0, 0, 0.14);
   font-size: 0.72rem;
-  max-height: 34vh;
+  z-index: 20;
 }
 .readiness-panel-head {
   display: flex; align-items: center; gap: 6px;
-  padding: 5px 10px; flex: 0 0 auto;
+  padding: 6px 10px; flex: 0 0 auto;
   border-bottom: 1px solid #eef1f5;
 }
 .readiness-panel-title { font-weight: 700; font-size: 0.68rem; color: #444; text-transform: uppercase; letter-spacing: 0.03em; }
-.readiness-expand-btn {
-  margin-left: auto; border: 1px solid var(--border); background: #fff; color: #555;
-  border-radius: 5px; width: 22px; height: 22px; line-height: 1;
-  display: inline-flex; align-items: center; justify-content: center;
-  font-size: 0.68rem; cursor: pointer;
-}
-.readiness-expand-btn:hover { background: var(--bg-soft); }
 .readiness-body {
   padding: 8px 10px; overflow-y: auto; flex: 1 1 auto; min-height: 0;
   /* Keep wheel-scroll momentum contained to this box instead of leaking to
@@ -612,15 +723,27 @@ a.btn-primary {
   overscroll-behavior: contain;
 }
 
-/* Expanded mode: grow taller (more room to read a long claim-check list)
-   WITHOUT covering the chat — stays a normal flex sibling, so it just pushes
-   chatBox further down instead of overlaying on top of it. chatBox keeps its
-   own min-height floor (see #chatBox), and .card's overflow:hidden below is
-   the hard backstop so nothing can ever visually spill past the card again. */
-.readiness-panel.is-expanded { max-height: 58vh; min-height: 260px; }
-.readiness-panel.is-expanded .readiness-body { font-size: 0.78rem; }
-
 .readiness-empty { color: var(--text-muted); font-style: italic; }
+
+/* "Still missing" / "Claim check" — collapsed by default (see
+   makeReadinessSection in log_viewer.html), which is what keeps the popover
+   short until the engineer actually wants to read one of them. */
+.readiness-collapsible { margin-top: 8px; }
+.readiness-collapsible-head {
+  display: flex; align-items: center; gap: 6px; cursor: pointer;
+  padding: 2px 0;
+}
+.readiness-collapsible-head .readiness-h { margin: 0; flex: 1 1 auto; }
+.rc-chevron { font-size: 0.6rem; color: var(--text-muted); }
+.rc-close {
+  border: none; background: transparent; color: var(--text-muted);
+  width: 18px; height: 18px; border-radius: 50%;
+  display: inline-flex; align-items: center; justify-content: center;
+  font-size: 0.62rem; cursor: pointer;
+}
+.rc-close:hover { background: rgba(0, 0, 0, 0.06); color: #444; }
+.readiness-collapsible-body { margin-top: 4px; }
+
 .readiness-h {
   font-weight: 700;
   text-transform: uppercase;
@@ -665,46 +788,34 @@ a.btn-primary {
 .flag-card { border-color: #f0dfa0 !important; background: #fffdf5; }
 .flag-progress { color: #8a6400 !important; }
 
-/* Step viewer panel (chat header, collapsible) — read-only timeline of filter
-   edits; clicking one scrolls/highlights the chat messages around that edit. */
+/* Step viewer — read-only timeline of filter edits; clicking one scrolls/
+   highlights the chat messages around that edit. Lives in its own permanent
+   card now (left column, under TAT Filter), always fully shown — no more
+   open/close toggle or expand-over-chat overlay mode, so no height ceiling
+   to fight; just a comfortably-tall scroll area for a long session. */
 .step-panel {
   display: flex;
   flex-direction: column;
-  flex: 0 1 auto;
-  /* Same floor as .readiness-panel — see that rule's comment for why this
-     can't be 0. */
-  min-height: 120px;
-  border-bottom: 1px solid var(--border);
-  background: #fbfcfe;
-  max-height: 26vh;
 }
-.step-panel-head {
-  display: flex; align-items: center; gap: 6px;
-  padding: 5px 8px; flex: 0 0 auto;
-  border-bottom: 1px solid #eef1f5;
-}
-.step-panel-title { font-weight: 700; font-size: 0.68rem; color: #444; text-transform: uppercase; letter-spacing: 0.03em; }
-.step-expand-btn {
-  margin-left: auto; border: 1px solid var(--border); background: #fff; color: #555;
-  border-radius: 5px; width: 22px; height: 22px; line-height: 1;
-  display: inline-flex; align-items: center; justify-content: center;
-  font-size: 0.68rem; cursor: pointer;
-}
-.step-expand-btn:hover { background: var(--bg-soft); }
 .step-body {
-  padding: 6px 8px; overflow-y: auto; flex: 1 1 auto; min-height: 0;
-  display: flex; flex-direction: column; gap: 3px;
+  max-height: 50vh;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
   overscroll-behavior: contain;
 }
-/* Expanded mode: same "grow in place, never cover chat" approach as
-   .readiness-panel.is-expanded — see that rule's comment for why. */
-.step-panel.is-expanded { max-height: 58vh; min-height: 260px; }
-.step-panel.is-expanded .step-item { font-size: 0.8rem; padding: 6px 9px; }
 .step-empty { color: var(--text-muted); font-style: italic; font-size: 0.72rem; }
 .step-item {
   display: flex; align-items: center; gap: 6px; flex-wrap: wrap;
   text-align: left; border: 1px solid var(--border); border-radius: 5px;
   background: #fff; padding: 3px 7px; font-size: 0.72rem; cursor: pointer;
+  /* Without this, a flex item's default min-width:auto floors it at its
+     content's un-wrapped intrinsic width — .step-text's white-space:nowrap
+     text then refuses to shrink/ellipsize and instead forces the whole row
+     (and the narrow Steps column around it) wider, causing horizontal
+     overflow/scroll instead of wrapping or truncating. */
+  min-width: 0;
 }
 .step-item:hover { background: var(--bg-soft); }
 .step-item.is-exclude { border-left: 3px solid #e0a0a0; }
@@ -721,20 +832,28 @@ a.btn-primary {
   padding: 1px 6px;
   line-height: 1.3;
 }
-.step-text { flex: 1 1 auto; color: #333; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.step-effect { flex: 0 0 auto; color: var(--text-muted); font-size: 0.66rem; }
+.step-text { flex: 1 1 auto; min-width: 0; color: #333; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* flex:1 1 auto (not 0 0 auto) + min-width:0 + word-break — this line (e.g.
+   "6 hits (2 unique), co-fires "CNCT_FLOW"×1, survivors +3") is often the
+   longest content in the row and has no spaces near the end (a quoted
+   pattern name), so without these it forced the row wider instead of
+   wrapping/breaking, overflowing the narrow Steps column. */
+.step-effect {
+  flex: 1 1 100%; min-width: 0; color: var(--text-muted); font-size: 0.66rem;
+  word-break: break-word;
+}
 .step-msgcount {
-  flex: 0 0 auto; background: #e5e9ef; color: #555; border-radius: 999px;
+  flex: 0 0 auto; min-width: 0; background: #e5e9ef; color: #555; border-radius: 999px;
   padding: 0 6px; font-size: 0.62rem;
 }
 .step-has-reason {
-  flex: 0 0 auto; color: #146c2e; font-size: 0.62rem; font-weight: 600;
+  flex: 0 0 auto; min-width: 0; color: #146c2e; font-size: 0.62rem; font-weight: 600;
 }
 /* Wraps a step-item (still the click-to-jump target) + its own 🎓 teach and
    ❓ ask icons side by side — both stop propagation so clicking either never
    also triggers the row's jump-to-chat behavior. */
-.step-row { display: flex; align-items: stretch; gap: 4px; }
-.step-row .step-item { flex: 1 1 auto; }
+.step-row { display: flex; align-items: stretch; gap: 4px; min-width: 0; }
+.step-row .step-item { flex: 1 1 auto; min-width: 0; }
 .step-teach-btn, .step-ask-btn {
   flex: 0 0 auto; border: 1px solid var(--border); background: #fff;
   border-radius: 5px; width: 26px;
@@ -751,6 +870,33 @@ a.btn-primary {
 @keyframes step-flash {
   0% { background: #fff3c4; }
   100% { background: transparent; }
+}
+
+/* Steps card narrowed to sit beside chat (was stacked under TAT Filter) —
+   fills the fixed-height card via flex instead of its own independent vh
+   scroll cap, and everything inside runs smaller since the column itself
+   is narrow. */
+.step-panel-narrow .step-panel { flex: 1 1 auto; min-height: 0; }
+.step-panel-narrow .step-body { max-height: none; flex: 1 1 auto; min-height: 0; }
+.step-panel-narrow .step-item { font-size: 0.64rem; padding: 2px 5px; gap: 4px; }
+.step-panel-narrow .step-seq { font-size: 0.58rem; padding: 1px 4px; }
+.step-panel-narrow .step-effect { font-size: 0.58rem; }
+.step-panel-narrow .step-msgcount { font-size: 0.56rem; padding: 0 4px; }
+.step-panel-narrow .step-has-reason { font-size: 0.56rem; }
+.step-panel-narrow .step-teach-btn { width: 22px; font-size: 0.64rem; }
+
+/* Chat and Steps sit flush against each other, split by a single border line
+   instead of the row's normal gutter + two independently-shadowed cards. */
+@media (min-width: 992px) {
+  .chat-panel-joined { padding-right: 0; }
+  .step-panel-joined { padding-left: 0; }
+  .chat-panel-joined .card { border-top-right-radius: 0; border-bottom-right-radius: 0; }
+  .step-panel-joined .card {
+    border-top-left-radius: 0;
+    border-bottom-left-radius: 0;
+    border-left: 1px solid var(--border);
+    box-shadow: none;
+  }
 }
 
 /* Compact inline "Log" label + status used in the top full-width Log File bar. */
@@ -858,35 +1004,52 @@ a.btn-primary {
   gap: 6px;
   margin-bottom: 3px;
 }
-/* Step-tag chip on each message — a small, quiet label naming which step
-   (or "All") the message is about. Two variants: a soft tinted chip sitting
-   above plain assistant text, vs. a translucent chip that reads against the
-   solid-color user bubble. */
+/* Step-tag "bookmark ribbon" on each message — a small, quiet label naming
+   which step (or "All") the message is about. Shaped like a little pennant/
+   tag (flat left edge, pointed right edge) via clip-path instead of a plain
+   rounded chip, with a tiny eyelet dot on the left like a real price/bookmark
+   tag. Two color variants: a soft tinted tag sitting above plain assistant
+   text, vs. a translucent tag that reads against the solid-color user
+   bubble. Uses an INSET box-shadow instead of `border` for the outline —
+   a regular border gets clipped unevenly by clip-path's diagonal edge in
+   some browsers, an inset shadow follows the clipped shape cleanly. */
 .chat-step-badge {
+  position: relative;
   display: inline-flex;
   align-items: center;
+  gap: 4px;
   font-variant-numeric: tabular-nums;
   font-size: 0.62rem;
   font-weight: 700;
   letter-spacing: 0.02em;
-  padding: 2px 7px;
-  border-radius: 6px;
+  padding: 2px 10px 2px 8px;
   line-height: 1.3;
+  border-radius: 3px 0 0 3px;
+  clip-path: polygon(0 0, calc(100% - 7px) 0, 100% 50%, calc(100% - 7px) 100%, 0 100%);
+}
+.chat-step-badge::before {
+  content: '';
+  flex: 0 0 auto;
+  width: 3px;
+  height: 3px;
+  border-radius: 50%;
+  background: currentColor;
+  opacity: 0.6;
 }
 .chat-row-assistant .chat-step-badge {
   background: #eaf1fc;
   color: var(--primary-dark);
-  border: 1px solid #d8e6f8;
+  box-shadow: inset 0 0 0 1px #c3d9f5;
 }
 .chat-row-assistant .chat-step-badge.is-all {
   background: #f0ecfb;
   color: var(--accent-purple);
-  border: 1px solid #e2d7f6;
+  box-shadow: inset 0 0 0 1px #d5c5f2;
 }
 .chat-row-user .chat-step-badge {
   background: rgba(255, 255, 255, 0.22);
   color: #fff;
-  border: 1px solid rgba(255, 255, 255, 0.32);
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.4);
 }
 .chat-bubble-content { font-size: 0.85rem; line-height: 1.5; }
 .chat-bubble-user .chat-bubble-content { white-space: pre-wrap; word-break: break-word; }
@@ -1032,6 +1195,67 @@ a.btn-primary {
 .chat-q-custom { display: flex; gap: 5px; }
 .chat-q-custom input { font-size: 0.78rem; }
 
+/* Log Round nudge card (see checkRoundNudge/renderRoundNudge) — appears
+   automatically in chat when there are filter edits since the last logged
+   round. Deliberately louder than the other chat cards (gradient icon badge,
+   brand-gradient CTA, soft glow) since its whole job is to be noticed
+   without being a nagging modal; a plain outline card here would blend into
+   the same gray the rest of the chat sits on and defeat the point. */
+.round-nudge-card {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  border: 1px solid #cfe4fb !important;
+  background: linear-gradient(135deg, #eef6ff 0%, #f7fbff 100%);
+  box-shadow: 0 2px 10px rgba(0, 113, 197, 0.12);
+}
+.round-nudge-icon {
+  flex: 0 0 auto;
+  width: 34px;
+  height: 34px;
+  border-radius: 50%;
+  background: linear-gradient(135deg, var(--primary) 0%, var(--primary-light) 100%);
+  color: #fff;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 0.9rem;
+  box-shadow: 0 2px 8px rgba(0, 113, 197, 0.35);
+  animation: round-nudge-pulse 2.2s ease-in-out infinite;
+}
+@keyframes round-nudge-pulse {
+  0%, 100% { box-shadow: 0 2px 8px rgba(0, 113, 197, 0.35); }
+  50% { box-shadow: 0 2px 14px rgba(0, 113, 197, 0.6); }
+}
+.round-nudge-body { flex: 1 1 auto; min-width: 0; }
+.round-nudge-title { font-size: 0.82rem; font-weight: 700; color: var(--primary-dark); }
+.round-nudge-sub { font-size: 0.72rem; color: var(--text-muted); margin: 2px 0 8px; }
+.round-nudge-actions { display: flex; align-items: center; gap: 6px; }
+.round-nudge-cta {
+  background: linear-gradient(135deg, var(--primary) 0%, var(--primary-light) 100%);
+  color: #fff;
+  border: none;
+  font-weight: 700;
+  border-radius: 999px;
+  padding: 5px 14px;
+  font-size: 0.76rem;
+  box-shadow: 0 2px 6px rgba(0, 113, 197, 0.3);
+}
+.round-nudge-cta:hover { filter: brightness(1.06); color: #fff; }
+.round-nudge-cta:disabled { opacity: 0.6; }
+.round-nudge-dismiss {
+  flex: 0 0 auto;
+  border: none;
+  background: transparent;
+  color: var(--text-muted);
+  width: 22px; height: 22px;
+  border-radius: 50%;
+  display: inline-flex; align-items: center; justify-content: center;
+  font-size: 0.68rem;
+  cursor: pointer;
+}
+.round-nudge-dismiss:hover { background: rgba(0, 0, 0, 0.06); color: #444; }
+
 /* "Teach this step" — user-led explain box (see openStepExplainBox): the
    engineer writes what they noticed + the problem BEFORE any LLM call runs.
    Purple accent (vs the amber flag-card / blue question-card) marks it as a
@@ -1052,6 +1276,27 @@ a.btn-primary {
 .step-confirm-followup-section .step-explain-actions { margin-top: 6px; }
 .step-confirm-followup-section .form-control { font-size: 0.8rem; }
 .step-confirm-note-label { font-weight: 600; color: #444; }
+
+/* Permanent, non-interactive rendering of a confirm_step message in the chat
+   history (see renderStepKnowledgeBubble) — same green "ready knowledge"
+   family as the old interactive .step-confirm-card, just a plain record now
+   instead of something with Confirm/Continue buttons. */
+.step-knowledge-msg {
+  background: #f6fdf8;
+  border: 1px solid #b9e6c6;
+  border-radius: 10px;
+  padding: 8px 10px;
+  max-width: 92%;
+}
+.step-knowledge-head {
+  display: flex; align-items: center; gap: 5px;
+  font-size: 0.66rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.03em;
+  color: #146c2e; margin-bottom: 5px;
+}
+.step-knowledge-followup {
+  font-size: 0.76rem; color: var(--text-muted); margin-top: 6px;
+  padding-top: 6px; border-top: 1px dashed var(--border);
+}
 
 /* "Ask about this step" — the LLM-LED counterpart, always skippable (see
    askStepQuestion/renderStepAskCard). Blue accent matches the general

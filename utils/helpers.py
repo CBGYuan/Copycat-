@@ -50,6 +50,13 @@ _HCI_DATED_RE = re.compile(
     r'^\[[^\]]*\][^:\s]+::(\d{2}/\d{2}/\d{4}-\d{2}:\d{2}:\d{2}\.\d{3})\s*(.*)$')
 _HCI_TIME_ONLY_RE = re.compile(r'<(\d{2}):(\d{2}):(\d{2})(?:\.(\d{1,3}))?>')
 _DDD_TIME_RE = re.compile(r'(?:<)?TIME:(\d{2}:\d{2}:\d{2})(?:>)?', re.IGNORECASE)
+# Another WiFi DDD-export shape (seen from a real capture): a tab-separated
+# leading frame/sequence counter, then a colon-separated HH:MM:SS:mmm (not
+# angle-bracketed, not period-separated ms, no "TIME:" prefix) — e.g.
+# "0000345912\t17:07:24:599\t[OSC ]...". None of the three patterns above
+# match this shape, which is why it was passing through _canonicalize_log_line
+# completely unrecognized (no date synthesis at all, not even a wrong one).
+_DDD_FRAME_TIME_RE = re.compile(r'^\d+\t(\d{2}):(\d{2}):(\d{2}):(\d{3})\t(.*)$')
 
 
 def _canonicalize_log_line(line: str, fallback_date: date) -> str:
@@ -83,6 +90,13 @@ def _canonicalize_log_line(line: str, fallback_date: date) -> str:
               f"{h:02d}:{mn:02d}:{s:02d}.000")
         return f"{ts} {rest}{nl}"
 
+    m = _DDD_FRAME_TIME_RE.match(body)
+    if m:
+        h, mn, s, ms, rest = m.groups()
+        ts = (f"{fallback_date.month:02d}/{fallback_date.day:02d}/{fallback_date.year:04d}-"
+              f"{h}:{mn}:{s}.{ms}")
+        return f"{ts} {rest}{nl}"
+
     return line
 
 
@@ -101,11 +115,37 @@ def needs_date_synthesis(path: str, sniff_lines: int = 50) -> bool:
                 body = line.rstrip("\n")
                 if _CANONICAL_TS_RE.match(body) or _HCI_DATED_RE.match(body):
                     continue
-                if _HCI_TIME_ONLY_RE.search(body) or _DDD_TIME_RE.search(body):
+                if _HCI_TIME_ONLY_RE.search(body) or _DDD_TIME_RE.search(body) \
+                        or _DDD_FRAME_TIME_RE.match(body):
                     return True
     except OSError:
         pass
     return False
+
+
+# WiFi DDD export filenames encode the capture start TIME and DATE directly,
+# e.g. "WiFiLog--17-07-24-599--17-06-2026--00001.LOG": the first --..-- group
+# (17-07-24-599) is HH-MM-SS-mmm and matches the log's own first line exactly;
+# the second (17-06-2026) is DD-MM-YYYY — 17 can't be a month, so the day
+# comes first. Only the date group is needed here (the file's own lines
+# supply the time-of-day once canonicalized).
+_FILENAME_DATE_RE = re.compile(r'--(\d{2})-(\d{2})-(\d{4})--')
+
+
+def extract_date_from_filename(path: str) -> date | None:
+    """The capture date straight from a WiFi DDD export's filename (see
+    _FILENAME_DATE_RE) — preferred over file_mtime_date, which only reflects
+    when the file was last copied/downloaded and can silently be wrong (e.g.
+    a capture downloaded days after it was recorded). Returns None for any
+    filename that doesn't match this convention, so callers fall back to mtime."""
+    m = _FILENAME_DATE_RE.search(os.path.basename(path))
+    if not m:
+        return None
+    day, month, year = int(m.group(1)), int(m.group(2)), int(m.group(3))
+    try:
+        return date(year, month, day)
+    except ValueError:
+        return None
 
 
 def file_mtime_date(path: str) -> date:

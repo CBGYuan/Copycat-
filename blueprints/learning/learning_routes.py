@@ -13,8 +13,27 @@ learning_bp = Blueprint("learning", __name__, url_prefix="/learning")
 def _skill_pool(domain: str) -> dict:
     """The right skill dict for a domain ("wifi"/"bt") — the single place
     every route below goes through so WiFi and BT skills never get compared
-    against or saved into each other's pool."""
+    against or saved into each other's pool. This is the FULL merged view
+    (shared corp baseline + this engineer's contribution + local) — used only
+    for READ-ONLY context (the interview's "don't re-ask what's already
+    covered" prior-knowledge display). It must NEVER be used to pick a Phase 2
+    merge target — see _local_skill_pool below."""
     return app_config.bt_skills if domain == "bt" else app_config.skills
+
+
+def _local_skill_pool(domain: str) -> dict:
+    """The skills THIS engineer's own copycat instance has actually saved
+    locally — i.e. genuinely copycat-originated skills, never a skill that
+    only exists via the shared corp drive / a teammate's contribution file.
+    This is what route_draft's Tier 0 (continuity) and Tier 1 (retrieval)
+    merge-target search must use instead of _skill_pool's full merged view:
+    the shared library is read-only reference material (see skill_service's
+    module docstring — "we only ever READ from here"), so it must never be
+    silently treated as something a synthesized draft can be merged into.
+    Only a skill this engineer's own session has already created can receive
+    new rules; a shared skill that happens to look similar just means the new
+    teaching becomes its own new copycat-owned skill instead."""
+    return skill_service.load_all_skills(domain)
 
 
 def _other_skill_descriptions(exclude_key: str = "", domain: str = "wifi") -> list:
@@ -207,6 +226,11 @@ def log_round():
     # zero (see analyze_round's docstring).
     if result.get("assessment") is not None:
         _store_assessment(state, result["assessment"])
+
+    # Marks these operations as "accounted for" so the frontend's nudge card
+    # (see checkRoundNudge in log_viewer.html) stops showing until the
+    # engineer changes the filter again.
+    state.last_round_op_count = len(state.operations)
 
     # Persist a plain-text rendering into chat_history so a page reload still
     # shows what was analyzed/asked (the interactive option buttons are
@@ -467,15 +491,24 @@ def converge():
 
     Independently of that toggle, EVERY draft (FRESH or PRIOR) is then routed
     through route_draft(), which decides per-draft whether it should become a
-    new skill or fold into an existing one:
+    new skill or fold into an existing one. Critically, "existing" here means
+    a LOCAL, copycat-owned skill ONLY (see _local_skill_pool) — a skill that
+    only exists via the shared corp drive / a teammate's contribution file is
+    never a valid merge target, no matter how similar. The shared library
+    stays purely read-only reference material; new teaching can only ever
+    extend a skill THIS copycat instance already created, never the shared
+    original. (This is a separate concern from the PRIOR-mode toggle above:
+    PRIOR only shapes what gets asked/extracted during the interview so it
+    doesn't re-cover ground the shared skills already know; it has no bearing
+    on where the resulting draft gets filed.)
       - Tier 0 (continuity): state.active_skill_key — the ONE skill the
         engineer explicitly loaded this session — is checked FIRST, in
-        isolation, but still has to pass a real similarity/judge gate before
-        a merge is suggested. This is a SEPARATE signal from the PRIOR-mode
-        toggle above: PRIOR only shapes what gets asked/extracted during the
-        interview so it doesn't re-cover known ground; continuity decides
-        WHERE the resulting draft should be filed at export time.
-      - Tier 1 (retrieval): the general domain-wide search, used whenever
+        isolation, but only if it's itself a local skill; a shared-origin
+        active_skill_key is silently skipped (falls through to Tier 1, which
+        will also only ever find local skills). Even when applicable, it
+        still has to pass a real similarity/judge gate before a merge is
+        suggested.
+      - Tier 1 (retrieval): the general local-pool-only search, used whenever
         Tier 0 doesn't apply or doesn't clear its own bar.
     route_draft also grounds BOTH the judge and any merge in this session's
     actual filter_stats (unique_hits/dropped per keyword — see
@@ -499,6 +532,23 @@ def converge():
             "message": "Run a filter and chat about it first so there's something to converge into a skill.",
         }), 400
 
+    # Nothing new since the last successful Export on this exact conversation
+    # — mashing the button again would re-synthesize the SAME chat_history,
+    # and a merge target's expert_rules would pick up a re-phrased-but-not-
+    # substantively-new restatement each time (basic_merge_draft's dedup is
+    # line-based, not semantic, so near-duplicate paraphrases slip through).
+    # Block it here instead, before any LLM call — cheap, and it's the
+    # engineer's OWN mistake to fix (keep teaching, then Export again),
+    # rather than something worth spending a token on.
+    if state.chat_history and len(state.chat_history) <= state.last_export_chat_len:
+        return jsonify({
+            "success": False,
+            "no_new_content": True,
+            "message": "Nothing new to export — you haven't added any teaching since the last "
+                       "Export on this conversation. Keep chatting or teach another step, then "
+                       "Export again.",
+        })
+
     data = request.get_json(silent=True) or {}
     if "use_prior_knowledge" in data:
         state.prior_knowledge = bool(data["use_prior_knowledge"])
@@ -515,11 +565,20 @@ def converge():
         return jsonify({"success": False, "message": f"LLM call failed: {e}"}), 500
 
     raw_drafts = result.get("drafts") or []
-    pool = _skill_pool(domain)
+    # LOCAL-only pool — route_draft's judge may only pick a merge target this
+    # engineer's own copycat instance already created (see _local_skill_pool).
+    # A skill that only exists on the shared corp drive is never a valid
+    # merge target: even if state.active_skill_key points at one (loaded as
+    # this session's filter baseline) or Tier 1's retrieval finds one that
+    # looks similar, it simply won't be present in this pool, so the draft
+    # falls through to "add" — a fresh, copycat-owned skill — instead of
+    # silently shadowing the shared original.
+    pool = _local_skill_pool(domain)
     # Only trust the continuity hint when the loaded skill actually belongs
-    # to THIS export's domain — a WiFi active_skill_key must never be checked
-    # against a BT draft (or vice versa); _skill_pool already keeps the two
-    # pools disjoint, so a cross-domain key simply won't be found in `pool`.
+    # to THIS export's domain AND is itself a local (copycat-owned) skill —
+    # a WiFi active_skill_key must never be checked against a BT draft (or
+    # vice versa), and a shared-origin active_skill_key must never be
+    # checked at all (see `pool` above).
     continuity_key = state.active_skill_key or None
 
     drafts = []
@@ -533,6 +592,9 @@ def converge():
         drafts.append(routed)
 
     state.skill_draft = drafts
+    # Stamp the watermark AFTER a successful synthesis — the guard above
+    # compares against this on the NEXT converge() call.
+    state.last_export_chat_len = len(state.chat_history)
     return jsonify({
         "success": True,
         "drafts": drafts,
@@ -584,12 +646,12 @@ def save():
     state.skill_draft = []
     state.learning_questions = []
     state.learning_answers = []
-    state.round_count = 0
-    state.prior_knowledge = False
-    state.last_readiness = {}
-    state.last_coverage = {}
-    state.last_gaps = []
-    state.last_validation = []
-    state.operations = []
-    state.prev_survivors = None
+    # round_count / prior_knowledge / last_readiness / last_coverage /
+    # last_gaps / last_validation / operations / prev_survivors are
+    # deliberately NOT reset here anymore — an engineer often exports
+    # several rounds from the SAME ongoing log session, and wiping the
+    # readiness state on every single Save made it look like teaching
+    # progress kept vanishing. Only an explicit "start over" (Clear /
+    # loading a different log — see WorkingState.reset_teaching_progress)
+    # clears that state now.
     return jsonify({"success": True, "skill_key": saved_key})

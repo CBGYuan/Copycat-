@@ -20,12 +20,15 @@ entries from lower):
      domain's local file, never the shared drive and never the other
      domain's file — so a BT scenario can never get silently filed under
      WiFi (or vice versa) and nothing here can clobber a teammate's shared
-     skill. save_skill() also snapshots the FULL merged view (`base`,
-     normally app_config.skills/bt_skills) into that local file on every
-     save, not just the one skill being edited — so the local file is a
-     complete standalone copy of everything this engineer has ever loaded,
-     and local wins over the shared drive for every key it has ever
-     touched this way (see save_skill's docstring for the trade-off).
+     skill. The local file only ever holds skills this copycat instance
+     genuinely originated — save_skill() edits a key IN PLACE only when it
+     already exists LOCALLY; a key that currently resolves via the shared
+     baseline or a contribution file (but was never saved locally) is
+     treated as brand-new and gets its own fresh, non-colliding local key
+     instead of shadowing the shared entry (see save_skill's docstring).
+     This keeps the shared drive purely read-only in practice, not just in
+     intent: a shared skill can never end up duplicated into, or silently
+     overridden by, the local file.
 
 WiFi and Bluetooth skills are kept in two entirely separate pools
 end-to-end (app_config.skills / app_config.bt_skills) — see
@@ -134,12 +137,15 @@ def _load_yaml_skills_from_path(path: str) -> Dict[str, Skill]:
         return {}
 
 
-def _find_user_contribution_path(username: str) -> Optional[str]:
+def _find_user_contribution_path(username: str, contrib_dir: str) -> Optional[str]:
     """The contribution filename is `<username>__skills_<date>.yaml` — date
-    varies, so glob for it and take the most recently modified match."""
-    if not username or not os.path.isdir(path_configs.SKILLS_SHARE_USER_CONTRIB_DIR):
+    varies, so glob for it and take the most recently modified match.
+    `contrib_dir` is parameterized so this can search either the LIVE share
+    (refresh_shared_cache, syncing FROM it) or the local cache mirror
+    (load_shared_skills, reading FROM it) with the same logic."""
+    if not username or not os.path.isdir(contrib_dir):
         return None
-    pattern = os.path.join(path_configs.SKILLS_SHARE_USER_CONTRIB_DIR, f"{username}__skills_*.yaml")
+    pattern = os.path.join(contrib_dir, f"{username}__skills_*.yaml")
     matches = glob.glob(pattern)
     if not matches:
         return None
@@ -150,25 +156,81 @@ def _local_path(domain: str) -> str:
     return path_configs.SKILLS_BT_YAML_PATH if domain == "bt" else path_configs.SKILLS_YAML_PATH
 
 
+def _current_username() -> str:
+    return os.environ.get("USERNAME") or os.environ.get("USER") or ""
+
+
+def refresh_shared_cache() -> Dict[str, bool]:
+    """Best-effort sync of the LIVE shared corp drive (path_configs.
+    SKILLS_SHARE_*) into the local read-only mirror (SKILLS_CACHE_*) that
+    load_shared_skills() actually reads from. Called once at app startup
+    (configs.set_up_app.set_up), before load_shared_skills().
+
+    Never raises: each of the three sources (WiFi baseline, BT baseline,
+    this engineer's own contribution file) is copied independently, and a
+    source that's unreachable (VPN down, share offline) simply leaves
+    whatever was cached from the last successful sync untouched — shared
+    skills don't vanish just because the network dropped mid-session, they
+    only go stale until the next successful refresh. Returns which sources
+    were actually refreshed this call, for the startup log line.
+    """
+    os.makedirs(path_configs.SKILLS_CACHE_DIR, exist_ok=True)
+    os.makedirs(path_configs.SKILLS_CACHE_USER_CONTRIB_DIR, exist_ok=True)
+    refreshed = {"shared_wifi": False, "shared_bt": False, "contribution": False}
+
+    def _copy(src: str, dst: str) -> bool:
+        try:
+            if not src or not os.path.isfile(src):
+                return False
+            with open(src, "r", encoding="utf-8") as f:
+                content = f.read()
+            with open(dst, "w", encoding="utf-8") as f:
+                f.write(content)
+            return True
+        except Exception as e:
+            print(f"⚠️  Could not refresh shared-skill cache from {src}: {e}")
+            return False
+
+    refreshed["shared_wifi"] = _copy(path_configs.SKILLS_SHARE_WIFI_PATH, path_configs.SKILLS_CACHE_WIFI_PATH)
+    refreshed["shared_bt"] = _copy(path_configs.SKILLS_SHARE_BT_PATH, path_configs.SKILLS_CACHE_BT_PATH)
+
+    username = _current_username()
+    live_contrib_path = _find_user_contribution_path(username, path_configs.SKILLS_SHARE_USER_CONTRIB_DIR)
+    if live_contrib_path:
+        cached_contrib_path = os.path.join(path_configs.SKILLS_CACHE_USER_CONTRIB_DIR,
+                                            os.path.basename(live_contrib_path))
+        refreshed["contribution"] = _copy(live_contrib_path, cached_contrib_path)
+
+    return refreshed
+
+
 def load_shared_skills() -> Dict[str, Dict]:
     """Load every skill source and return:
       {"wifi": {key: Skill}, "bt": {key: Skill}, "sources": {...}}
     `wifi` is the merge of shared baseline -> this user's shared
-    contribution -> local data/skills/skills.yaml (later wins). `bt` is the
-    shared Bluetooth baseline -> local data/skills/bt_skills.yaml (later
-    wins) — same override shape as wifi, just without a shared per-user
-    contribution file for BT.
+    contribution -> local data/skills/local/skills.yaml (later wins). `bt`
+    is the shared Bluetooth baseline -> local data/skills/local/
+    bt_skills.yaml (later wins) — same override shape as wifi, just without
+    a shared per-user contribution file for BT.
+
+    "shared baseline" / "contribution" here mean the LOCAL read-only mirror
+    (SKILLS_CACHE_*), NOT a live network read — see refresh_shared_cache(),
+    which is what actually keeps that mirror in sync with the real share.
+    This keeps every load (including the post-save app_config refresh in
+    skills_routes.py/learning_routes.py) fast and immune to the network
+    being unreachable mid-session; only a fresh app startup re-syncs it.
+
     `sources` records which paths actually loaded, for the startup log line.
     """
-    username = os.environ.get("USERNAME") or os.environ.get("USER") or ""
-    contrib_path = _find_user_contribution_path(username)
+    username = _current_username()
+    contrib_path = _find_user_contribution_path(username, path_configs.SKILLS_CACHE_USER_CONTRIB_DIR)
 
     ensure_skills_file("wifi")
     ensure_skills_file("bt")
-    shared_wifi = _load_yaml_skills_from_path(path_configs.SKILLS_SHARE_WIFI_PATH)
+    shared_wifi = _load_yaml_skills_from_path(path_configs.SKILLS_CACHE_WIFI_PATH)
     contrib = _load_yaml_skills_from_path(contrib_path) if contrib_path else {}
     local_wifi = _load_yaml_skills_from_path(path_configs.SKILLS_YAML_PATH)
-    shared_bt = _load_yaml_skills_from_path(path_configs.SKILLS_SHARE_BT_PATH)
+    shared_bt = _load_yaml_skills_from_path(path_configs.SKILLS_CACHE_BT_PATH)
     local_bt = _load_yaml_skills_from_path(path_configs.SKILLS_BT_YAML_PATH)
 
     wifi: Dict[str, Skill] = {}
@@ -184,17 +246,17 @@ def load_shared_skills() -> Dict[str, Dict]:
         "wifi": wifi,
         "bt": bt,
         "sources": {
-            "shared_wifi": path_configs.SKILLS_SHARE_WIFI_PATH if shared_wifi else None,
+            "shared_wifi": path_configs.SKILLS_CACHE_WIFI_PATH if shared_wifi else None,
             "contribution": contrib_path if contrib else None,
             "local": path_configs.SKILLS_YAML_PATH if local_wifi else None,
-            "bt": path_configs.SKILLS_SHARE_BT_PATH if shared_bt else None,
+            "bt": path_configs.SKILLS_CACHE_BT_PATH if shared_bt else None,
             "local_bt": path_configs.SKILLS_BT_YAML_PATH if local_bt else None,
         },
     }
 
 
 def ensure_skills_file(domain: str = "wifi") -> None:
-    os.makedirs(path_configs.SKILLS_DIR, exist_ok=True)
+    os.makedirs(path_configs.SKILLS_LOCAL_DIR, exist_ok=True)
     path = _local_path(domain)
     if not os.path.exists(path):
         with open(path, "w", encoding="utf-8") as f:
@@ -314,24 +376,26 @@ def _write_skills_yaml(raw: dict, domain: str = "wifi") -> None:
 
 def save_skill(skill_key: Optional[str], skill: Skill, domain: str = "wifi",
                base: Optional[Dict[str, Skill]] = None) -> str:
-    """Create (skill_key=None/unknown) or update a skill entry. Returns the
-    key used.
+    """Create (skill_key=None/unknown/shared-origin) or update a skill entry.
+    Returns the key actually used.
 
-    Snapshots the FULL merged view for this domain — `base` (normally the
-    caller's already-loaded app_config.skills/app_config.bt_skills: shared
-    corp baseline + this engineer's shared contribution + whatever was
-    already local) with `skill` written in under `skill_key` (or a fresh
-    slugified key for a new skill) — into the LOCAL file for `domain`, never
-    the shared corp drive. This makes the local file a complete, standalone
-    copy of everything this engineer has ever loaded for this domain, not
-    just an incremental diff of what was edited through this app, so it
-    keeps working even if the shared drive becomes unreachable later.
-
-    Trade-off: once a skill has been mirrored into the local file this way,
-    local ALWAYS wins over the shared drive for that key from then on (see
-    load_shared_skills()'s merge order) — if a teammate later improves that
-    same skill on the shared baseline, this local copy keeps shadowing it
-    until someone manually deletes the local override.
+    The LOCAL file for `domain` is treated as append-only relative to the
+    shared corp drive: it only ever contains skills this copycat instance
+    genuinely originated. `skill_key` is only editable IN PLACE when it
+    already resolves to an entry in the local file itself — a key that
+    currently resolves via the shared baseline / a teammate's contribution
+    file (`base`, normally the caller's already-loaded app_config.skills /
+    app_config.bt_skills) but has never been saved locally is NOT edited or
+    shadowed: it's treated exactly like skill_key=None, minting a fresh,
+    non-colliding local key instead (`base` is consulted only to avoid that
+    new key accidentally colliding with anything already visible — shared,
+    contribution, or local). This is what keeps the shared library purely
+    read-only: it never gets mirrored into, or overridden by, this app's own
+    save path (see this module's docstring). Any merge/union of shared-skill
+    content into a new local skill must already have happened in `skill`
+    itself before calling this (see learning_service.basic_merge_draft) —
+    this function only decides WHERE that content is written, never how it's
+    combined.
 
     `domain` MUST match where the caller intends this skill to live ("wifi"
     or "bt") — saving a BT scenario with domain left at the "wifi" default is
@@ -343,15 +407,21 @@ def save_skill(skill_key: Optional[str], skill: Skill, domain: str = "wifi",
     ensure_skills_file(domain)
     if base is None:
         base = load_shared_skills()["bt" if domain == "bt" else "wifi"]
-    raw = {k: _skill_to_raw(v) for k, v in base.items()}
+    # `local_raw` is the ONLY thing ever read as "current state" or written
+    # back — it's always just this domain's own local file, never the full
+    # shared+contribution+local merge. `merged_raw` (the full view) is used
+    # SOLELY to avoid minting a new key that collides with anything already
+    # visible; it never gets persisted.
+    local_raw = {k: _skill_to_raw(v) for k, v in load_all_skills(domain).items()}
+    merged_raw = {k: _skill_to_raw(v) for k, v in base.items()}
 
-    is_new = not skill_key or skill_key not in raw
+    is_new = not skill_key or skill_key not in local_raw
     key = skill_key or _slugify(skill.name)
     if is_new:
-        base_key = key if key not in raw else _slugify(skill.name)
+        base_key = key if key not in merged_raw else _slugify(skill.name)
         key = base_key
         i = 2
-        while key in raw:
+        while key in merged_raw:
             key = f"{base_key}_{i}"
             i += 1
         # Brand-new skill: start the version line at 0.1.0 with an empty trail,
@@ -359,16 +429,16 @@ def save_skill(skill_key: Optional[str], skill: Skill, domain: str = "wifi",
         if not (skill.version or "").strip():
             skill.version = "0.1.0"
     else:
-        # UPDATE of an existing skill: push a snapshot of the PRE-edit state
-        # onto the history trail and bump the patch version. The old state is
-        # read from `raw[key]` (the currently-stored entry in the merged view),
-        # NOT from the incoming `skill` (which is the just-edited NEW state) —
-        # so the trail records what the skill looked like before this save,
-        # even when the caller rebuilt the Skill without carrying version
-        # fields through (e.g. the Edit-Skill modal's save payload). This makes
-        # save_skill the single source of truth for version bumping regardless
-        # of what the route passes in.
-        old_entry = raw[key]
+        # UPDATE of an already-local skill: push a snapshot of the PRE-edit
+        # state onto the history trail and bump the patch version. The old
+        # state is read from `local_raw[key]` (the currently-stored LOCAL
+        # entry), NOT from the incoming `skill` (which is the just-edited NEW
+        # state) — so the trail records what the skill looked like before
+        # this save, even when the caller rebuilt the Skill without carrying
+        # version fields through (e.g. the Edit-Skill modal's save payload).
+        # This makes save_skill the single source of truth for version
+        # bumping regardless of what the route passes in.
+        old_entry = local_raw[key]
         old_version = str(old_entry.get("version") or "0.1.0")
         history = _coerce_history(old_entry.get("version_history"))
         history.append({
@@ -383,8 +453,8 @@ def save_skill(skill_key: Optional[str], skill: Skill, domain: str = "wifi",
         skill.version = _bump_patch(old_version)
         skill.version_history = history[-_HISTORY_LIMIT:]
 
-    raw[key] = _skill_to_raw(skill)
-    _write_skills_yaml(raw, domain)
+    local_raw[key] = _skill_to_raw(skill)
+    _write_skills_yaml(local_raw, domain)
     return key
 
 

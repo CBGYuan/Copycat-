@@ -63,6 +63,37 @@ class WorkingState:
         self.last_coverage: dict = {}      # {"knowledge": int, "scope": int, "keywords": int}
         self.last_gaps: list = []          # ["short actionable missing piece", ...]
         self.last_validation: list = []    # [{"claim", "status": verified|asserted|contradiction, "note"}]
+        # len(chat_history) at the moment /learning/converge last actually ran
+        # synthesis — lets converge() tell "nothing new since the last
+        # export" apart from "genuinely new teaching", so mashing Export
+        # again on an unchanged conversation doesn't re-run the LLM and
+        # re-merge the same content into a skill's expert_rules a second time
+        # (see converge()'s docstring).
+        self.last_export_chat_len: int = 0
+        # len(operations) as of the last successful /learning/log_round call —
+        # lets the frontend show a "new changes to log" nudge card exactly
+        # when operations has grown past this since, instead of guessing
+        # client-side or nagging on every single filter edit.
+        self.last_round_op_count: int = 0
+
+    def reset_teaching_progress(self) -> None:
+        """Clears the readiness/round/operation-journal state that should
+        persist across a skill Export+Save (an engineer often does several
+        rounds of exporting from the SAME ongoing log session) but SHOULD
+        reset when they explicitly start over — clicking Clear
+        (chatbot.reset) or loading a different log (log_viewer.pick_log).
+        Deliberately narrow: does not touch filters/tat_path/log_path — those
+        have their own, separate reset points."""
+        self.operations = []
+        self.prev_survivors = None
+        self.round_count = 0
+        self.last_readiness = {}
+        self.last_coverage = {}
+        self.last_gaps = []
+        self.last_validation = []
+        self.skill_draft = []
+        self.last_export_chat_len = 0
+        self.last_round_op_count = 0
 
 
 def get_state() -> WorkingState:

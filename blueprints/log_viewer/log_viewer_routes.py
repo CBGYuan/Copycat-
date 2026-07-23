@@ -38,6 +38,19 @@ def index():
 RAW_PREVIEW_LINES = 500
 
 
+def _raw_preview(path: str, anchor_date):
+    """Uncoloured (no filter applied) preview of a log file — shared by
+    /pick_log (right after a file is chosen) and /show_all (jumping back to
+    it from a filtered view without re-opening the file dialog)."""
+    log_lines = helpers.read_log_file(path, fallback_date=anchor_date)
+    total_lines = len(log_lines)
+    preview = [
+        {"line_no": i, "text": line.rstrip("\n"), "back_color": None, "fore_color": None}
+        for i, line in enumerate(log_lines[:RAW_PREVIEW_LINES], start=1)
+    ]
+    return total_lines, preview
+
+
 @log_viewer_bp.route("/pick_log", methods=["POST"])
 def pick_log():
     path = file_picker.pick_log_file()
@@ -48,6 +61,12 @@ def pick_log():
     state = session_store.get_state()
     state.log_path = path
     state.log_domain = helpers.detect_log_domain(path)
+    # Loading a different log is the OTHER explicit "start over" trigger — a
+    # skill Save no longer clears readiness/round/operation-journal state on
+    # its own (see WorkingState.reset_teaching_progress), so switching logs
+    # is what stops a NEW log's session from opening with stale readiness
+    # left over from whatever was previously loaded.
+    state.reset_teaching_progress()
 
     # For a BT capture, auto-discover the System Event Log sitting next to the
     # driver log so the collapsible event panel can light up without a manual
@@ -61,16 +80,21 @@ def pick_log():
     # (BT's dateless HCI export, WiFi's DDD-player export) — a date must be
     # synthesized so every line still gets the canonical leading timestamp the
     # rest of the app reads (see helpers.read_log_file / _canonicalize_log_
-    # line). Anchor on the loaded System Event Log's earliest event when one's
-    # available — that's the actual capture day, keeping the log pane and the
-    # event panel's click-sync meaningful — else fall back to the log file's
-    # own mtime. Stored on state so /apply_filter's later full-log read uses
-    # the SAME anchor (never re-derived, so the two reads can't disagree).
+    # line). Priority: the loaded System Event Log's earliest event (the
+    # actual capture day, keeps the event panel's click-sync meaningful) →
+    # the WiFi DDD filename's own encoded date (also the real capture day —
+    # see extract_date_from_filename) → the log file's mtime as a last
+    # resort, which only reflects when the file was copied/downloaded and can
+    # be wrong (e.g. a capture downloaded days after recording). Stored on
+    # state so /apply_filter's later full-log read uses the SAME anchor
+    # (never re-derived, so the two reads can't disagree).
     date_synthesized = helpers.needs_date_synthesis(path)
     anchor_date = None
     if date_synthesized:
         if state.event_log_path:
             anchor_date = event_log_service.peek_event_log_date(state.event_log_path)
+        if anchor_date is None:
+            anchor_date = helpers.extract_date_from_filename(path)
         if anchor_date is None:
             anchor_date = helpers.file_mtime_date(path)
     state.log_date_anchor = anchor_date.isoformat() if anchor_date else ""
@@ -82,12 +106,7 @@ def pick_log():
     raw_preview = []
     total_lines = 0
     try:
-        log_lines = helpers.read_log_file(path, fallback_date=anchor_date)
-        total_lines = len(log_lines)
-        raw_preview = [
-            {"line_no": i, "text": line.rstrip("\n"), "back_color": None, "fore_color": None}
-            for i, line in enumerate(log_lines[:RAW_PREVIEW_LINES], start=1)
-        ]
+        total_lines, raw_preview = _raw_preview(path, anchor_date)
     except Exception as e:
         print(f"⚠️  Could not build raw preview for {path}: {e}")
 
@@ -105,6 +124,25 @@ def pick_log():
         # the time-of-day) is an estimate, not something the log itself proved.
         "date_synthesized": date_synthesized,
     })
+
+
+@log_viewer_bp.route("/show_all", methods=["POST"])
+def show_all():
+    """Jump the log pane back to the raw, unfiltered view — same shape as
+    /pick_log's initial preview, but reuses the already-loaded log_path/
+    date anchor instead of opening the file dialog again. Purely a view
+    reset: does not touch filters, operations, or any teaching state, so
+    re-applying the same filter afterward picks up exactly where it left
+    off."""
+    state = session_store.get_state()
+    if not state.log_path or not os.path.exists(state.log_path):
+        return jsonify({"success": False, "message": "No log loaded yet"}), 400
+    anchor_date = date.fromisoformat(state.log_date_anchor) if state.log_date_anchor else None
+    try:
+        total_lines, raw_preview = _raw_preview(state.log_path, anchor_date)
+    except Exception as e:
+        return jsonify({"success": False, "message": f"Failed to read log: {e}"}), 500
+    return jsonify({"success": True, "total_lines": total_lines, "preview": raw_preview})
 
 
 @log_viewer_bp.route("/pick_event_log", methods=["POST"])

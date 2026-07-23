@@ -117,13 +117,23 @@ these things in one response:
    captures, citing evidence from the operation pattern (hit counts, which
    keywords co-fire). This is analysis, not a question.
 2. ASK: 1-3 short, specific questions that extract exactly the knowledge
-   you're missing for the goals below. Prefer asking WHY the engineer made a
-   specific still-unexplained edit from the operation journal (e.g. "you
-   excluded 'Mcc' which dropped 300 lines — is that always noise, or only in
-   this scenario?") — that reasoning is the tacit skill worth capturing.
-   Ground every question in the round delta or a journal edit and, if you can
-   identify the closest existing skill from the "Existing skills" list, name
-   it explicitly.
+   you're missing for the goals below. Every question must be grounded in ONE
+   concrete piece of evidence, either:
+   (a) an edit from the operation journal — ask WHY the engineer made a
+       specific still-unexplained one (e.g. "you excluded 'Mcc' which dropped
+       300 lines — is that always noise, or only in this scenario?"), or
+   (b) an actual line/token quoted or closely paraphrased from "Sample
+       surviving log lines" — ask what it MEANS or what should be concluded
+       from it (e.g. "line 3 shows 'stateMachineSetStateNoCurrentFlow' right
+       before the disconnect — is that string itself diagnostic, or just
+       incidental to whatever precedes it?").
+   Do not ask generic questions about hit counts or co-occurrence in isolation
+   (e.g. "why do these two keywords co-fire?") — a number alone is not
+   evidence of meaning; anchor to what an edit or a real log line actually
+   shows. Favor (b) whenever "Sample surviving log lines" contains a line
+   relevant to this round's delta — that is the richer, more specific signal.
+   If you can identify the closest existing skill from the "Existing skills"
+   list, name it explicitly.
 3. """ + _ASSESS_TASKS + """
 
 """ + _SKILL_GOALS + """

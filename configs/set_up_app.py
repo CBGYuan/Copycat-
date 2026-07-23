@@ -35,11 +35,23 @@ def set_up():
         )
     app_config.set_llm_helper(llm_helper)
 
+    # Refresh the local read-only mirror of the shared corp drive
+    # (data/skills/shared_cache/) from the live share before loading anything
+    # — see skill_service.refresh_shared_cache(). Best-effort: if the share
+    # is unreachable (VPN down), this is a silent no-op and load_shared_
+    # skills() below just reads whatever was cached from the last successful
+    # startup, instead of the WiFi/BT pools going empty for that source.
+    cache_refresh = skill_service.refresh_shared_cache()
+    if not any(cache_refresh.values()):
+        print("⚠️  Could not reach the shared skill drive this startup — "
+              "using the last locally-cached copy (data/skills/shared_cache/).")
+
     # Load the skill knowledge base: shared corp baseline + this engineer's
-    # own shared contribution + local edits (WiFi), and the shared Bluetooth
-    # baseline + its own local edits (BT) — see
-    # services/skill_service.load_shared_skills(). It creates both local
-    # files itself, so no separate ensure_skills_file() call is needed here.
+    # own shared contribution (both from the local mirror just refreshed
+    # above) + local edits (WiFi), and the shared Bluetooth baseline + its
+    # own local edits (BT) — see services/skill_service.load_shared_skills().
+    # It creates the local edit files itself, so no separate
+    # ensure_skills_file() call is needed here.
     loaded = skill_service.load_shared_skills()
     app_config.set_skills(loaded["wifi"])
     app_config.set_bt_skills(loaded["bt"])

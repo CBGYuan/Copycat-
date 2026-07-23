@@ -4,5 +4,11 @@ __pycache__/
 venv/
 configs/keys_local.py
 data/cache/
+# Skill storage is entirely local/generated, never checked in: local/ is each
+# engineer's own personal edits, shared_cache/ is an auto-refreshed read-only
+# mirror of the shared corp drive (see services.skill_service.
+# refresh_shared_cache) regenerated on every app startup and may contain
+# another engineer's contribution-file content.
+data/skills/
 .vscode/
 .claude/

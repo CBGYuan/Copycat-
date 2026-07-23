@@ -128,7 +128,11 @@ utils/
 templates/, static/           log_viewer.html (main workbench), skills.html,
                                 shared skill_editor.js modal, style.css
 data/skills/
-  skills.yaml, bt_skills.yaml   Locally learned skill knowledge base
+  local/                        THIS engineer's own copycat-originated
+                                  skills — the only files the app writes to
+  shared_cache/                 Read-only mirror of the shared corp drive,
+                                  auto-refreshed every app startup — never
+                                  hand-edited, gitignored (regenerated data)
 ```
 
 ## Setup
@@ -165,7 +169,7 @@ Opens automatically in Chrome on a freshly-picked free port (never a fixed
 
 ## Skill data model
 
-Each entry in `data/skills/{skills,bt_skills}.yaml`:
+Each entry in `data/skills/local/{skills,bt_skills}.yaml`:
 
 ```yaml
 <skill_key>:
@@ -182,7 +186,24 @@ Each entry in `data/skills/{skills,bt_skills}.yaml`:
     [...]
 ```
 
-Shared corporate skill sources (`skills_config/{skills,bt_skills}.yaml`,
-per-engineer `user_contributions/`) are merged read-only into the running
-app at startup; anything saved through the UI only ever writes to the local
-`data/skills/` files above, never back to the shared drive.
+### Two clearly separate skill folders
+
+- **`data/skills/local/`** — this engineer's own copycat-originated skills.
+  The *only* files the app ever writes to. A skill key that only exists via
+  the shared drive is never edited or shadowed in place here — see/merge
+  onto an existing key only works when that key is already local; otherwise
+  a fresh, non-colliding local key is minted instead (skill_service.
+  save_skill). Genuinely-owned content — commit it like any other work
+  product.
+- **`data/skills/shared_cache/`** — a read-only local mirror of the shared
+  corp drive (`skills_config/{skills,bt_skills}.yaml` +
+  per-engineer `user_contributions/`), refreshed automatically on every app
+  startup (`skill_service.refresh_shared_cache`, best-effort — if the share
+  is unreachable that startup, the app keeps serving whatever was cached
+  from the last successful sync instead of the pool going empty). Never
+  hand-edited, never written to by the UI, gitignored (regenerated data).
+
+Phase 2's retrieval-assisted skill maintenance (add/merge/discard judge)
+only ever considers `local/` skills as merge targets — a shared-drive skill
+that looks similar to new teaching never gets silently modified; the new
+teaching becomes its own local skill instead.

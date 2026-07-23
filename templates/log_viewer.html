@@ -72,16 +72,27 @@
           <span id="logPaneTitle">Log</span> (<span id="matchCount">0</span> of <span id="totalLines">0</span>)
           <span id="dateSynthWarn" class="date-synth-warn" style="display:none;" title="This log's own lines carry a time-of-day but no date (BT's dateless HCI export / WiFi's DDD export) — the date shown was estimated from the loaded System Event Log's earliest event, or the file's own save time if no event log is loaded. Only the DATE is a guess; the time-of-day is exact.">⚠ date estimated</span>
         </span>
-        <span id="statsSummary" class="small text-muted"></span>
+        <span class="d-flex align-items-center gap-2">
+          <button type="button" class="btn btn-outline-secondary tat-mini-btn" onclick="showAllLog()" title="Back to the full unfiltered log">
+            <i class="fas fa-list"></i> Show all
+          </button>
+          <span id="statsSummary" class="small text-muted"></span>
+        </span>
       </div>
       <div id="previewBox" class="tat-log"></div>
     </div>
   </div>
 
-  <!-- Row 3: TAT Filter table and Skill-building chat side by side, same row -->
-  <div class="col-lg-5">
+  <!-- Row 3: TAT Filter / Skill-building chat / Steps side by side — 3/6/3
+       of the 12-column grid. TAT Filter narrowed further, chat narrowed a
+       bit, Steps moved out from under TAT Filter into its own narrow column
+       on chat's right instead (matching chat's height). -->
+  <div class="col-lg-3">
     <div class="card">
-      <div class="card-header py-1"><i class="fas fa-filter"></i> TAT Filter (TextAnalysisTool.NET)</div>
+      <div class="card-header py-1 d-flex align-items-center justify-content-between">
+        <span><i class="fas fa-filter"></i> TAT Filter</span>
+        <span id="domainBadge" class="domain-badge" style="display:none;"></span>
+      </div>
       <div class="card-body p-2">
         <div class="path-input-group">
           <div class="path-input-wrap">
@@ -93,21 +104,21 @@
         </div>
         <div id="tatStatus" class="path-status"></div>
 
-        <div class="d-flex align-items-center gap-2 flex-wrap mt-1">
-          <span id="domainBadge" class="domain-badge" style="display:none;"></span>
-          <select id="skillSelect" class="form-select form-select-sm w-auto" data-busy-lock onchange="loadSkill(this.value)"
+        <div class="d-flex align-items-center gap-2 mt-1">
+          <!-- Loads an existing skill's keywords/exclusive as the active TAT
+               filter and switches the chat into prior-knowledge mode (see
+               loadSkill()) — real functionality, not vestigial, so it stays;
+               just constrained to the card's width instead of overflowing it. -->
+          <select id="skillSelect" class="form-select form-select-sm skill-select-narrow" data-busy-lock onchange="loadSkill(this.value)"
                   title="Loading a different skill is locked while any other action is in flight — it only ever changes from a deliberate click.">
             <option value="">-- or load a learned skill --</option>
             {% for key, sk in skills.items() %}
             <option value="{{ key }}" {{ 'selected' if key == state.active_skill_key else '' }}>{{ sk.name }}</option>
             {% endfor %}
           </select>
-          <button class="btn btn-sm btn-outline-primary" id="viewSkillBtn" onclick="viewCurrentSkill()" {{ 'disabled' if not state.active_skill_key else '' }}>
-            <i class="fas fa-brain"></i> View Current Skill
-          </button>
-          <div class="ms-auto">
-            <button class="btn btn-sm btn-outline-secondary" onclick="selectAllFilters(true)">All</button>
-            <button class="btn btn-sm btn-outline-secondary" onclick="selectAllFilters(false)">None</button>
+          <div class="d-flex gap-1 flex-shrink-0">
+            <button class="btn btn-outline-secondary tat-mini-btn" onclick="selectAllFilters(true)">All</button>
+            <button class="btn btn-outline-secondary tat-mini-btn" onclick="selectAllFilters(false)">None</button>
           </div>
         </div>
 
@@ -122,71 +133,69 @@
         </div>
 
         <div class="input-group input-group-sm mt-1">
-          <input id="newFilterText" class="form-control" placeholder="Add a filter keyword...">
-          <select id="newFilterType" class="form-select" style="max-width:100px;">
-            <option value="include">Include</option>
-            <option value="exclude">Exclude</option>
-          </select>
-          <button class="btn btn-outline-secondary" onclick="addFilter()"><i class="fas fa-plus"></i></button>
+          <input id="newFilterText" class="form-control" placeholder="Add a filter keyword..."
+                 onkeypress="if(event.key==='Enter') addFilter(false);">
+          <button class="btn btn-filter-add btn-filter-include" onclick="addFilter(false)" title="Add as an include keyword">
+            <i class="fas fa-circle-plus"></i> Include
+          </button>
+          <button class="btn btn-filter-add btn-filter-exclude" onclick="addFilter(true)" title="Add as an exclude (noise) term">
+            <i class="fas fa-ban"></i> Exclude
+          </button>
         </div>
       </div>
     </div>
+
+    <!-- Session menu — token usage + Readiness, styled as one pill trigger
+         (not two separate flat badges) that opens a Readiness popover
+         anchored right here, bottom-left, instead of inline inside chat. -->
+    <div class="session-menu mt-2">
+      <span id="tokenBadge" class="token-badge" title="LLM token usage this session">🪙 0</span>
+      <button id="readinessBadge" type="button" class="readiness-badge" onclick="toggleReadinessPanel()" title="Readiness updates after every answer — click for the breakdown of what's covered and what's still missing">🎯 Readiness —</button>
+      <i class="fas fa-chevron-down session-menu-chevron" onclick="toggleReadinessPanel()"></i>
+      <!-- Readiness details popover: coverage per goal + what's still missing
+           + claim-by-claim verified/asserted validation. Refreshed after
+           every chat answer (see refreshAssessment()). -->
+      <div id="readinessPanel" class="readiness-panel" style="display:none;"></div>
+    </div>
   </div>
 
-  <!-- Skill-building chat — aligned with the TAT Filter card above, wider since this is where the actual work happens -->
-  <div class="col-lg-7">
+  <!-- Skill-building chat — squared off on its right edge (chat-panel-joined)
+       so it sits flush against Steps, split by one border line instead of a
+       visible gap between two separate cards. -->
+  <div class="col-lg-6 chat-panel-joined">
     <div class="card" style="min-height:64vh; max-height:84vh; display:flex; flex-direction:column; overflow:hidden;">
-      <div class="card-header py-1 d-flex justify-content-between align-items-center">
-        <span class="d-flex align-items-center gap-2">
-          <span><i class="fas fa-comments"></i> Skill-building chat</span>
-          <!-- Conversation-mode toggle: ON = load the existing WiFi/BT skills
-               as prior knowledge, so the interview + export only cover what's
-               NEW beyond them (no overlapping questions). OFF = teach from
-               scratch, no prior skill consulted. The single Log Round button,
-               the live assessment, and Export all follow this switch. -->
-          <span class="form-check form-switch chat-mode-switch m-0 ms-2" title="ON = load existing WiFi/BT skills as prior knowledge (the interview only asks about what's NEW beyond them, and export stays non-overlapping). OFF = teach from scratch, no prior skill consulted.">
-            <input class="form-check-input" type="checkbox" role="switch" id="priorToggle" onchange="onPriorToggle()">
-            <label class="form-check-label small text-muted" for="priorToggle" id="priorToggleLabel">Load skills</label>
-          </span>
+      <div class="card-header py-1 d-flex align-items-center gap-2">
+        <span><i class="fas fa-comments"></i> Skill-building chat</span>
+        <!-- Conversation-mode toggle sits right next to the title now — ON =
+             load the existing WiFi/BT skills as prior knowledge, so the
+             interview + export only cover what's NEW beyond them (no
+             overlapping questions). OFF = teach from scratch, no prior skill
+             consulted. The Log Round button, the live assessment, and Export
+             all follow this switch. -->
+        <span class="form-check form-switch chat-mode-switch m-0" title="ON = load existing WiFi/BT skills as prior knowledge (the interview only asks about what's NEW beyond them, and export stays non-overlapping). OFF = teach from scratch, no prior skill consulted.">
+          <input class="form-check-input" type="checkbox" role="switch" id="priorToggle" onchange="onPriorToggle()">
+          <label class="form-check-label small text-muted" for="priorToggle" id="priorToggleLabel">Load skills</label>
         </span>
-        <span class="d-flex align-items-center gap-2">
-          <span id="tokenBadge" class="token-badge" title="LLM token usage this session">🪙 0</span>
-          <button id="stepsBtn" type="button" class="icon-btn" onclick="toggleStepPanel()" title="Steps — jump to what was asked/said around a specific filter edit (read-only, doesn't ask anything new)">
-            <i class="fas fa-map-signs"></i>
+        <!-- Everything else shifts right of it. Log Round & Analyze no longer
+             lives here as a standalone icon — it's now a nudge card that
+             appears IN the chat itself (see checkRoundNudge/renderRoundNudge)
+             whenever there are filter edits since the last round, so the
+             prompt to use it is inline and visible instead of a static icon
+             easy to overlook. -->
+        <div class="d-flex align-items-center gap-2 ms-auto">
+          <button type="button" class="icon-btn" onclick="resetChat()" title="Clear the conversation">
+            <i class="fas fa-broom"></i>
           </button>
-          <button class="btn btn-sm btn-outline-secondary" onclick="resetChat()">Clear</button>
-        </span>
+          <!-- Export Skill — shrunk and recolored from a full-width green bar
+               at the very bottom into a compact pill. Still the same
+               culminating "turn this into a skill" action, just no longer
+               visually shouting as loud as a page-wide button on every scroll. -->
+          <button id="exportSkillBtn" type="button" class="btn btn-sm export-skill-compact" data-busy-lock onclick="exportSkill()" title="Turn the rounds + chat so far into reusable skill(s) — follows the prior-knowledge toggle. Splits into multiple skills if the chat spans different knowledge domains; always creates brand-new skills.">
+            <i class="fas fa-file-export"></i> Export skill
+          </button>
+        </div>
       </div>
-      <div class="chat-toolbar">
-        <!-- Single Log Round button — the CONVERSATION MODE (teach from scratch
-             vs. load existing WiFi/BT skills as prior knowledge) is chosen by
-             the toggle in the header above. This round, the live readiness
-             scoring, and Export all follow that toggle. -->
-        <button id="logRoundBtn" class="btn btn-outline-success btn-sm" data-busy-lock onclick="logFilterRound()" title="Submit the current filter as a round of evidence — analyzes it, asks follow-up questions, and updates the readiness score. Change the filter and click again to log another round; or just keep chatting below. Uses the prior-knowledge toggle in the header.">
-          <i class="fas fa-flag-checkered"></i> Log Round &amp; Analyze
-        </button>
-        <button id="readinessBadge" type="button" class="readiness-badge" onclick="toggleReadinessPanel()" title="Readiness updates after every answer — click for the breakdown of what's covered and what's still missing">🎯 Readiness —</button>
-        <button id="exportSkillBtn" class="btn btn-success btn-sm" data-busy-lock onclick="exportSkill()" title="Turn the rounds + chat so far into reusable skill(s) — follows the prior-knowledge toggle in the header. Splits into multiple skills if the chat spans different knowledge domains; always creates brand-new skills.">
-          <i class="fas fa-file-export"></i> Export Skill
-        </button>
-      </div>
-      <!-- chat-body-wrap: the steps/readiness panels and chatBox are flex
-           siblings here — "expand" just grows a panel's max-height, pushing
-           chatBox further down (never covering it); .card's overflow:hidden
-           is the hard backstop if content ever exceeds available room. -->
       <div class="chat-body-wrap">
-        <!-- Steps viewer: a read-only timeline of filter edits; clicking one
-             scrolls the chat to whatever was asked/said around that moment —
-             like clicking back through a GPT conversation's checkpoints.
-             Never sends anything, purely navigational. Has its own
-             expand/shrink toggle, same as the readiness panel below. -->
-        <div id="stepPanel" class="step-panel" style="display:none;"></div>
-        <!-- Readiness details: coverage per goal + what's still missing +
-             claim-by-claim verified/asserted validation. Collapsed by
-             default, refreshed after every chat answer (see
-             refreshAssessment()). Has its own expand/shrink toggle to
-             overlay the chat when there's a lot to review. -->
-        <div id="readinessPanel" class="readiness-panel" style="display:none;"></div>
         <div id="chatBox" class="p-2 flex-grow-1" style="overflow-y:auto; background:#f8f9fa; font-size:0.82rem; min-height:220px;"></div>
         <div class="card-footer p-2">
           <div id="stepTagDropdown" class="step-tag-dropdown" style="display:none;"></div>
@@ -196,6 +205,22 @@
             <button id="chatSendBtn" class="btn btn-primary" data-busy-lock onclick="sendMsg()"><i class="fas fa-paper-plane"></i></button>
           </div>
         </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Steps — narrow column on chat's right, matching chat's own height
+       (64vh-84vh) instead of a fixed independent scroll cap, with smaller
+       type since the column itself is narrow (see .step-panel-narrow).
+       step-panel-joined squares off its left edge to sit flush against chat,
+       split by one border line. No open/close toggle: it's the same
+       read-only timeline of filter edits (see renderStepPanel), always fully
+       shown. The 🎓 teach icon on each row is unchanged. -->
+  <div class="col-lg-3 step-panel-joined">
+    <div class="card step-panel-narrow" style="min-height:64vh; max-height:84vh; display:flex; flex-direction:column; overflow:hidden;">
+      <div class="card-header py-1"><i class="fas fa-map-signs"></i> Steps</div>
+      <div class="card-body p-2 d-flex flex-column" style="flex:1 1 auto; min-height:0;">
+        <div id="stepPanel" class="step-panel"></div>
       </div>
     </div>
   </div>
@@ -209,6 +234,10 @@ let operationData = {{ (state.operations or [])|tojson }};
 let activeSkillKey = {{ (state.active_skill_key or '')|tojson }};
 let currentQuestions = [];
 let currentDraft = null;
+// len(operations) as of the last successful Log Round — seeded from server
+// state so a page reload doesn't lose track of what's already been logged.
+// See checkRoundNudge().
+let lastRoundOpCount = {{ (state.last_round_op_count or 0)|tojson }};
 
 // Global "one async action at a time" lock — every control that triggers an
 // LLM call or a state-mutating fetch (Log Round, Export Skill, chat send,
@@ -322,6 +351,7 @@ function syncOps(d) {
         surfaceRedFlags();
         renderStepPanel();
         renderStepTagSelector();
+        checkRoundNudge();
     }
 }
 
@@ -441,7 +471,7 @@ function showRedFlagCard(seq, question, opts) {
 // used after answer_red_flag's own response, which only carries the reason
 // update (no new flags to show, panel already reflects the just-answered one).
 function syncOpsQuiet(d) {
-    if (d && d.operations) { operationData = d.operations; renderStepPanel(); }
+    if (d && d.operations) { operationData = d.operations; renderStepPanel(); checkRoundNudge(); }
 }
 
 // ---- Step viewer -----------------------------------------------------------
@@ -449,51 +479,12 @@ function syncOpsQuiet(d) {
 // whatever was asked/said around that moment. Uses each operation's
 // chat_index (how many chat messages existed at the moment it was recorded)
 // to slice chatHistoryMirror — never sends anything, never asks a new question.
-function toggleStepPanel() {
-    const p = document.getElementById('stepPanel');
-    const opening = (p.style.display === 'none' || !p.style.display);
-    // Only one of {steps, readiness} panel open at a time — both open
-    // together can push the chat card past its max-height and squeeze the
-    // conversation itself, which is exactly what looked "broken" here.
-    if (opening) {
-        const rp = document.getElementById('readinessPanel');
-        rp.style.display = 'none';
-        rp.classList.remove('is-expanded');
-    }
-    // 'flex', not 'block' — the panel's CSS is display:flex (head + scrolling
-    // body); an inline style="display:block" would override that class rule
-    // (inline beats a class selector) and silently break the whole flex/
-    // min-height:0/overflow-y:auto clipping chain, letting content spill
-    // straight past max-height instead of scrolling inside its own box.
-    p.style.display = opening ? 'flex' : 'none';
-    if (!opening) p.classList.remove('is-expanded');
-    if (opening) renderStepPanel();
-}
-
-// Grow the step list's max-height (same mechanism as the readiness panel —
-// see .step-panel.is-expanded) so a long history of edits is actually
-// browsable instead of scrolling a 26vh strip. Never covers the chat — it
-// stays a normal flex sibling and just pushes chatBox further down.
-function toggleStepExpand() {
-    document.getElementById('stepPanel').classList.toggle('is-expanded');
-    renderStepPanel();
-}
-
+// Lives in its own permanent card now (left column, under TAT Filter) —
+// always rendered, no open/close toggle to gate it behind.
 function renderStepPanel() {
     const panel = document.getElementById('stepPanel');
-    if (panel.style.display === 'none') return; // cheap: skip work while collapsed
-    const expanded = panel.classList.contains('is-expanded');
+    if (!panel) return;
     panel.innerHTML = '';
-
-    const head = el('div', 'step-panel-head');
-    head.appendChild(el('span', 'step-panel-title', 'Steps'));
-    const expandBtn = el('button', 'step-expand-btn');
-    expandBtn.type = 'button';
-    expandBtn.innerHTML = expanded ? '<i class="fas fa-compress-alt"></i>' : '<i class="fas fa-expand-alt"></i>';
-    expandBtn.title = expanded ? 'Shrink' : 'Expand over chat';
-    expandBtn.onclick = () => toggleStepExpand();
-    head.appendChild(expandBtn);
-    panel.appendChild(head);
 
     const body = el('div', 'step-body');
     panel.appendChild(body);
@@ -681,6 +672,27 @@ function pickLog() {
 
                 if (filterData.length) applyFilter(); // filters already set up — run right away, replaces this raw view
             } else showPathStatus('logStatus', d.message, 'err');
+        });
+}
+
+// Jumps the log pane back to the raw, unfiltered view — reuses the already-
+// picked log_path server-side (see /log_viewer/show_all) instead of opening
+// the file dialog again. Doesn't touch filters/operations: re-running a
+// filter afterward (e.g. via a checkbox toggle) picks up right where it left
+// off, this is purely a "let me see everything again for a sec" view switch.
+function showAllLog() {
+    fetch("{{ url_for('log_viewer.show_all') }}", {method: 'POST'})
+        .then(r => r.json())
+        .then(d => {
+            if (!d.success) { alert(d.message); return; }
+            document.getElementById('logPaneTitle').textContent = 'Log';
+            document.getElementById('matchCount').textContent = d.preview.length;
+            document.getElementById('totalLines').textContent = d.total_lines;
+            document.getElementById('statsSummary').textContent =
+                d.total_lines > d.preview.length
+                    ? `no filter applied — first ${d.preview.length} of ${d.total_lines} lines`
+                    : '';
+            renderLogRows(d.preview);
         });
 }
 
@@ -913,7 +925,6 @@ function loadSkill(key) {
             renderFilters();
             syncOps(d);
             activeSkillKey = key;
-            document.getElementById('viewSkillBtn').disabled = false;
             // Loading a named skill auto-switches the conversation into
             // PRIOR-knowledge mode server-side (see log_viewer_routes.
             // load_skill) — sync the header toggle so the UI matches, and the
@@ -952,11 +963,10 @@ function selectAllFilters(val) {
 // re-runs the filter itself. None of this ever touches the chat/LLM anymore;
 // the engineer decides when to spend a round via the "Log Round & Analyze"
 // button, or just types in the chat box directly.
-function addFilter() {
+function addFilter(excluding) {
     const input = document.getElementById('newFilterText');
     const text = input.value.trim();
     if (!text) return;
-    const excluding = document.getElementById('newFilterType').value === 'exclude';
     fetch("{{ url_for('log_viewer.add_filter') }}", {
         method: 'POST', headers: {'Content-Type': 'application/json'},
         body: JSON.stringify({text: text, excluding: excluding})
@@ -1014,23 +1024,6 @@ function debounceApplyFilter() {
     if (!document.getElementById('logPathInput').value.trim()) return; // nothing to filter yet
     if (_filterDebounceTimer) clearTimeout(_filterDebounceTimer);
     _filterDebounceTimer = setTimeout(() => applyFilter(), 350);
-}
-
-function viewCurrentSkill() {
-    if (!activeSkillKey) return;
-    fetch(`/skills/get/${activeSkillKey}`).then(r => r.json()).then(d => {
-        if (!d.success) { alert(d.message); return; }
-        const sk = d.skill;
-        sk.skill_key = activeSkillKey;
-        SkillEditor.open(sk, {
-            title: 'Current Skill',
-            subtitle: sk.name || activeSkillKey,
-            saveUrl: "{{ url_for('skills.save_skill_route') }}",
-            deleteUrl: `/skills/delete/${activeSkillKey}`,
-            extraPayload: {tat_path: sk.tat_path || null},
-            onSaved: function () { alert('Skill updated.'); },
-        });
-    });
 }
 
 // ---- Chat (reuses the same session-state filtered preview as system context) ----
@@ -1112,6 +1105,51 @@ function renderMarkdownLite(raw) {
 // nodes, not queryable message data.
 let chatHistoryMirror = [];
 
+// Matches confirm_step's exact persisted format (see stepKnowledgeCoreText
+// and learning_routes.py confirm_step) — used by renderStepKnowledgeBubble so
+// this content gets nicer structured styling instead of plain markdown
+// prose, on BOTH the live append and the page-reload replay path (both go
+// through appendMsg, so one regex covers both).
+const _STEP_KNOWLEDGE_RE = /^\*\*Step #(\d+) — knowledge core:\*\* ([\s\S]*)/;
+
+// Renders a confirm_step message (knowledge core + optional expert note +
+// optional follow-up) as labeled, visually distinct blocks instead of one
+// run-on markdown paragraph — same visual language as the old interactive
+// step-confirm-card (see .step-confirm-core/.step-confirm-note), just
+// permanent and non-interactive. Returns false (and appends nothing) for any
+// other message shape, so the caller falls back to normal markdown.
+function renderStepKnowledgeBubble(contentEl, content) {
+    const m = content.match(_STEP_KNOWLEDGE_RE);
+    if (!m) return false;
+    const seq = m[1];
+    const parts = m[2].split('\n\n');
+    const core = parts[0];
+    let expertNote = '', followUp = '';
+    for (let i = 1; i < parts.length; i++) {
+        const noteM = parts[i].match(/^\*Expert note:\* ([\s\S]*)/);
+        if (noteM) { expertNote = noteM[1]; continue; }
+        const fuM = parts[i].match(/^\*\(optional follow-up: ([\s\S]*)\)\*$/);
+        if (fuM) { followUp = fuM[1]; }
+    }
+    const head = el('div', 'step-knowledge-head');
+    head.innerHTML = `<i class="fas fa-brain"></i> Step #${seq} knowledge core`;
+    contentEl.appendChild(head);
+    contentEl.appendChild(el('div', 'step-confirm-core', core));
+    if (expertNote) {
+        const note = el('div', 'step-confirm-note');
+        note.appendChild(el('span', 'step-confirm-note-label', '💭 Expert note: '));
+        note.appendChild(document.createTextNode(expertNote));
+        contentEl.appendChild(note);
+    }
+    if (followUp) {
+        const fu = el('div', 'step-knowledge-followup');
+        fu.appendChild(el('span', 'step-confirm-note-label', '❓ '));
+        fu.appendChild(document.createTextNode(followUp));
+        contentEl.appendChild(fu);
+    }
+    return true;
+}
+
 // role/content as before, plus stepTag: the step number this message is
 // about, or "all" for general/session-wide knowledge, or omitted/null for
 // legacy untagged messages (no badge shown). User bubbles sit right-aligned
@@ -1137,6 +1175,8 @@ function appendMsg(role, content, stepTag) {
     const contentEl = el('div', 'chat-bubble-content' + (isUser ? '' : ' chat-md'));
     if (isUser) {
         contentEl.textContent = content;
+    } else if (renderStepKnowledgeBubble(contentEl, content)) {
+        bubble.classList.add('step-knowledge-msg');
     } else {
         contentEl.innerHTML = renderMarkdownLite(content);
     }
@@ -1210,6 +1250,13 @@ function refreshAssessment() {
 function resetChat() {
     return fetch("{{ url_for('chatbot.reset') }}", {method: 'POST'}).then(() => {
         document.getElementById('chatBox').innerHTML = '';
+        // Server-side reset_teaching_progress() clears state.operations and
+        // state.last_round_op_count too — mirror that here so the Steps panel
+        // and the round nudge (see checkRoundNudge) don't go stale against
+        // filter edits that no longer exist server-side.
+        operationData = [];
+        lastRoundOpCount = 0;
+        renderStepPanel();
     });
 }
 
@@ -1250,19 +1297,36 @@ function applyAssessment(a) {
 function toggleReadinessPanel() {
     const p = document.getElementById('readinessPanel');
     const opening = (p.style.display === 'none' || !p.style.display);
-    if (opening) {
-        const sp = document.getElementById('stepPanel');
-        sp.style.display = 'none'; // see toggleStepPanel's note
-        sp.classList.remove('is-expanded');
-    }
     // 'flex', not 'block' — the panel's CSS is display:flex (head + scrolling
     // body); an inline style="display:block" would override that class rule
     // (inline beats a class selector) and silently break the whole flex/
     // min-height:0/overflow-y:auto clipping chain, letting content spill
     // straight past max-height instead of scrolling inside its own box.
     p.style.display = opening ? 'flex' : 'none';
-    if (!opening) p.classList.remove('is-expanded');
+    if (opening) {
+        // A plain vh-based max-height can't know where this popover happens
+        // to sit on the page — cap it to whatever room is actually left
+        // above the Skill-building chat card's bottom edge instead, so it
+        // never overhangs past it regardless of scroll position.
+        const chatCard = document.querySelector('.chat-panel-joined .card');
+        if (chatCard) {
+            const top = p.getBoundingClientRect().top;
+            const chatBottom = chatCard.getBoundingClientRect().bottom;
+            const available = Math.min(chatBottom - top - 8, window.innerHeight * 0.6);
+            p.style.maxHeight = Math.max(160, available) + 'px';
+        }
+    }
 }
+// Now a floating popover (anchored under the token/Readiness pill, bottom-
+// left) instead of an inline flex sibling of chatBox — close it on any click
+// outside the trigger pill or the popover itself.
+document.addEventListener('click', function(e) {
+    const menu = document.querySelector('.session-menu');
+    const p = document.getElementById('readinessPanel');
+    if (menu && p && p.style.display !== 'none' && !menu.contains(e.target)) {
+        p.style.display = 'none';
+    }
+});
 
 const _COVER_LABELS = {knowledge: 'Knowledge & rules', scope: 'Scope (non-overlapping)', keywords: 'Minimal keywords'};
 const _VALID_META = {
@@ -1271,25 +1335,17 @@ const _VALID_META = {
     contradiction: {icon: '⛔', cls: 'v-bad',  label: 'contradiction / open item'},
 };
 
-// The readiness details panel: per-goal coverage bars, the still-missing
+// The readiness details popover: per-goal coverage bars, the still-missing
 // gaps, and the claim-by-claim verified-vs-asserted validation. Built via the
-// DOM (not string concat) so LLM-authored claim text can't break markup. Has
-// its own expand/shrink toggle (readiness-panel-head) — the compact inline
-// form is fine for a quick glance, but once the validation list is long it's
-// nicer to blow it up over the chat than scroll a postage-stamp box.
+// DOM (not string concat) so LLM-authored claim text can't break markup. No
+// expand/shrink toggle anymore — it's a floating popover with its own scroll
+// now, not an inline panel that needed to grow over the chat.
 function renderReadinessPanel(a) {
     const panel = document.getElementById('readinessPanel');
-    const expanded = panel.classList.contains('is-expanded');
     panel.innerHTML = '';
 
     const head = el('div', 'readiness-panel-head');
     head.appendChild(el('span', 'readiness-panel-title', 'Readiness details'));
-    const expandBtn = el('button', 'readiness-expand-btn');
-    expandBtn.type = 'button';
-    expandBtn.innerHTML = expanded ? '<i class="fas fa-compress-alt"></i>' : '<i class="fas fa-expand-alt"></i>';
-    expandBtn.title = expanded ? 'Shrink' : 'Expand over chat';
-    expandBtn.onclick = () => toggleReadinessExpand();
-    head.appendChild(expandBtn);
     panel.appendChild(head);
 
     const body = el('div', 'readiness-body');
@@ -1319,36 +1375,61 @@ function renderReadinessPanel(a) {
     }
     const gaps = a.gaps || [];
     if (gaps.length) {
-        body.appendChild(el('div', 'readiness-h', "Still missing"));
-        const ul = el('ul', 'readiness-gaps');
-        gaps.forEach(g => ul.appendChild(el('li', null, g)));
-        body.appendChild(ul);
+        body.appendChild(makeReadinessSection(`Still missing (${gaps.length})`, (contentEl) => {
+            const ul = el('ul', 'readiness-gaps');
+            gaps.forEach(g => ul.appendChild(el('li', null, g)));
+            contentEl.appendChild(ul);
+        }));
     }
     const validation = a.validation || [];
     if (validation.length) {
-        body.appendChild(el('div', 'readiness-h', "Claim check"));
-        const list = el('div', 'readiness-valid');
-        validation.forEach(v => {
-            const meta = _VALID_META[v.status] || _VALID_META.asserted;
-            const item = el('div', 'valid-item ' + meta.cls);
-            item.appendChild(el('span', 'valid-icon', meta.icon));
-            const vbody = el('div', 'valid-body');
-            vbody.appendChild(el('div', 'valid-claim', v.claim));
-            vbody.appendChild(el('div', 'valid-note', meta.label + (v.note ? ' — ' + v.note : '')));
-            item.appendChild(vbody);
-            list.appendChild(item);
-        });
-        body.appendChild(list);
+        body.appendChild(makeReadinessSection(`Claim check (${validation.length})`, (contentEl) => {
+            const list = el('div', 'readiness-valid');
+            validation.forEach(v => {
+                const meta = _VALID_META[v.status] || _VALID_META.asserted;
+                const item = el('div', 'valid-item ' + meta.cls);
+                item.appendChild(el('span', 'valid-icon', meta.icon));
+                const vbody = el('div', 'valid-body');
+                vbody.appendChild(el('div', 'valid-claim', v.claim));
+                vbody.appendChild(el('div', 'valid-note', meta.label + (v.note ? ' — ' + v.note : '')));
+                item.appendChild(vbody);
+                list.appendChild(item);
+            });
+            contentEl.appendChild(list);
+        }));
     }
 }
 
-// Grow the readiness panel's max-height (see .readiness-panel.is-expanded)
-// for reading a long validation/gaps list comfortably, or shrink it back to
-// the compact inline form. Stays a normal flex sibling of chatBox — never
-// overlays on top of it.
-function toggleReadinessExpand() {
-    document.getElementById('readinessPanel').classList.toggle('is-expanded');
-    renderReadinessPanel(currentAssessment);
+// "Still missing" / "Claim check" — collapsed by default (that's most of what
+// made the popover tall); click the header to expand, click the header again
+// or the × to collapse. Built fresh on every renderReadinessPanel() call, so
+// state doesn't persist across a re-render (a new assessment is a new look).
+function makeReadinessSection(titleText, buildContent) {
+    const section = el('div', 'readiness-collapsible');
+    const head = el('div', 'readiness-collapsible-head');
+    head.appendChild(el('span', 'readiness-h', titleText));
+    const chevron = el('i', 'fas fa-chevron-right rc-chevron');
+    const closeBtn = el('button', 'rc-close');
+    closeBtn.type = 'button';
+    closeBtn.innerHTML = '<i class="fas fa-xmark"></i>';
+    closeBtn.style.display = 'none';
+    head.appendChild(chevron);
+    head.appendChild(closeBtn);
+    section.appendChild(head);
+
+    const contentEl = el('div', 'readiness-collapsible-body');
+    contentEl.style.display = 'none';
+    buildContent(contentEl);
+    section.appendChild(contentEl);
+
+    const setOpen = (open) => {
+        contentEl.style.display = open ? 'block' : 'none';
+        closeBtn.style.display = open ? 'inline-flex' : 'none';
+        chevron.style.display = open ? 'none' : '';
+    };
+    head.onclick = () => setOpen(contentEl.style.display === 'none');
+    closeBtn.onclick = (e) => { e.stopPropagation(); setOpen(false); };
+    return section;
 }
 
 // tiny DOM helper
@@ -1391,13 +1472,95 @@ function onPriorToggle() {
 
 // Single Log Round button — runs analysis in whatever mode the header toggle
 // is set to. Reusable: change the filter and click again for another round.
-function logFilterRound() {
+// ---- Log Round nudge card ---------------------------------------------
+// Replaces the old standalone header icon (easy to overlook, always there
+// whether or not there was anything new to log). Instead, a card appears
+// automatically INSIDE the chat exactly when operationData has grown past
+// lastRoundOpCount — i.e. there are filter edits since the last logged
+// round. Only the REMINDER is passive/automatic; firing the actual LLM call
+// still takes an explicit click on the card's own button, so a mid-edit
+// state never gets analyzed by accident and cost stays predictable.
+// Don't nudge for every single checkbox click — exploring a long filter list
+// (disabling/re-enabling one keyword at a time) fires syncOps repeatedly in a
+// burst, and a card popping in after literally the FIRST toggle read as
+// nagging. Debounce so only a pause in editing evaluates it.
+//
+// Gating on raw op COUNT was the wrong signal too — a burst of 3 checkbox
+// toggles that each contributed 0 hits and 0 survivor change is not "3
+// changes worth analyzing", and a single toggle of one load-bearing keyword
+// (huge survivor swing, or hits nothing else covers) very much IS. So gate
+// on whether any new op actually MOVED something: either its own unique_hits
+// (a "special" keyword — contributes lines no other enabled filter already
+// covers) or dropped real noise, or its survivor_delta is a meaningful slice
+// of the log (proportion-based, not an absolute count). Loading a skill/.tat
+// always counts — that's inherently the start of something worth analyzing.
+const _ROUND_NUDGE_SURVIVOR_FRACTION = 0.02; // >=2% of the whole log moved
+let _roundNudgeDebounceTimer = null;
+
+function _opHasSignal(op, totalLines) {
+    if (op.action === 'load_skill' || op.action === 'load_tat') return true;
+    const eff = op.effect || {};
+    if (eff.unique_hits) return true;
+    if (eff.dropped) return true;
+    if (typeof eff.survivor_delta === 'number' && totalLines > 0) {
+        if (Math.abs(eff.survivor_delta) / totalLines >= _ROUND_NUDGE_SURVIVOR_FRACTION) return true;
+    }
+    return false;
+}
+
+function checkRoundNudge() {
+    if (_roundNudgeDebounceTimer) clearTimeout(_roundNudgeDebounceTimer);
+    _roundNudgeDebounceTimer = setTimeout(() => {
+        if (document.querySelector('.round-nudge-card')) return; // already showing
+        const newOps = operationData.slice(lastRoundOpCount);
+        if (!newOps.length) return;
+        const totalLines = parseInt(document.getElementById('totalLines').textContent, 10) || 0;
+        if (!newOps.some(op => _opHasSignal(op, totalLines))) return;
+        renderRoundNudge();
+    }, 1500);
+}
+
+function renderRoundNudge() {
+    const box = document.getElementById('chatBox');
+    const card = el('div', 'chat-question-card round-nudge-card mb-2');
+
+    const icon = el('div', 'round-nudge-icon');
+    icon.innerHTML = '<i class="fas fa-arrows-rotate"></i>';
+    card.appendChild(icon);
+
+    const body = el('div', 'round-nudge-body');
+    const newCount = operationData.length - lastRoundOpCount;
+    body.appendChild(el('div', 'round-nudge-title',
+        `${newCount} new filter change${newCount === 1 ? '' : 's'} since your last round`));
+    body.appendChild(el('div', 'round-nudge-sub',
+        'Log this round for an updated readiness score and grounded follow-up questions.'));
+
+    const actions = el('div', 'round-nudge-actions');
+    const ctaBtn = el('button', 'btn btn-sm round-nudge-cta');
+    ctaBtn.type = 'button';
+    ctaBtn.setAttribute('data-busy-lock', '');
+    ctaBtn.disabled = isBusy(); // matches step-teach-btn's pattern — never hand out a fresh enabled button mid-request
+    ctaBtn.innerHTML = '<i class="fas fa-wand-magic-sparkles"></i> Log Round &amp; Analyze';
+    ctaBtn.onclick = () => logFilterRound(ctaBtn, card);
+    const dismissBtn = el('button', 'round-nudge-dismiss');
+    dismissBtn.type = 'button';
+    dismissBtn.title = 'Dismiss for now — reappears on the next filter change';
+    dismissBtn.innerHTML = '<i class="fas fa-xmark"></i>';
+    dismissBtn.onclick = () => card.remove();
+    actions.appendChild(ctaBtn);
+    actions.appendChild(dismissBtn);
+    body.appendChild(actions);
+    card.appendChild(body);
+
+    box.appendChild(card);
+    box.scrollTop = box.scrollHeight;
+}
+
+function logFilterRound(btn, nudgeCard) {
     if (isBusy()) return;
-    const btn = document.getElementById('logRoundBtn');
-    const label = btn.innerHTML;
     setBusy(true);
+    const label = btn.innerHTML;
     btn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Analyzing…';
-    const restore = () => { setBusy(false); btn.innerHTML = label; };
     fetch("{{ url_for('learning.log_round') }}", {
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
@@ -1405,14 +1568,16 @@ function logFilterRound() {
     })
         .then(r => r.json())
         .then(d => {
-            restore();
-            if (!d.success) { alert(d.message); return; }
+            setBusy(false);
+            if (!d.success) { btn.innerHTML = label; alert(d.message); return; }
+            if (nudgeCard) nudgeCard.remove();
+            lastRoundOpCount = operationData.length;
             if (d.usage) updateTokenBadge(d.usage.session);
             if (d.assessment) applyAssessment(d.assessment);
             appendMsg('assistant', `**Round ${d.round}:** ${d.analysis}`, 'all');
             if (d.questions && d.questions.length) renderQuestionCards(d.questions);
         })
-        .catch(e => { restore(); alert('Failed: ' + e); });
+        .catch(e => { setBusy(false); btn.innerHTML = label; alert('Failed: ' + e); });
 }
 
 // "Teach this step" — USER-LED: clicking a step's 🎓 icon (see
@@ -1490,6 +1655,11 @@ function submitStepExplanation(seq, explanation, card) {
                 appendMsg('user', explanation, seq);
                 if (d.usage) updateTokenBadge(d.usage.session);
                 syncOpsQuiet(d); // updates the step's "✓ why" indicator
+                // A recorded reason is real teaching content (readiness's
+                // gap-list explicitly tracks unexplained operations) — this
+                // used to only refresh on regular chat sends / Log Round,
+                // which made the badge feel stuck after a 🎓 explanation.
+                refreshAssessment();
                 if (!d.success) {
                     appendMsg('assistant', `⚠️ Reason saved, but couldn't get a knowledge-core summary: ${d.message}`, seq);
                     return;
@@ -1509,6 +1679,18 @@ function submitStepExplanation(seq, explanation, card) {
             submitBtn.disabled = false; submitBtn.textContent = label;
             alert('Failed: ' + e);
         });
+}
+
+// Mirrors the exact text /learning/confirm_step already appends to
+// state.chat_history server-side (see learning_routes.py confirm_step) — used
+// so dismissing the interactive confirm card leaves the SAME permanent bubble
+// behind that a page reload would replay, instead of the response just
+// vanishing from view while still sitting in server-side history.
+function stepKnowledgeCoreText(seq, knowledgeCore, expertNote, followUp) {
+    const parts = [`**Step #${seq} — knowledge core:** ${knowledgeCore}`];
+    if (expertNote) parts.push(`*Expert note:* ${expertNote}`);
+    if (followUp) parts.push(`*(optional follow-up: ${followUp})*`);
+    return parts.join('\n\n');
 }
 
 // The LLM's response to a step explanation: a condensed, CONFIRMABLE
@@ -1532,8 +1714,9 @@ function renderStepConfirmCard(seq, knowledgeCore, expertNote, followUp) {
     const actions = el('div', 'step-explain-actions');
     const confirmBtn = el('button', 'btn btn-sm btn-success', '✓ Looks right');
     const continueBtn = el('button', 'btn btn-sm btn-outline-primary', '＋ Continue teaching');
-    confirmBtn.onclick = () => card.remove();
-    continueBtn.onclick = () => { card.remove(); openStepExplainBox(seq, {disabled: false}); };
+    const persist = () => appendMsg('assistant', stepKnowledgeCoreText(seq, knowledgeCore, expertNote, followUp), seq);
+    confirmBtn.onclick = () => { persist(); card.remove(); };
+    continueBtn.onclick = () => { persist(); card.remove(); openStepExplainBox(seq, {disabled: false}); };
     actions.appendChild(confirmBtn);
     actions.appendChild(continueBtn);
     card.appendChild(actions);
@@ -1557,7 +1740,7 @@ function renderStepConfirmCard(seq, knowledgeCore, expertNote, followUp) {
         const submitFollowUp = () => {
             const ans = fuInput.value.trim();
             if (!ans) return;
-            appendMsg('assistant', '❓ ' + followUp, seq);
+            persist();
             card.remove();
             sendMsg(ans, undefined, seq);
         };
@@ -1905,15 +2088,12 @@ function openNextDraft() {
         onSaved: function (d2) {
             alert('Skill saved!' + (draftQueue.length ? ` Now reviewing the next one (${draftQueue.length} left)…` : ''));
             activeSkillKey = d2.skill_key;
-            document.getElementById('viewSkillBtn').disabled = false;
             if (draftQueue.length) {
                 openNextDraft();
                 return;
             }
             applyAssessment(null); // server reset round_count/assessment on save
-            const rp = document.getElementById('readinessPanel');
-            rp.style.display = 'none';
-            rp.classList.remove('is-expanded');
+            document.getElementById('readinessPanel').style.display = 'none';
         },
     });
 }
@@ -1929,6 +2109,7 @@ document.addEventListener('click', function(e) {
 
 renderFilters();
 renderStepTagSelector();
+renderStepPanel(); // now a permanent card (left column), not a toggled overlay
 {% if state.log_domain %}refreshSkillList({{ state.log_domain|tojson }});{% endif %}
 // Restore the event-log panel from server state on reload (BT only).
 updateEvtSection({{ (state.log_domain or '')|tojson }}, {{ (state.event_log_path|length > 0)|tojson }});
@@ -1961,5 +2142,6 @@ applyAssessment({
 // rather than mislabeling old messages as general knowledge they were never
 // actually confirmed to be.
 ({{ state.chat_history|tojson }}).forEach(m => appendMsg(m.role, m.content, m.step));
+checkRoundNudge(); // after replay, so it lands at the bottom if there's unlogged activity
 </script>
 {% endblock %}

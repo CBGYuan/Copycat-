@@ -147,6 +147,10 @@ def send():
 
 @chatbot_bp.route("/reset", methods=["POST"])
 def reset():
+    """Explicit "start over" — the engineer clicked Clear. Wipes the chat AND
+    the readiness/round/operation-journal state that a skill Save no longer
+    clears on its own (see WorkingState.reset_teaching_progress)."""
     state = session_store.get_state()
     state.chat_history = []
+    state.reset_teaching_progress()
     return jsonify({"success": True})
