@@ -301,7 +301,11 @@ a.btn-primary {
      is substituted. */
   font-variant-numeric: tabular-nums;
 }
-.tat-log-row { display: flex; white-space: nowrap; }
+/* Shrink-wraps to the widest row's actual content — see renderLogRows() —
+   so every .tat-log-row below (width:100%) shares that SAME width instead
+   of each one only ever getting 100% of the (narrower) viewport. */
+.tat-log-inner { display: inline-block; min-width: 100%; }
+.tat-log-row { display: flex; width: 100%; white-space: nowrap; }
 .tat-log-row:hover .tat-log-text { filter: brightness(0.94); }
 .tat-log-lineno {
   position: sticky;
@@ -324,13 +328,19 @@ a.btn-primary {
   border-right: 1px solid var(--border);
   user-select: none;
 }
-/* flex-shrink:0 (not 1 1 auto) is the key fix here: with `white-space: pre`
+/* flex-shrink:0 is still the key fix for long lines: with `white-space: pre`
    content, a shrinkable flex item gets visually compressed/clipped to fit
    the row instead of overflowing — which silently defeated the parent's
    `overflow: auto` and made the pane look like it couldn't "expand
-   horizontally". Fixed width-by-content + no shrink lets long lines push
-   the row wider than the viewport, so the horizontal scrollbar takes over. */
-.tat-log-text { flex: 0 0 auto; padding: 0 8px; white-space: pre; }
+   horizontally". No shrink lets long lines push the row wider than the
+   viewport, so the horizontal scrollbar takes over.
+   flex-GROW:1 (not 0) is what makes a highlighted SHORT line's color band
+   fill the rest of the row instead of stopping right where its own text
+   ends — it stretches to fill whatever's left of the row's width (which
+   .tat-log-inner above now guarantees matches the widest sibling row, not
+   just the viewport), so every colored row reads as one solid full-width
+   bar regardless of how short that particular line's text is. */
+.tat-log-text { flex: 1 0 auto; padding: 0 8px; white-space: pre; }
 .tat-log-empty { padding: 12px; color: var(--text-muted); font-size: 0.85rem; }
 
 /* Fixed-width (ch-unit, so it lines up in the monospace font) columns for
@@ -387,8 +397,10 @@ a.btn-primary {
 .evt-toggle:disabled { color: var(--text-muted); cursor: default; }
 .evt-arrow { display: inline-block; transition: transform 0.15s; }
 .evt-arrow.open { transform: rotate(90deg); }
-.evt-status { flex: 1 1 auto; }
-.evt-pick { flex: 0 0 auto; }
+/* Same copy+browse icon pair as the top LOG row (see .path-input-group
+   below) instead of a plain "Event log" text button — fills the row like
+   .evt-status used to. */
+.evt-path-group { flex: 1 1 auto; min-width: 0; }
 .evt-toolbar {
   display: flex;
   align-items: center;
@@ -397,7 +409,10 @@ a.btn-primary {
   border-top: 1px solid var(--border);
 }
 .evt-count { margin-left: auto; }
+/* Amber = uncorrected (no capture timezone found, raw UTC vs local compare);
+   green = corrected (see updateEvtTzBadge). */
 .evt-tz { color: #b8860b; }
+.evt-tz-ok { color: #146c2e; }
 
 /* Log-pane header badge: this log's own lines had no date (BT's dateless HCI
    export / WiFi's DDD export) — the DATE was synthesized (anchored on the
@@ -631,22 +646,36 @@ a.btn-primary {
 .readiness-badge.is-high { color: #146c2e; }
 
 /* Session menu — token usage + Readiness trigger, bottom-left under TAT
-   Filter. One cohesive pill (shared border/background) instead of two
-   separate flat badges, with a trailing chevron so it reads as a menu that
-   opens something, not just a static readout. Clicking it (or the chevron)
-   opens the Readiness popover anchored right here — see .readiness-panel. */
+   Filter. One cohesive pill (shared border/background) split into two
+   clickable columns — 「消費」(token + USD cost) and Readiness — each opening
+   its own popover anchored right here. See .session-col / .session-popover
+   / .readiness-panel. */
 .session-menu {
   position: relative;
   display: inline-flex;
-  align-items: center;
+  align-items: stretch;
   border: 1px solid var(--border);
   border-radius: 999px;
   background: var(--bg-soft);
-  padding: 2px 8px 2px 2px;
-  gap: 2px;
+  padding: 2px;
+  gap: 0;
 }
+/* Each clickable column (消費 | Readiness) — a bare button so it reads as its
+   own clickable target with its own hover, while the two share the one pill. */
+.session-col {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  border: none;
+  background: transparent;
+  padding: 2px 8px;
+  border-radius: 999px;
+  cursor: pointer;
+}
+.session-col:hover { background: rgba(0, 0, 0, 0.05); }
+.session-col-sep { width: 1px; align-self: stretch; background: var(--border); margin: 2px 0; }
 .session-menu .token-badge {
-  border: none; background: transparent; padding: 0 4px 0 6px;
+  border: none; background: transparent; padding: 0 2px 0 4px;
 }
 .session-menu .readiness-badge {
   border: none; background: transparent; padding: 0 2px;
@@ -657,9 +686,54 @@ a.btn-primary {
 .session-menu-chevron {
   color: var(--text-muted);
   font-size: 0.58rem;
-  cursor: pointer;
-  padding: 0 2px;
+  padding: 0 1px;
 }
+
+/* 消費 popover — same floating-card family as .readiness-panel, anchored under
+   the 消費 column. Token count + USD, input vs output at different Sonnet 6
+   rates, then the combined total. */
+.session-popover {
+  position: absolute;
+  top: calc(100% + 6px);
+  left: 0;
+  width: 250px;
+  max-width: 80vw;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: #fff;
+  box-shadow: 0 10px 28px rgba(0, 0, 0, 0.14);
+  font-size: 0.72rem;
+  z-index: 20;
+  padding: 8px 10px;
+  flex-direction: column;
+  gap: 5px;
+}
+.session-popover .readiness-panel-title { margin-bottom: 2px; }
+.spend-row { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+.spend-row .spend-label { color: #444; }
+.spend-row .spend-val { font-variant-numeric: tabular-nums; color: #222; font-weight: 600; }
+.spend-divider { height: 1px; background: #eef1f5; margin: 1px 0; }
+.spend-total .spend-label { font-weight: 700; }
+.spend-total .spend-val { color: #146c2e; font-weight: 700; }
+.spend-sub { color: var(--text-muted); font-size: 0.64rem; margin-top: 1px; }
+
+/* Detail button inside the Readiness popover — opens the fuller gaps /
+   claim-check list in the Readiness detail popup. */
+.readiness-detail-btn {
+  margin-top: 8px;
+  width: 100%;
+  border: 1px solid var(--border);
+  background: var(--bg-soft);
+  color: #444;
+  border-radius: 6px;
+  padding: 4px 8px;
+  font-size: 0.66rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  cursor: pointer;
+}
+.readiness-detail-btn:hover { background: #eef2f7; border-color: var(--primary-light); }
 
 /* Export Skill, shrunk from a full-width green bar into a compact pill in
    the chat header — same green "success" family as Readiness's high-score

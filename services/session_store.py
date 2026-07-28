@@ -21,6 +21,14 @@ class WorkingState:
         # chosen manually. Drives the collapsible event panel above the log,
         # whose rows click-sync to the nearest driver-log line by timestamp.
         self.event_log_path: str = ""
+        # Fixed UTC offset (minutes) of the machine that captured the current
+        # BT log, read from a systeminfo.txt/system_info.txt near it (see
+        # event_log_service.find_capture_utc_offset_minutes) — the driver log
+        # is customer-local while the System Event Log's timestamps are UTC;
+        # without this the event<->log click-sync just compared the two raw,
+        # landing on a plausible-looking but wrong "nearest" line whenever the
+        # capture wasn't near UTC+0. None when nothing was found (no correction).
+        self.capture_utc_offset_min = None
         # ISO date (YYYY-MM-DD) used to synthesize a date for dateless BT HCI
         # / WiFi DDD log lines (see utils.helpers.read_log_file's
         # `fallback_date`) — computed once in /pick_log (from the loaded

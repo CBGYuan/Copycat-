@@ -40,17 +40,24 @@
                   title="System Event Log — click an event to jump the log below to that time">
             📋 System Event Log <span id="evtArrow" class="evt-arrow">▸</span>
           </button>
-          <span id="evtStatus" class="evt-status small text-muted"></span>
-          <button type="button" class="btn btn-sm btn-outline-secondary evt-pick" onclick="pickEventLog()"
-                  title="Choose a System Event Log (.evtx/.evt) manually">📁 Event log</button>
+          <!-- Same copy+browse icon pair as the LOG row above, instead of a
+               plain text button — same action (pick a file), same look. -->
+          <div class="path-input-group evt-path-group">
+            <div class="path-input-wrap">
+              <input id="evtPathInput" type="text" class="form-control form-control-sm" readonly
+                     placeholder="No file selected" value="{{ state.event_log_path }}">
+              <button type="button" class="path-input-copy" onclick="copyPath('evtPathInput', this)" title="Copy event log path" aria-label="Copy event log path">📋</button>
+            </div>
+            <button type="button" class="btn-browse" onclick="pickEventLog()" title="Choose a System Event Log (.evtx/.evt) manually">📁</button>
+          </div>
         </div>
         <div id="evtPanel" class="evt-panel" style="display:none;">
           <div class="evt-toolbar">
             <select id="evtSourceFilter" class="form-select form-select-sm w-auto" onchange="evtFilterChanged()">
               <option value="pci_bt">pci_bt</option>
               <option value="usb_bt">usb_bt</option>
-              <option value="pci_bt_wifi">pci+wifi</option>
-              <option value="usb_bt_wifi">usb+wifi</option>
+              <option value="pci_bt_wifi">pci_bt+wifi</option>
+              <option value="usb_bt_wifi">usb_bt+wifi</option>
               <option value="all" selected>All</option>
             </select>
             <select id="evtLevelFilter" class="form-select form-select-sm w-auto" onchange="evtFilterChanged()">
@@ -59,7 +66,7 @@
               <option value="information">Info</option>
             </select>
             <span id="evtCount" class="evt-count small text-muted"></span>
-            <span class="evt-tz small text-muted" title="Event times are UTC; the driver log below is customer-local, so the jump lands on the nearest line and may be offset by the capture's timezone.">⚠ times are UTC</span>
+            <span id="evtTzBadge" class="evt-tz small text-muted" title="Event times are UTC; the driver log below is customer-local, so the jump lands on the nearest line and may be offset by the capture's timezone.">⚠ times are UTC</span>
           </div>
           <div id="evtBody" class="evt-body"></div>
         </div>
@@ -145,17 +152,52 @@
       </div>
     </div>
 
-    <!-- Session menu — token usage + Readiness, styled as one pill trigger
-         (not two separate flat badges) that opens a Readiness popover
-         anchored right here, bottom-left, instead of inline inside chat. -->
+    <!-- Session menu — two clickable columns, bottom-left under TAT Filter:
+         「消費」(token + USD cost this session) and Readiness (score %). Each
+         column opens its own popover anchored right here. Readiness's popover
+         shows only the coverage bars + a Detail button that pops the fuller
+         gaps / claim-check list out separately. -->
     <div class="session-menu mt-2">
-      <span id="tokenBadge" class="token-badge" title="LLM token usage this session">🪙 0</span>
-      <button id="readinessBadge" type="button" class="readiness-badge" onclick="toggleReadinessPanel()" title="Readiness updates after every answer — click for the breakdown of what's covered and what's still missing">🎯 Readiness —</button>
-      <i class="fas fa-chevron-down session-menu-chevron" onclick="toggleReadinessPanel()"></i>
-      <!-- Readiness details popover: coverage per goal + what's still missing
-           + claim-by-claim verified/asserted validation. Refreshed after
-           every chat answer (see refreshAssessment()). -->
+      <!-- Column 1: 消費 / Spending -->
+      <button type="button" class="session-col" id="spendCol" onclick="toggleSpendPanel(event)"
+              title="消費 — this session's token usage and its US-dollar cost (input/output priced separately). Click to expand.">
+        <span id="tokenBadge" class="token-badge">🪙 0</span>
+        <i class="fas fa-chevron-down session-menu-chevron"></i>
+      </button>
+      <!-- Spending popover: token count + USD, input vs output at different
+           Claude Sonnet 6 rates. Refreshed on every updateTokenBadge(). -->
+      <div id="spendPanel" class="session-popover" style="display:none;"></div>
+
+      <div class="session-col-sep"></div>
+
+      <!-- Column 2: Readiness -->
+      <button type="button" class="session-col" id="readinessCol" onclick="toggleReadinessPanel(event)"
+              title="Readiness updates after every answer — click for the coverage bars; the Detail button inside opens the full gaps / claim-check list.">
+        <span id="readinessBadge" class="readiness-badge">🎯 Readiness —</span>
+        <i class="fas fa-chevron-down session-menu-chevron"></i>
+      </button>
+      <!-- Readiness popover: coverage bars per goal + a Detail button.
+           Refreshed after every chat answer (see refreshAssessment()). -->
       <div id="readinessPanel" class="readiness-panel" style="display:none;"></div>
+    </div>
+  </div>
+
+  <!-- Readiness Detail popup — the fuller "still missing" gaps + claim-by-claim
+       verified/asserted check, moved out of the compact Readiness popover
+       behind its Detail button so the popover itself stays short. -->
+  <div class="skill-modal-overlay" id="readinessDetailModal">
+    <div class="skill-modal-card" style="width:min(520px,100%);">
+      <div class="skill-modal-header">
+        <div class="skill-modal-heading">
+          <h5 class="mb-0"><i class="fas fa-clipboard-check"></i> Readiness detail</h5>
+          <div class="skill-modal-subtitle" id="rdmSubtitle"></div>
+        </div>
+        <button type="button" class="skill-modal-close" onclick="closeReadinessDetail()">&times;</button>
+      </div>
+      <div class="skill-modal-body" id="rdmBody"></div>
+      <div class="skill-modal-footer">
+        <button type="button" class="btn btn-outline-secondary" onclick="closeReadinessDetail()">Close</button>
+      </div>
     </div>
   </div>
 
@@ -238,6 +280,11 @@ let currentDraft = null;
 // state so a page reload doesn't lose track of what's already been logged.
 // See checkRoundNudge().
 let lastRoundOpCount = {{ (state.last_round_op_count or 0)|tojson }};
+// Fixed UTC offset (minutes) of the machine that captured the current BT log
+// (see event_log_service.find_capture_utc_offset_minutes) — null means none
+// was found, so the event<->log click-sync applies no correction. Updated
+// whenever a log or event log is (re)picked — see pickLog()/pickEventLog().
+let captureUtcOffsetMin = {{ state.capture_utc_offset_min|tojson }};
 
 // Global "one async action at a time" lock — every control that triggers an
 // LLM call or a state-mutating fetch (Log Round, Export Skill, chat send,
@@ -610,7 +657,16 @@ function renderLogRows(preview, emptyMessage) {
     const maxDigits = preview.reduce(
         (m, p) => Math.max(m, p.line_no != null ? String(p.line_no).length : 0), 0);
     box.style.setProperty('--lineno-w', Math.max(4, maxDigits + 0.5) + 'ch');
-    box.innerHTML = preview.map(p => {
+    // Rows sit inside .tat-log-inner (display:inline-block) instead of
+    // directly in the scroll container — an inline-block shrink-wraps to
+    // whatever the WIDEST row's content actually needs, and every row inside
+    // it is width:100% of THAT shared width. Without this wrapper each row's
+    // own width:auto only ever resolved against the viewport, so a short
+    // line's colored .tat-log-text span (flex:1 0 auto now, see CSS) had
+    // nothing wide to grow into and its color band stopped right where the
+    // text did — full-length color bars only ever appeared for the single
+    // longest line on screen.
+    const rowsHtml = preview.map(p => {
         let style = '';
         if (p.back_color) style += `background:${p.back_color};`;
         if (p.fore_color) style += `color:${p.fore_color};`;
@@ -622,7 +678,10 @@ function renderLogRows(preview, emptyMessage) {
                `<span class="tat-log-lineno">${p.line_no != null ? p.line_no : ''}</span>` +
                `<span class="tat-log-text" style="${style}">${formatLogLine(p.text)}</span>` +
                `</div>`;
-    }).join('') || `<div class="tat-log-empty">${emptyMessage || 'Empty file'}</div>`;
+    }).join('');
+    box.innerHTML = rowsHtml
+        ? `<div class="tat-log-inner">${rowsHtml}</div>`
+        : `<div class="tat-log-empty">${emptyMessage || 'Empty file'}</div>`;
 }
 
 // Parse a driver-log line's leading "MM/DD/YYYY-HH:MM:SS.mmm" timestamp into
@@ -633,14 +692,19 @@ function parseLogTimeMs(text) {
     return new Date(+m[3], +m[1] - 1, +m[2], +m[4], +m[5], +m[6], +m[7]).getTime();
 }
 
-// Parse an event-log "YYYY-MM-DD HH:MM:SS" (UTC) timestamp into epoch ms.
-// Matched against parseLogTimeMs() in the same numeric space — see the UTC
-// caveat in the panel: the driver log is customer-local, so a nonzero capture
-// offset shifts the nearest match by that amount.
+// Parse an event-log "YYYY-MM-DD HH:MM:SS" (UTC) timestamp into epoch ms,
+// SHIFTED by captureUtcOffsetMin so it lands in the same frame as
+// parseLogTimeMs()'s customer-local driver-log timestamps (e.g. +480 for a
+// UTC+08:00 capture) — without this shift the two were compared as raw
+// numbers despite being genuinely different moments, silently landing
+// "nearest" on a plausible-looking but wrong line. null offset (not found)
+// applies no correction, same as before.
 function parseEvtTimeMs(text) {
     const m = String(text).match(/^(\d{4})-(\d{1,2})-(\d{1,2})[ T](\d{1,2}):(\d{2}):(\d{2})/);
     if (!m) return null;
-    return new Date(+m[1], +m[2] - 1, +m[3], +m[4], +m[5], +m[6]).getTime();
+    let ms = new Date(+m[1], +m[2] - 1, +m[3], +m[4], +m[5], +m[6]).getTime();
+    if (typeof captureUtcOffsetMin === 'number') ms += captureUtcOffsetMin * 60000;
+    return ms;
 }
 
 function pickLog() {
@@ -664,13 +728,27 @@ function pickLog() {
                 renderLogRows(d.preview);
                 // BT capture → reveal the event panel (auto-discovered file
                 // enables it; WiFi/none hides it). Reset any open state first.
-                updateEvtSection(d.domain, d.event_log_available);
+                captureUtcOffsetMin = d.capture_utc_offset_min;
+                updateEvtSection(d.domain, d.event_log_available, d.event_log_path);
                 // This log's own lines had no date (dateless BT HCI export /
                 // WiFi DDD export) — the DATE component shown is an estimate
                 // (see the badge's tooltip for the anchor source).
                 document.getElementById('dateSynthWarn').style.display = d.date_synthesized ? 'inline' : 'none';
 
-                if (filterData.length) applyFilter(); // filters already set up — run right away, replaces this raw view
+                // Server clears the filter set when the new log's domain
+                // differs from the previous one (see /pick_log's
+                // filters_cleared) — a WiFi filter re-run against a freshly
+                // loaded BT capture would just silently return "0 lines
+                // matched", which reads exactly like the new log failed to
+                // load. Sync filterData either way so the TAT Filter table
+                // never shows something the server doesn't actually have.
+                filterData = d.filters || [];
+                renderFilters();
+                if (d.filters_cleared) {
+                    showPathStatus('tatStatus', 'Different log domain — previous filter cleared', 'ok');
+                } else if (filterData.length) {
+                    applyFilter(); // filters already set up — run right away, replaces this raw view
+                }
             } else showPathStatus('logStatus', d.message, 'err');
         });
 }
@@ -704,18 +782,43 @@ let _evtOffset = 0, _evtHasMore = false, _evtTotal = 0;
 const _EVT_PAGE = 300;
 
 // Show/hide + enable the event section based on domain + availability.
-function updateEvtSection(domain, available) {
+// `path` (optional) syncs the evtPathInput readout — omitted on calls that
+// don't have a fresh path to report (the badge/enable-state still updates).
+function updateEvtSection(domain, available, path) {
     const section = document.getElementById('evtSection');
     const isBt = (domain === 'bt');
     section.style.display = isBt ? 'block' : 'none';
     if (!isBt) { _closeEvtPanel(); return; }
     const btn = document.getElementById('evtToggleBtn');
     btn.disabled = !available;
-    document.getElementById('evtStatus').textContent = available
-        ? '' : 'no event log found next to this log — pick one →';
+    if (path !== undefined) document.getElementById('evtPathInput').value = path || '';
+    updateEvtTzBadge();
     // A freshly (re)loaded log invalidates any cached events.
     _evtLoaded = false; _evtData = []; _evtOffset = 0;
     if (_evtOpen && !available) _closeEvtPanel();
+}
+
+// Reflects whether the event<->log click-sync has a UTC-offset correction
+// (see captureUtcOffsetMin / parseEvtTimeMs) — makes it visible when the
+// "nearest" jump can actually be trusted vs. when it's an uncorrected raw
+// comparison between UTC and customer-local time.
+function updateEvtTzBadge() {
+    const badge = document.getElementById('evtTzBadge');
+    if (!badge) return;
+    if (typeof captureUtcOffsetMin === 'number') {
+        const sign = captureUtcOffsetMin >= 0 ? '+' : '-';
+        const abs = Math.abs(captureUtcOffsetMin);
+        const hhmm = `${String(Math.floor(abs / 60)).padStart(2, '0')}:${String(abs % 60).padStart(2, '0')}`;
+        badge.textContent = `🌐 synced UTC${sign}${hhmm}`;
+        badge.title = `Event times are UTC; corrected by the capture's detected offset (UTC${sign}${hhmm}, from systeminfo.txt near the log) to line up with the driver log's customer-local time.`;
+        badge.classList.add('evt-tz-ok');
+        badge.classList.remove('evt-tz');
+    } else {
+        badge.textContent = '⚠ times are UTC';
+        badge.title = 'Event times are UTC; the driver log below is customer-local and no capture timezone was found (no systeminfo.txt near the log), so the jump lands on the nearest line with no offset correction and may be off.';
+        badge.classList.add('evt-tz');
+        badge.classList.remove('evt-tz-ok');
+    }
 }
 
 function _closeEvtPanel() {
@@ -732,7 +835,9 @@ function pickEventLog() {
             if (!d.success) { if (d.message !== 'No file selected') alert(d.message); return; }
             const btn = document.getElementById('evtToggleBtn');
             btn.disabled = false;
-            document.getElementById('evtStatus').textContent = '';
+            document.getElementById('evtPathInput').value = d.event_log_path || '';
+            captureUtcOffsetMin = d.capture_utc_offset_min;
+            updateEvtTzBadge();
             _evtLoaded = false; _evtData = []; _evtOffset = 0;
             if (!_evtOpen) toggleEvtPanel(); else _evtResetAndFetch();
         });
@@ -1194,12 +1299,73 @@ function appendMsg(role, content, stepTag) {
 // LLM_helper._record_usage — same numbers also print to the terminal on
 // every call). Session-cumulative, not per-call, since that's the more
 // useful "is this getting expensive" signal while iterating on a skill.
+// Claude Sonnet 6 bills input (prompt) and output (completion) tokens at
+// DIFFERENT US-dollar rates — adjust these two constants if the contract
+// rate changes. Units: USD per 1,000,000 tokens.
+const USD_PER_MTOK_IN = 3.0;    // input / prompt tokens
+const USD_PER_MTOK_OUT = 15.0;  // output / completion tokens
+// Last session usage {prompt_tokens, completion_tokens, total_tokens, calls},
+// kept so the 消費 popover can recompute the USD breakdown on demand without
+// a refetch.
+let lastSessionUsage = null;
+
 function updateTokenBadge(sessionUsage) {
     if (!sessionUsage) return;
+    lastSessionUsage = sessionUsage;
     const badge = document.getElementById('tokenBadge');
     const k = sessionUsage.total_tokens >= 1000 ? (sessionUsage.total_tokens / 1000).toFixed(1) + 'k' : sessionUsage.total_tokens;
     badge.textContent = `🪙 ${k}`;
     badge.title = `${sessionUsage.total_tokens} tokens across ${sessionUsage.calls} LLM call(s) this session`;
+    // Keep the 消費 popover live if it's currently open.
+    const sp = document.getElementById('spendPanel');
+    if (sp && sp.style.display !== 'none') renderSpendPanel();
+}
+
+// tiny token formatter (1234 -> "1.2k")
+function fmtTok(n) { return n >= 1000 ? (n / 1000).toFixed(1) + 'k' : String(n); }
+
+// One 消費 popover row: label on the left, "<tokens> · $<usd>" on the right.
+function spendRow(label, tokStr, usdStr, cls) {
+    const row = el('div', 'spend-row' + (cls ? ' ' + cls : ''));
+    row.appendChild(el('span', 'spend-label', label));
+    const right = el('span', 'spend-val');
+    right.textContent = usdStr ? `${tokStr} · ${usdStr}` : tokStr;
+    row.appendChild(right);
+    return row;
+}
+
+// 消費 popover — token spend split into input vs output (each at its own
+// Claude Sonnet 6 USD rate) plus the combined total. Built via the DOM so it
+// stays consistent with the readiness popover's building style.
+function renderSpendPanel() {
+    const p = document.getElementById('spendPanel');
+    p.innerHTML = '';
+    const u = lastSessionUsage || {prompt_tokens: 0, completion_tokens: 0, total_tokens: 0, calls: 0};
+    const inTok = u.prompt_tokens || 0;
+    const outTok = u.completion_tokens || 0;
+    const totTok = u.total_tokens || (inTok + outTok);
+    const usdIn = inTok / 1e6 * USD_PER_MTOK_IN;
+    const usdOut = outTok / 1e6 * USD_PER_MTOK_OUT;
+    const usdTot = usdIn + usdOut;
+
+    p.appendChild(el('div', 'readiness-panel-title', '消費 · Spending'));
+    p.appendChild(spendRow('輸入 Input', fmtTok(inTok), '$' + usdIn.toFixed(4)));
+    p.appendChild(spendRow('輸出 Output', fmtTok(outTok), '$' + usdOut.toFixed(4)));
+    p.appendChild(el('div', 'spend-divider'));
+    p.appendChild(spendRow('合計 Total', fmtTok(totTok), '$' + usdTot.toFixed(4), 'spend-total'));
+    p.appendChild(el('div', 'spend-sub', `${u.calls || 0} LLM call(s) · Claude Sonnet 6 ($${USD_PER_MTOK_IN}/$${USD_PER_MTOK_OUT} per 1M in/out)`));
+}
+
+// 消費 column click — open its popover (and close Readiness's so only one
+// floats at a time).
+function toggleSpendPanel(evt) {
+    if (evt) evt.stopPropagation();
+    const p = document.getElementById('spendPanel');
+    const rp = document.getElementById('readinessPanel');
+    if (rp) rp.style.display = 'none';
+    const opening = (p.style.display === 'none' || !p.style.display);
+    p.style.display = opening ? 'flex' : 'none';
+    if (opening) renderSpendPanel();
 }
 
 // forceTag: overrides the step-context selector for this ONE send — used by
@@ -1294,8 +1460,11 @@ function applyAssessment(a) {
     if (flags) badge.textContent += ` ⚠${flags}`;
 }
 
-function toggleReadinessPanel() {
+function toggleReadinessPanel(evt) {
+    if (evt) evt.stopPropagation();
     const p = document.getElementById('readinessPanel');
+    const sp = document.getElementById('spendPanel');
+    if (sp) sp.style.display = 'none';
     const opening = (p.style.display === 'none' || !p.style.display);
     // 'flex', not 'block' — the panel's CSS is display:flex (head + scrolling
     // body); an inline style="display:block" would override that class rule
@@ -1317,15 +1486,16 @@ function toggleReadinessPanel() {
         }
     }
 }
-// Now a floating popover (anchored under the token/Readiness pill, bottom-
-// left) instead of an inline flex sibling of chatBox — close it on any click
-// outside the trigger pill or the popover itself.
+// Now floating popovers (anchored under the 消費 / Readiness columns, bottom-
+// left) instead of inline flex siblings of chatBox — close both on any click
+// outside the session-menu.
 document.addEventListener('click', function(e) {
     const menu = document.querySelector('.session-menu');
-    const p = document.getElementById('readinessPanel');
-    if (menu && p && p.style.display !== 'none' && !menu.contains(e.target)) {
-        p.style.display = 'none';
-    }
+    if (!menu || menu.contains(e.target)) return;
+    const rp = document.getElementById('readinessPanel');
+    const sp = document.getElementById('spendPanel');
+    if (rp) rp.style.display = 'none';
+    if (sp) sp.style.display = 'none';
 });
 
 const _COVER_LABELS = {knowledge: 'Knowledge & rules', scope: 'Scope (non-overlapping)', keywords: 'Minimal keywords'};
@@ -1335,17 +1505,16 @@ const _VALID_META = {
     contradiction: {icon: '⛔', cls: 'v-bad',  label: 'contradiction / open item'},
 };
 
-// The readiness details popover: per-goal coverage bars, the still-missing
-// gaps, and the claim-by-claim verified-vs-asserted validation. Built via the
-// DOM (not string concat) so LLM-authored claim text can't break markup. No
-// expand/shrink toggle anymore — it's a floating popover with its own scroll
-// now, not an inline panel that needed to grow over the chat.
+// The readiness popover, trimmed down: just the per-goal coverage bars and a
+// Detail button. Everything fuller (the still-missing gaps and the claim-by-
+// claim verified-vs-asserted validation) now lives behind that button in the
+// Readiness detail popup (openReadinessDetail) so this popover stays short.
 function renderReadinessPanel(a) {
     const panel = document.getElementById('readinessPanel');
     panel.innerHTML = '';
 
     const head = el('div', 'readiness-panel-head');
-    head.appendChild(el('span', 'readiness-panel-title', 'Readiness details'));
+    head.appendChild(el('span', 'readiness-panel-title', 'Readiness'));
     panel.appendChild(head);
 
     const body = el('div', 'readiness-body');
@@ -1372,64 +1541,62 @@ function renderReadinessPanel(a) {
             box.appendChild(row);
         });
         body.appendChild(box);
+    } else {
+        body.appendChild(el('div', 'readiness-empty', 'No coverage breakdown yet.'));
     }
-    const gaps = a.gaps || [];
-    if (gaps.length) {
-        body.appendChild(makeReadinessSection(`Still missing (${gaps.length})`, (contentEl) => {
-            const ul = el('ul', 'readiness-gaps');
-            gaps.forEach(g => ul.appendChild(el('li', null, g)));
-            contentEl.appendChild(ul);
-        }));
-    }
-    const validation = a.validation || [];
-    if (validation.length) {
-        body.appendChild(makeReadinessSection(`Claim check (${validation.length})`, (contentEl) => {
-            const list = el('div', 'readiness-valid');
-            validation.forEach(v => {
-                const meta = _VALID_META[v.status] || _VALID_META.asserted;
-                const item = el('div', 'valid-item ' + meta.cls);
-                item.appendChild(el('span', 'valid-icon', meta.icon));
-                const vbody = el('div', 'valid-body');
-                vbody.appendChild(el('div', 'valid-claim', v.claim));
-                vbody.appendChild(el('div', 'valid-note', meta.label + (v.note ? ' — ' + v.note : '')));
-                item.appendChild(vbody);
-                list.appendChild(item);
-            });
-            contentEl.appendChild(list);
-        }));
-    }
+
+    // Detail button — opens the fuller gaps + claim-check popup.
+    const n = (a.gaps || []).length + (a.validation || []).length;
+    const btn = el('button', 'readiness-detail-btn', n ? `Detail (${n})` : 'Detail');
+    btn.type = 'button';
+    btn.onclick = (e) => { e.stopPropagation(); openReadinessDetail(); };
+    body.appendChild(btn);
 }
 
-// "Still missing" / "Claim check" — collapsed by default (that's most of what
-// made the popover tall); click the header to expand, click the header again
-// or the × to collapse. Built fresh on every renderReadinessPanel() call, so
-// state doesn't persist across a re-render (a new assessment is a new look).
-function makeReadinessSection(titleText, buildContent) {
-    const section = el('div', 'readiness-collapsible');
-    const head = el('div', 'readiness-collapsible-head');
-    head.appendChild(el('span', 'readiness-h', titleText));
-    const chevron = el('i', 'fas fa-chevron-right rc-chevron');
-    const closeBtn = el('button', 'rc-close');
-    closeBtn.type = 'button';
-    closeBtn.innerHTML = '<i class="fas fa-xmark"></i>';
-    closeBtn.style.display = 'none';
-    head.appendChild(chevron);
-    head.appendChild(closeBtn);
-    section.appendChild(head);
+// Readiness detail popup — the still-missing gaps + claim-by-claim validation,
+// moved out of the compact popover behind its Detail button. Reads the latest
+// currentAssessment; built via the DOM so LLM-authored claim text can't break
+// markup.
+function openReadinessDetail() {
+    const a = currentAssessment || {};
+    const gaps = a.gaps || [];
+    const validation = a.validation || [];
+    const body = document.getElementById('rdmBody');
+    body.innerHTML = '';
 
-    const contentEl = el('div', 'readiness-collapsible-body');
-    contentEl.style.display = 'none';
-    buildContent(contentEl);
-    section.appendChild(contentEl);
+    const sub = document.getElementById('rdmSubtitle');
+    sub.textContent = (a.readiness && typeof a.readiness.score === 'number')
+        ? `${a.readiness.score}% ready` : '';
 
-    const setOpen = (open) => {
-        contentEl.style.display = open ? 'block' : 'none';
-        closeBtn.style.display = open ? 'inline-flex' : 'none';
-        chevron.style.display = open ? 'none' : '';
-    };
-    head.onclick = () => setOpen(contentEl.style.display === 'none');
-    closeBtn.onclick = (e) => { e.stopPropagation(); setOpen(false); };
-    return section;
+    if (!gaps.length && !validation.length) {
+        body.appendChild(el('div', 'readiness-empty', 'Nothing flagged yet — log a round or answer a question.'));
+    }
+    if (gaps.length) {
+        body.appendChild(el('div', 'readiness-h', `Still missing (${gaps.length})`));
+        const ul = el('ul', 'readiness-gaps');
+        gaps.forEach(g => ul.appendChild(el('li', null, g)));
+        body.appendChild(ul);
+    }
+    if (validation.length) {
+        body.appendChild(el('div', 'readiness-h', `Claim check (${validation.length})`));
+        const list = el('div', 'readiness-valid');
+        validation.forEach(v => {
+            const meta = _VALID_META[v.status] || _VALID_META.asserted;
+            const item = el('div', 'valid-item ' + meta.cls);
+            item.appendChild(el('span', 'valid-icon', meta.icon));
+            const vbody = el('div', 'valid-body');
+            vbody.appendChild(el('div', 'valid-claim', v.claim));
+            vbody.appendChild(el('div', 'valid-note', meta.label + (v.note ? ' — ' + v.note : '')));
+            item.appendChild(vbody);
+            list.appendChild(item);
+        });
+        body.appendChild(list);
+    }
+    document.getElementById('readinessDetailModal').style.display = 'flex';
+}
+
+function closeReadinessDetail() {
+    document.getElementById('readinessDetailModal').style.display = 'none';
 }
 
 // tiny DOM helper

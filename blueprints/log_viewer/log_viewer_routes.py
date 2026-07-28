@@ -10,14 +10,52 @@ from utils import file_picker, tat_parser, helpers, operation_journal
 log_viewer_bp = Blueprint("log_viewer", __name__, url_prefix="/log_viewer")
 
 
+# Skills carry no color info of their own (only a .tat file does, straight
+# from TextAnalysisTool.NET's own foreColor/backColor attributes) — without
+# an assigned palette, skill-loaded filters rendered as plain uncolored rows
+# in both the filter table AND the highlighted lines in the log pane below,
+# losing the whole point of the TAT-style coloring for the (very common)
+# case of loading a plain skill instead of a .tat file. Cycled by keyword
+# order, same "auto-assign since nothing was specified" behavior TAT itself
+# falls back to.
+#
+# Alternates two TREATMENTS of the same hue instead of making every single
+# filter a full solid block — a wall of a dozen saturated background bars
+# stacked on top of each other read as "too much color" even though each one
+# individually was legible. "solid" = white text on the full color (loud,
+# stands out at a glance); "text" = just the color on the log's own
+# background (quieter — still instantly distinguishable by color, without
+# adding to the block-of-color feel). Both still carry the SAME hue per
+# palette slot, so a filter's identity color is consistent between its
+# row in the table above and every line it highlights below regardless of
+# which treatment it drew.
+_SKILL_FILTER_PALETTE = [
+    {"hue": "#3B82C4", "style": "solid"},  # blue
+    {"hue": "#3FA772", "style": "text"},   # green
+    {"hue": "#DD6B6B", "style": "solid"},  # coral red
+    {"hue": "#8266C9", "style": "text"},   # violet
+    {"hue": "#D98F3B", "style": "solid"},  # amber
+    {"hue": "#33A6A1", "style": "text"},   # teal
+    {"hue": "#C55FA0", "style": "solid"},  # magenta
+    {"hue": "#6B7BAE", "style": "text"},   # slate blue
+]
+
+
 def _filters_from_skill(skill) -> list:
     """Synthesize TAT-style filter dicts from a skill's plain keywords/exclusive
     lists (used when the skill has no .tat_path of its own)."""
-    filters = [{
-        "text": k, "enabled": True, "excluding": False,
-        "case_sensitive": False, "regex": False,
-        "fore_color": None, "back_color": None,
-    } for k in (skill.keywords or [])]
+    filters = []
+    for i, k in enumerate(skill.keywords or []):
+        slot = _SKILL_FILTER_PALETTE[i % len(_SKILL_FILTER_PALETTE)]
+        if slot["style"] == "solid":
+            fore, back = "#ffffff", slot["hue"]
+        else:
+            fore, back = slot["hue"], None
+        filters.append({
+            "text": k, "enabled": True, "excluding": False,
+            "case_sensitive": False, "regex": False,
+            "fore_color": fore, "back_color": back,
+        })
     filters += [{
         "text": t, "enabled": True, "excluding": True,
         "case_sensitive": False, "regex": False,
@@ -59,6 +97,7 @@ def pick_log():
     if not os.path.exists(path):
         return jsonify({"success": False, "message": "File not found"}), 400
     state = session_store.get_state()
+    prev_domain = state.log_domain
     state.log_path = path
     state.log_domain = helpers.detect_log_domain(path)
     # Loading a different log is the OTHER explicit "start over" trigger — a
@@ -68,12 +107,33 @@ def pick_log():
     # left over from whatever was previously loaded.
     state.reset_teaching_progress()
 
+    # Switching domains (e.g. a WiFi capture -> a BT one) leaves whatever
+    # filter/skill was active pointed at keywords that don't exist in the new
+    # log's vocabulary at all. state.filters otherwise survives a log switch
+    # on purpose (re-picking the SAME-domain log keeps your filter), but
+    # across a domain change that silent carry-over means /apply_filter
+    # quietly re-runs the old filter and comes back with "0 lines matched" —
+    # which reads exactly like the new log failed to load, not like "your old
+    # filter doesn't apply here." Clear it so the frontend shows its honest
+    # empty-filter state instead.
+    filters_cleared = bool(prev_domain and state.log_domain != prev_domain and state.filters)
+    if filters_cleared:
+        state.filters = []
+        state.filter_stats = {}
+
     # For a BT capture, auto-discover the System Event Log sitting next to the
     # driver log so the collapsible event panel can light up without a manual
     # pick (the engineer can still override via /pick_event_log). WiFi logs
     # don't ship one, so only look when BT was detected.
     state.event_log_path = (
         event_log_service.find_event_log_near(path) if state.log_domain == "bt" else ""
+    )
+    # Same relative-search idea for the capture machine's UTC offset (see
+    # find_capture_utc_offset_minutes) — needed to make the event<->log
+    # click-sync land on the right line instead of just comparing raw UTC
+    # against raw customer-local time with zero correction.
+    state.capture_utc_offset_min = (
+        event_log_service.find_capture_utc_offset_minutes(path) if state.log_domain == "bt" else None
     )
 
     # Some BT/WiFi driver-log exports carry only a time-of-day, no date at all
@@ -116,8 +176,11 @@ def pick_log():
         "domain": state.log_domain,
         "total_lines": total_lines,
         "preview": raw_preview,
+        "filters": state.filters,
+        "filters_cleared": filters_cleared,
         "event_log_path": state.event_log_path,
         "event_log_available": bool(state.event_log_path),
+        "capture_utc_offset_min": state.capture_utc_offset_min,
         # True when this log's own lines had no date (dateless BT HCI / WiFi
         # DDD export) and the leading timestamps shown are synthesized —
         # the UI surfaces this so the engineer knows the date component (not
@@ -156,7 +219,14 @@ def pick_event_log():
         return jsonify({"success": False, "message": "File not found"}), 400
     state = session_store.get_state()
     state.event_log_path = path
-    return jsonify({"success": True, "event_log_path": path, "event_log_available": True})
+    return jsonify({
+        "success": True, "event_log_path": path, "event_log_available": True,
+        # The UTC-offset correction is about the CAPTURE MACHINE (from
+        # systeminfo.txt near the driver log), not this evt file specifically
+        # — already computed in /pick_log, just echoed back here so the
+        # frontend has it regardless of which of the two picks ran last.
+        "capture_utc_offset_min": state.capture_utc_offset_min,
+    })
 
 
 @log_viewer_bp.route("/parse_event_log", methods=["POST"])

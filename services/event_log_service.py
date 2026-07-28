@@ -14,13 +14,20 @@ pywin32 (``win32evtlog``) is imported lazily: the whole app must still run on a
 machine without it — get_paged_events just returns an ``error`` the panel shows
 instead of crashing at import time.
 
-Note on time: events are stored UTC-naive; this port does NOT apply the
-customer-timezone conversion IntelAvatar does (it depended on a system_info.txt
-+ timezone_utils stack we didn't bring over), so the column is labelled
-"Time (UTC)". The driver log is customer-local, so the click-sync's
-nearest-match can be off by the capture's UTC offset — surfaced in the UI.
+Note on time: events are stored UTC-naive; this port does NOT apply
+IntelAvatar's full DST-aware timezone_utils resolution (IANA zone lookup,
+manual-override sidecar, Taiwan-ETL-decode frame, etc. — see
+wireless_ce_avatar/utils/timezone_utils.py). It DOES read the same
+systeminfo.txt/system_info.txt "Time Zone" field IntelAvatar does and applies
+its FIXED (UTC±HH:MM) offset (see find_capture_utc_offset_minutes) — no DST
+adjustment, but enough to put the two timestamp sources in the same frame
+instead of comparing raw UTC against raw customer-local with no correction at
+all, which was silently landing the click-sync's "nearest" match on a
+plausible-looking but wrong line whenever the capture wasn't near UTC+0.
 """
+import json
 import os
+import re
 import xml.etree.ElementTree as ET
 from datetime import datetime
 
@@ -85,6 +92,62 @@ def find_event_log_near(log_path: str) -> str:
                 if os.path.isfile(candidate):
                     return candidate
     return ""
+
+
+# Matches the fixed-offset prefix of a Windows "Time Zone:" value, e.g.
+# "(UTC+08:00) Taipei" -> sign='+', hh='08', mm='00'. Same regex shape
+# IntelAvatar's timezone_utils uses as its own fallback for zone strings it
+# can't resolve to a named DST-aware zone — good enough here since this port
+# doesn't attempt DST resolution at all.
+_TZ_OFFSET_RE = re.compile(r'\(UTC([+-])(\d{2}):(\d{2})\)', re.IGNORECASE)
+_SYSTEMINFO_FILENAMES = ("systeminfo.txt", "system_info.txt")
+_SYSTEMINFO_SEARCH_DEPTH = 4
+
+
+def find_capture_utc_offset_minutes(log_path: str):
+    """Best-effort FIXED UTC offset (minutes, e.g. 480 for UTC+08:00) of the
+    machine that captured `log_path`, read from a systeminfo.txt (plain text,
+    UTF-16LE, "Time Zone: (UTC+08:00) Taipei") or system_info.txt (JSON,
+    "System Time Zone") sitting near it — same two filenames/field names
+    IntelAvatar's utils.timezone_utils reads, just without its DST-aware zone
+    resolution (see this module's docstring). Walks the log's own directory
+    and up to `_SYSTEMINFO_SEARCH_DEPTH` parents. Returns None if nothing is
+    found or nothing parses — callers then skip the correction entirely
+    rather than guess."""
+    if not log_path:
+        return None
+    cur = os.path.dirname(os.path.abspath(log_path))
+    for _ in range(_SYSTEMINFO_SEARCH_DEPTH):
+        if not cur or not os.path.isdir(cur):
+            break
+        tz_text = ""
+        text_path = os.path.join(cur, "systeminfo.txt")
+        json_path = os.path.join(cur, "system_info.txt")
+        if os.path.isfile(text_path):
+            try:
+                with open(text_path, "r", encoding="utf-16le", errors="replace") as f:
+                    for line in f:
+                        if line.startswith("Time Zone:"):
+                            tz_text = line.split(":", 1)[1]
+                            break
+            except OSError:
+                pass
+        elif os.path.isfile(json_path):
+            try:
+                with open(json_path, "r", encoding="utf-8") as f:
+                    tz_text = json.load(f).get("System Time Zone", "") or ""
+            except (OSError, ValueError):
+                pass
+        if tz_text:
+            m = _TZ_OFFSET_RE.search(tz_text)
+            if m:
+                sign = 1 if m.group(1) == '+' else -1
+                return sign * (int(m.group(2)) * 60 + int(m.group(3)))
+        parent = os.path.dirname(cur)
+        if parent == cur:
+            break
+        cur = parent
+    return None
 
 
 def _source_matches(source, source_filter):
