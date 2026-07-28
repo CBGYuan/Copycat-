@@ -116,8 +116,14 @@ these things in one response:
 1. ANALYZE: 2-4 sentences on what this round's filter/delta actually
    captures, citing evidence from the operation pattern (hit counts, which
    keywords co-fire). This is analysis, not a question.
-2. ASK: 1-3 short, specific questions that extract exactly the knowledge
-   you're missing for the goals below. Every question must be grounded in ONE
+2. CLARIFY ONLY ON BEHAVIORAL DIVERGENCE. First form 2-3 plausible, concrete
+    interpretations of the most important unexplained edit or surviving log
+    pattern. For each interpretation, state which lines it would keep/drop or
+    which conclusion it would produce. If all interpretations produce the same
+    behavior for the available evidence, set requires_clarification=false and
+    ask NO question. If they diverge, set requires_clarification=true and ask
+    exactly ONE short question whose answer selects between those behaviors.
+    The question must be grounded in ONE
    concrete piece of evidence, either:
    (a) an edit from the operation journal — ask WHY the engineer made a
        specific still-unexplained one (e.g. "you excluded 'Mcc' which dropped
@@ -138,7 +144,7 @@ these things in one response:
 
 """ + _SKILL_GOALS + """
 
-Each question is EITHER:
+The single question, when needed, is EITHER:
  - "open": genuinely open-ended — no small fixed set of sensible answers.
  - "choice": you can already enumerate the realistic answers (e.g.
    extend-vs-new, which keyword is load-bearing, which of two thresholds
@@ -149,7 +155,8 @@ Each question is EITHER:
 Output ONLY this JSON object, no markdown fences, no extra prose:
 {
   "analysis": "<2-4 sentences>",
-  "questions": [{"question": "...", "type": "open"}, {"question": "...", "type": "choice", "options": ["...", "..."]}],
+    "ambiguity": {"requires_clarification": <true|false>, "divergent_behaviors": ["<interpretation and observable result>", "..."]},
+    "questions": [{"question": "<one discriminating question>", "type": "choice", "options": ["<behavior A>", "<behavior B>"]}],
 """ + _ASSESS_JSON + """
 }
 """
@@ -500,10 +507,36 @@ def _clamp_score(value, default: int = 0) -> int:
 _VALID_STATUSES = ("verified", "asserted", "contradiction")
 
 
-def _parse_assessment(parsed: Dict) -> Dict:
+def _annotation_coverage(annotations) -> int:
+    """Deterministic 0-100 evidence-coverage score from the engineer's own
+    Log-line labels (see log_viewer.annotate_line/_step) -- unlike the other
+    three coverage dimensions (knowledge/scope/keywords), this one is NEVER
+    LLM-judged, so labeling a line always moves this number, predictably,
+    regardless of what the LLM does with the rest of its output this round.
+    Ramps up with labeled evidence lines, but is capped below full marks
+    until at least one counterexample has ALSO been flagged -- nudges toward
+    checking for an edge case (the ASI-inspired verification concern) rather
+    than just rewarding volume of clicks.
+    """
+    annotations = annotations or []
+    evidence_n = sum(1 for a in annotations if a.get("label") == "evidence")
+    counterexample_n = sum(1 for a in annotations if a.get("label") == "counterexample")
+    if evidence_n == 0:
+        return 0
+    base = min(90, evidence_n * 15)
+    return min(100, base + 10) if counterexample_n else base
+
+
+def _parse_assessment(parsed: Dict, annotations=None) -> Dict:
     """Pull the readiness / coverage / gaps / validation block out of a parsed
     LLM object — shared by analyze_round (Log Round) and assess_readiness
-    (per chat answer) so both surface the exact same shape to the UI."""
+    (per chat answer) so both surface the exact same shape to the UI.
+
+    `annotations` (state.log_annotations) feeds coverage.evidence — the ONE
+    dimension of the four that is computed here, not asked of the LLM, so
+    that labeling Log lines has a guaranteed, visible effect on Readiness
+    instead of only maybe being noticed by the model's own judgment.
+    """
     readiness = parsed.get("readiness") or {}
     coverage = parsed.get("coverage") or {}
     gaps = [str(g).strip() for g in (parsed.get("gaps") or []) if str(g).strip()]
@@ -526,6 +559,7 @@ def _parse_assessment(parsed: Dict) -> Dict:
             "knowledge": _clamp_score(coverage.get("knowledge")),
             "scope": _clamp_score(coverage.get("scope")),
             "keywords": _clamp_score(coverage.get("keywords")),
+            "evidence": _annotation_coverage(annotations),
         },
         "gaps": gaps,
         "validation": validation,
@@ -570,14 +604,22 @@ def analyze_round(llm_helper, context: Dict, round_num: int,
     if not parsed:
         print(f"⚠️  analyze_round: could not parse LLM output as JSON ({len(raw)} chars). "
               f"Raw tail: ...{raw[-200:]!r}")
+    ambiguity = (parsed or {}).get("ambiguity") or {}
+    divergent = [str(item).strip() for item in ambiguity.get("divergent_behaviors", []) if str(item).strip()]
+    requires_clarification = bool(ambiguity.get("requires_clarification")) and len(divergent) >= 2
     questions = [n for n in (_normalize_question(q) for q in ((parsed or {}).get("questions") or [])) if n]
+    questions = questions[:1] if requires_clarification else []
     analysis = str((parsed or {}).get("analysis") or "").strip()
     if not analysis:
         analysis = "⚠️ This round's response couldn't be parsed — try Log Round & Analyze again."
     return {
         "analysis": analysis,
         "questions": questions,
-        "assessment": _parse_assessment(parsed) if parsed else None,
+        "ambiguity": {
+            "requires_clarification": requires_clarification,
+            "divergent_behaviors": divergent if requires_clarification else [],
+        },
+        "assessment": _parse_assessment(parsed, context.get("log_annotations")) if parsed else None,
     }
 
 
@@ -606,7 +648,7 @@ def assess_readiness(llm_helper, context: Dict, use_prior_knowledge: bool = Fals
         print(f"⚠️  assess_readiness: could not parse LLM output as JSON ({len(raw)} chars). "
               f"Raw tail: ...{raw[-200:]!r}")
         return None
-    return _parse_assessment(parsed)
+    return _parse_assessment(parsed, context.get("log_annotations"))
 
 
 # "Teach this step" — USER-LED, scoped to ONE specific filter edit, triggered
@@ -846,6 +888,126 @@ def synthesize_skill_draft(llm_helper, context: Dict, qa_pairs: List[Dict],
     drafts = [_normalize_skill_draft(d, context) for d in raw_list if isinstance(d, dict)] or \
         [_normalize_skill_draft({}, context)]
     return {"drafts": drafts}
+
+
+def assess_teaching_evidence(draft: Dict, context: Dict) -> Dict:
+    """Summarize the teaching evidence behind a candidate skill draft.
+
+    This deliberately does NOT judge whether the skill is correct — it never
+    computes TP/FP/FN or a pass/fail verdict. That judgment belongs to
+    wireless_ce_avatar (see build_validation_packet / apply_external_validation
+    below), which runs the skill against real issues and logs and is the only
+    place "a good skill" can actually be measured. This function only reports
+    what evidence THIS teaching session produced: which keywords were
+    actually exercised on the log, whether every material edit has an
+    engineer explanation (operation reason / source Steps), and whether any
+    counterexamples were flagged — pure provenance, for the engineer to review
+    before Save, not a correctness score.
+    """
+    stats = context.get("filter_stats") or {}
+    quality = keyword_quality_map(stats)
+    quality_ci = {key.casefold(): value for key, value in quality.items()}
+    keywords = [str(value).strip() for value in draft.get("keywords", []) if str(value).strip()]
+    exclusive = [str(value).strip() for value in draft.get("exclusive", []) if str(value).strip()]
+    checks = []
+
+    used = []
+    unused = []
+    for value in keywords:
+        measured = quality_ci.get(value.casefold())
+        if measured and ((measured.get("hits") or 0) > 0 or (measured.get("unique_hits") or 0) > 0):
+            used.append(value)
+        else:
+            unused.append(value)
+    checks.append({
+        "name": "Operation reason: keywords exercised on this log",
+        "status": "pass" if used else "info",
+        "note": f"Measured matches: {', '.join(used)}" if used else "No candidate include keyword produced a measured match this session.",
+    })
+
+    effective_excludes = []
+    for value in exclusive:
+        measured = quality_ci.get(value.casefold())
+        if measured and (measured.get("dropped") or 0) > 0:
+            effective_excludes.append(value)
+    checks.append({
+        "name": "Scope completeness: exclude terms measured",
+        "status": "pass" if not unused else "info",
+        "note": ("All include keywords were measured." if not unused else
+                 f"No measured contribution here: {', '.join(unused)}"),
+    })
+
+    journal = context.get("operation_journal") or ""
+    unexplained = context.get("unreasoned_ops") or []
+    checks.append({
+        "name": "Source Steps: teaching provenance captured",
+        "status": "pass" if journal and not unexplained else "info",
+        "note": "Every material edit has an explanation." if journal and not unexplained else
+                f"{len(unexplained)} material edit(s) still lack an explanation.",
+    })
+
+    annotations = context.get("log_annotations") or []
+    counterexamples = [a for a in annotations if a.get("label") == "counterexample"]
+    checks.append({
+        "name": "Counterexamples flagged",
+        "status": "pass" if counterexamples else "info",
+        "note": (f"{len(counterexamples)} counterexample(s) recorded — carry these into "
+                 "wireless_ce_avatar so the rule doesn't over-generalize.") if counterexamples else
+                "None flagged yet. Not required, but worth checking for edge cases before Save.",
+    })
+
+    return {
+        "status": "assessed",
+        "summary": "Teaching evidence recorded for this session. Correctness is validated externally.",
+        "checks": checks,
+        "labeled_examples": len(annotations),
+        "counterexample_count": len(counterexamples),
+        "positive_keywords": used,
+        "effective_excludes": effective_excludes,
+        "external_validation": "not_run",
+        "limitations": ["TP/FP/FN correctness is only ever measured by running this skill in wireless_ce_avatar."],
+    }
+
+
+def build_validation_packet(draft: Dict, context: Dict) -> Dict:
+    """Package a skill draft + its teaching evidence for external validation.
+
+    wireless_ce_avatar is the system of record for "is this a good skill": it
+    runs the candidate against real issues/logs and reports outcomes. This
+    workbench never computes that itself — it only prepares what that system
+    needs (the rule + the provenance behind it) and, later, stores whatever
+    comes back (see apply_external_validation).
+    """
+    return {
+        "skill_key": draft.get("skill_key") or draft.get("name"),
+        "domain": draft.get("domain"),
+        "keywords": draft.get("keywords", []),
+        "exclusive": draft.get("exclusive", []),
+        "expert_rules": draft.get("expert_rules", ""),
+        "teaching_evidence": {
+            "labeled_examples": context.get("log_annotations") or [],
+            "operation_journal": context.get("operation_journal") or "",
+        },
+    }
+
+
+def apply_external_validation(skill_or_draft: Dict, validation_result: Dict) -> Dict:
+    """Attach a validation result reported back by wireless_ce_avatar.
+
+    Never computed locally — this only stores the outcome (TP/FP/FN, failure
+    cases) so the engineer can see it in the Skill Editor and use failure
+    cases as the starting point for the next round of teaching.
+    """
+    skill_or_draft["external_validation"] = {
+        "status": validation_result.get("status", "validated"),
+        "validation_system": validation_result.get("validation_system", "wireless_ce_avatar"),
+        "evaluated_cases": validation_result.get("evaluated_cases"),
+        "true_positive": validation_result.get("true_positive"),
+        "false_positive": validation_result.get("false_positive"),
+        "false_negative": validation_result.get("false_negative"),
+        "failure_cases": validation_result.get("failure_cases", []),
+    }
+    return skill_or_draft
 
 
 # ============================================================================

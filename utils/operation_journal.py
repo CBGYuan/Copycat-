@@ -48,6 +48,8 @@ def record(state, action: str, text: str = "", excluding: bool = False,
         "excluding": excluding,
         "label": label,          # e.g. the skill's display name for load_skill
         "reason": "",            # the engineer's WHY — the knowledge to capture
+        "scope": "",             # optional applicability boundary learned from the explanation
+        "evidence_status": "unexplained",  # unexplained | asserted | measured
         "effect": None,          # filled by annotate_effects() after the next run
         "pending": True,
         "chat_index": len(state.chat_history),
@@ -186,6 +188,7 @@ def annotate_reason(state, seq: int, reason: str) -> bool:
     for op in state.operations:
         if op["seq"] == seq:
             op["reason"] = reason
+            op["evidence_status"] = "measured" if op.get("effect") else "asserted"
             return True
     return False
 
@@ -255,6 +258,8 @@ def payload(state) -> List[Dict]:
         "label": op.get("label") or op["text"],
         "excluding": op["excluding"],
         "reason": op["reason"],
+        "scope": op.get("scope", ""),
+        "evidence_status": op.get("evidence_status", "unexplained"),
         "effect": op.get("effect") or {},
         "effect_phrase": _effect_phrase(op),
         "chat_index": op.get("chat_index", 0),

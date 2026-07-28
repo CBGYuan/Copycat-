@@ -153,7 +153,8 @@ def _context_from_state(state, exclude_skill_key: str = "", include_existing: bo
             "time_span": state.filter_stats.get("time_span"),
             "co_occurrence": state.filter_stats.get("co_occurrence", []),
             "per_filter": [
-                {"text": f["text"], "excluding": f["excluding"], "hits": f["hits"]}
+                {"text": f["text"], "excluding": f["excluding"], "hits": f["hits"],
+                 "unique_hits": f.get("unique_hits"), "dropped": f.get("dropped")}
                 for f in state.filter_stats.get("per_filter", [])
             ],
         } if state.filter_stats else {},
@@ -175,6 +176,7 @@ def _context_from_state(state, exclude_skill_key: str = "", include_existing: bo
         # compares against anything already saved.
         "existing_skills": _other_skill_descriptions(exclude_skill_key, domain) if include_existing else [],
         "sample_lines": _sample_lines(state.filtered_preview, limit=40),
+        "log_annotations": state.log_annotations,
         "chat_history": state.chat_history,
     }
 
@@ -246,6 +248,7 @@ def log_round():
         "round": state.round_count,
         "analysis": result.get("analysis", ""),
         "questions": result.get("questions", []),
+        "ambiguity": result.get("ambiguity", {}),
         "assessment": _assessment_payload(state),
         "prior_knowledge": state.prior_knowledge,
         "usage": {"last": llm_helper.last_usage, "session": llm_helper.session_usage},
@@ -586,6 +589,7 @@ def converge():
         draft["domain"] = domain
         if state.tat_path:
             draft.setdefault("tat_path", state.tat_path)
+        draft["teaching_evidence"] = learning_service.assess_teaching_evidence(draft, context)
         routed = learning_service.route_draft(
             llm_helper, draft, pool, continuity_key, filter_stats=state.filter_stats)
         routed["domain"] = domain

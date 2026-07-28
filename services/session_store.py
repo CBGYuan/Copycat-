@@ -71,6 +71,17 @@ class WorkingState:
         self.last_coverage: dict = {}      # {"knowledge": int, "scope": int, "keywords": int}
         self.last_gaps: list = []          # ["short actionable missing piece", ...]
         self.last_validation: list = []    # [{"claim", "status": verified|asserted|contradiction, "note"}]
+        # Engineer-confirmed teaching evidence from the Log Preview, one entry
+        # per labeled source line: {"line_no", "label": evidence|counterexample,
+        # "text", "matched_keywords": [{"text", "excluding"}]}. matched_keywords
+        # identifies the filter(s) that matched this line (see utils.tat_parser.
+        # matched_keywords_for_line) -- always unambiguous, no guessing needed,
+        # whether that filter was typed by hand or came in wholesale from a
+        # loaded skill/.tat file. This is
+        # provenance for the skill draft, not
+        # a ground-truth test corpus -- actual TP/FP/FN correctness is only
+        # ever measured externally, by running the skill in wireless_ce_avatar.
+        self.log_annotations: list = []
         # len(chat_history) at the moment /learning/converge last actually ran
         # synthesis — lets converge() tell "nothing new since the last
         # export" apart from "genuinely new teaching", so mashing Export
@@ -102,6 +113,9 @@ class WorkingState:
         self.skill_draft = []
         self.last_export_chat_len = 0
         self.last_round_op_count = 0
+        # Line labels belong to the prior teaching case and must not leak
+        # into the next one.
+        self.log_annotations = []
 
 
 def get_state() -> WorkingState:

@@ -400,7 +400,47 @@ def apply_filter():
         "preview": stats["preview"][:500],
         "per_filter": stats["per_filter"],
         "operations": operation_journal.payload(state),
+        "annotations": state.log_annotations,
     })
+
+
+@log_viewer_bp.route("/annotate_line", methods=["POST"])
+def annotate_line():
+    """Toggle one engineer-confirmed label (evidence/counterexample) on a
+    visible source-log line.
+
+    Every annotation is attributed to the FILTER(S)/keyword(s) that actually
+    matched this line (see tat_parser.matched_keywords_for_line), using the
+    caller-supplied `matched_filters` (the same per-line "matched" filter-
+    index list compute_filter_stats already returns for the preview row).
+    This is always unambiguous -- unlike attributing to a historical edit (a
+    Step), a filter's keyword+role is present whether it was typed in by hand
+    or came in wholesale from a loaded skill/.tat file, so there's no
+    "couldn't correlate" state and no manual-correction UI needed.
+    """
+    data = request.get_json(silent=True) or {}
+    line_no = data.get("line_no")
+    label = str(data.get("label") or "").strip().lower()
+    text = str(data.get("text") or "")
+    matched_filters = data.get("matched_filters") or []
+    allowed = {"evidence", "counterexample"}
+    if not isinstance(line_no, int) or label not in allowed:
+        return jsonify({"success": False, "message": "Invalid line annotation"}), 400
+
+    state = session_store.get_state()
+    existing = next((item for item in state.log_annotations if item["line_no"] == line_no), None)
+    if existing and existing["label"] == label:
+        state.log_annotations.remove(existing)
+    else:
+        matched_keywords = tat_parser.matched_keywords_for_line(state.filters, matched_filters)
+        if existing:
+            existing.update({"label": label, "text": text, "matched_keywords": matched_keywords})
+        else:
+            state.log_annotations.append({
+                "line_no": line_no, "label": label, "text": text,
+                "matched_keywords": matched_keywords,
+            })
+    return jsonify({"success": True, "annotations": state.log_annotations})
 
 
 @log_viewer_bp.route("/answer_red_flag", methods=["POST"])

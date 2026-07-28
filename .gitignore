@@ -10,5 +10,8 @@ data/cache/
 # refresh_shared_cache) regenerated on every app startup and may contain
 # another engineer's contribution-file content.
 data/skills/
+# Reference papers dropped into data/ for local reading — not project
+# deliverables, never checked in.
+data/*.pdf
 .vscode/
 .claude/

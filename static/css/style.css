@@ -306,6 +306,36 @@ a.btn-primary {
    of each one only ever getting 100% of the (narrower) viewport. */
 .tat-log-inner { display: inline-block; min-width: 100%; }
 .tat-log-row { display: flex; width: 100%; white-space: nowrap; }
+.log-annotation-tools {
+  position: sticky;
+  right: 0;
+  display: inline-flex;
+  gap: 2px;
+  padding: 0 4px;
+  background: rgba(255, 255, 255, 0.94);
+  opacity: 0;
+}
+.tat-log-row:hover .log-annotation-tools,
+.tat-log-row.is-annotated .log-annotation-tools { opacity: 1; }
+.log-annotation-tools button {
+  width: 19px;
+  height: 19px;
+  padding: 0;
+  border: 1px solid var(--border);
+  background: #fff;
+  color: var(--text-muted);
+  font: 700 10px/17px Consolas, monospace;
+}
+/* The ONE button matching this line's current label — not just the row's
+   left-border color — so which of E/C/N/X is actually selected is visible
+   without needing to compare border colors. */
+.log-annotation-tools button.is-active {
+  background: var(--primary);
+  border-color: var(--primary);
+  color: #fff;
+}
+.tat-log-row.annotation-evidence { box-shadow: inset 3px 0 var(--good); }
+.tat-log-row.annotation-counterexample { box-shadow: inset 3px 0 var(--bad); }
 .tat-log-row:hover .tat-log-text { filter: brightness(0.94); }
 .tat-log-lineno {
   position: sticky;
@@ -479,8 +509,11 @@ a.btn-primary {
 .tat-filter-row {
   display: grid;
   /* Hits column widened 28px -> 42px — real hit counts run into the
-     thousands (e.g. "2528"), and 28px was clipping the digits. */
-  grid-template-columns: 32px 1fr 42px 18px;
+     thousands (e.g. "2528"), and 28px was clipping the digits. A 5th
+     narrow column (c-evid) shows the labeled-evidence tally for this exact
+     keyword+role — always unambiguous, unlike the Steps panel's best-effort
+     view (see renderFilters/renderStepPanel). */
+  grid-template-columns: 32px 1fr 42px 40px 18px;
   align-items: center;
 }
 .tat-filter-head {
@@ -500,6 +533,8 @@ a.btn-primary {
 .tat-filter-row > span { padding: 1px 3px; min-width: 0; overflow: hidden; }
 .tat-filter-head .c-hit,
 .tat-filter-row .c-hit { text-align: right; font-weight: 600; white-space: nowrap; }
+.tat-filter-head .c-evid,
+.tat-filter-row .c-evid { text-align: right; font-size: 0.6rem; color: var(--primary-dark); white-space: nowrap; }
 .tat-filter-row .c-del { display: flex; align-items: center; justify-content: center; padding: 0; }
 #filterList { max-height: 180px; overflow-y: auto; }
 .tat-filter-row { border-bottom: 1px solid #f0f2f4; line-height: 1.5; }
@@ -647,7 +682,7 @@ a.btn-primary {
 
 /* Session menu — token usage + Readiness trigger, bottom-left under TAT
    Filter. One cohesive pill (shared border/background) split into two
-   clickable columns — 「消費」(token + USD cost) and Readiness — each opening
+   clickable columns — Spending (USD cost) and Readiness — each opening
    its own popover anchored right here. See .session-col / .session-popover
    / .readiness-panel. */
 .session-menu {
@@ -660,8 +695,9 @@ a.btn-primary {
   padding: 2px;
   gap: 0;
 }
-/* Each clickable column (消費 | Readiness) — a bare button so it reads as its
-   own clickable target with its own hover, while the two share the one pill. */
+/* Each clickable column (Spending | Readiness) — a bare button so it reads as
+   its own clickable target with its own hover, while the two share the one
+   pill. */
 .session-col {
   display: inline-flex;
   align-items: center;
@@ -689,14 +725,15 @@ a.btn-primary {
   padding: 0 1px;
 }
 
-/* 消費 popover — same floating-card family as .readiness-panel, anchored under
-   the 消費 column. Token count + USD, input vs output at different Sonnet 6
-   rates, then the combined total. */
+/* Spending popover — same floating-card family as .readiness-panel, anchored under
+/* Spending popover — same floating-card family as .readiness-panel, anchored
+   under the Spending column. Shows the USD total broken into input/output
+   token counts and their conversion formula. */
 .session-popover {
   position: absolute;
   top: calc(100% + 6px);
   left: 0;
-  width: 250px;
+  width: 280px;
   max-width: 80vw;
   border: 1px solid var(--border);
   border-radius: 10px;
@@ -709,13 +746,29 @@ a.btn-primary {
   gap: 5px;
 }
 .session-popover .readiness-panel-title { margin-bottom: 2px; }
-.spend-row { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
-.spend-row .spend-label { color: #444; }
-.spend-row .spend-val { font-variant-numeric: tabular-nums; color: #222; font-weight: 600; }
-.spend-divider { height: 1px; background: #eef1f5; margin: 1px 0; }
-.spend-total .spend-label { font-weight: 700; }
-.spend-total .spend-val { color: #146c2e; font-weight: 700; }
-.spend-sub { color: var(--text-muted); font-size: 0.64rem; margin-top: 1px; }
+/* Fixed 3-column grid (label | formula | USD result) so every line's numbers
+   line up regardless of digit count — a plain flex space-between would let
+   the formula column drift with its own text length instead of aligning. */
+.spend-table { display: flex; flex-direction: column; gap: 4px; }
+.spend-line {
+  display: grid;
+  grid-template-columns: 3.4rem 1fr auto;
+  align-items: baseline;
+  gap: 8px;
+}
+.spend-line-label { color: #444; font-weight: 600; }
+.spend-line-formula {
+  color: var(--text-muted);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.spend-line-usd { font-variant-numeric: tabular-nums; color: #222; font-weight: 600; text-align: right; }
+.spend-divider { height: 1px; background: #eef1f5; margin: 2px 0; }
+.spend-total .spend-line-label,
+.spend-total .spend-line-usd { font-weight: 700; color: #146c2e; }
+.spend-sub { color: var(--text-muted); font-size: 0.64rem; margin-top: 4px; }
 
 /* Detail button inside the Readiness popover — opens the fuller gaps /
    claim-check list in the Readiness detail popup. */
@@ -923,6 +976,10 @@ a.btn-primary {
 .step-has-reason {
   flex: 0 0 auto; min-width: 0; color: #146c2e; font-size: 0.62rem; font-weight: 600;
 }
+.step-evidence-count {
+  flex: 0 0 auto; min-width: 0; background: #eef6ff; color: var(--primary-dark);
+  border-radius: 999px; padding: 0 6px; font-size: 0.62rem; font-weight: 600;
+}
 /* Wraps a step-item (still the click-to-jump target) + its own 🎓 teach and
    ❓ ask icons side by side — both stop propagation so clicking either never
    also triggers the row's jump-to-chat behavior. */
@@ -957,6 +1014,7 @@ a.btn-primary {
 .step-panel-narrow .step-effect { font-size: 0.58rem; }
 .step-panel-narrow .step-msgcount { font-size: 0.56rem; padding: 0 4px; }
 .step-panel-narrow .step-has-reason { font-size: 0.56rem; }
+.step-panel-narrow .step-evidence-count { font-size: 0.56rem; padding: 0 4px; }
 .step-panel-narrow .step-teach-btn { width: 22px; font-size: 0.64rem; }
 
 /* Chat and Steps sit flush against each other, split by a single border line

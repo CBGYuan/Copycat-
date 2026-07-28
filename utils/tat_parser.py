@@ -99,11 +99,16 @@ def _leading_timestamp(line: str):
 
 def compute_filter_stats(log_lines: List[str], filters: List[Dict],
                           preview_limit: int = 500) -> Dict:
-    """Apply every *enabled* filter to `log_lines` in one pass and return:
+    """Apply every filter to `log_lines` in one pass and return:
 
-      - per_filter: hit count for each enabled filter (including + excluding),
-        in file order — mirrors TextAnalysisTool.NET's own filter-list "Hits"
-        column.
+      - per_filter: raw hit count for EVERY filter, enabled or not, in file
+        order — mirrors TextAnalysisTool.NET's own filter-list "Hits" column,
+        which always shows a pattern's match count in the full log regardless
+        of whether its checkbox is ticked, so an engineer can gauge a
+        candidate keyword's impact before enabling it. Only *enabled* filters
+        additionally get unique_hits/dropped (marginal contribution against
+        the currently active include/exclude set) since that concept only
+        makes sense for filters that actually participated in this run.
       - overlap_count: number of lines matched by 2+ *including* filters
         (the "intersection" stat) — useful signal for which keyword
         combinations are actually correlated vs. redundant.
@@ -121,8 +126,11 @@ def compute_filter_stats(log_lines: List[str], filters: List[Dict],
     including = [(i, r) for i, r in enabled if not r["excluding"]]
     excluding = [(i, r) for i, r in enabled if r["excluding"]]
 
-    matchers = {i: _line_matcher(r) for i, r in enabled}
-    hit_counts = {i: 0 for i, _ in enabled}
+    # Matchers/hit_counts cover EVERY filter, not just enabled ones, so a
+    # disabled pattern still gets a real raw hit count in per_filter below
+    # instead of staying blank in the UI until the engineer checks it.
+    matchers = {i: _line_matcher(r) for i, r in enumerate(filters)}
+    hit_counts = {i: 0 for i in range(len(filters))}
     # unique_hits[i] = surviving lines where include-filter i was the ONLY
     # including filter that matched — i.e. its *marginal* contribution to the
     # result. A high hit count but zero unique hits means the keyword is
@@ -145,12 +153,15 @@ def compute_filter_stats(log_lines: List[str], filters: List[Dict],
 
     for line_no, line in enumerate(log_lines, start=1):
         line_lower = line.lower()
+        # Raw match count for every pattern, enabled or not — independent of
+        # the include/exclude interplay below.
+        for i in range(len(filters)):
+            if matchers[i](line_lower, line):
+                hit_counts[i] += 1
         include_hits = [i for i, r in including if matchers[i](line_lower, line)]
         if not include_hits:
             continue
         exclude_hits = [i for i, r in excluding if matchers[i](line_lower, line)]
-        for i in include_hits:
-            hit_counts[i] += 1
         if len(include_hits) >= 2:
             overlap_count += 1
             # Record every co-firing pair (order-independent) for the
@@ -161,7 +172,6 @@ def compute_filter_stats(log_lines: List[str], filters: List[Dict],
                     pair_counts[key] = pair_counts.get(key, 0) + 1
         if exclude_hits:
             for i in exclude_hits:
-                hit_counts[i] += 1
                 excluded_by[i] += 1
             continue
         if len(include_hits) == 1:
@@ -187,14 +197,17 @@ def compute_filter_stats(log_lines: List[str], filters: List[Dict],
         "index": i,
         "text": r["text"],
         "excluding": r["excluding"],
+        "enabled": r["enabled"],
         "hits": hit_counts[i],
         # Marginal contribution: unique surviving lines for includes, or noise
-        # lines actually dropped for excludes. 0 for an include means redundant.
-        "unique_hits": unique_hits.get(i) if not r["excluding"] else None,
-        "dropped": excluded_by.get(i) if r["excluding"] else None,
+        # lines actually dropped for excludes. Only meaningful for filters
+        # that were actually enabled this run — None otherwise (not "0", to
+        # avoid implying a disabled pattern was measured and found useless).
+        "unique_hits": unique_hits.get(i) if r["enabled"] and not r["excluding"] else None,
+        "dropped": excluded_by.get(i) if r["enabled"] and r["excluding"] else None,
         "back_color": r["back_color"],
         "fore_color": r["fore_color"],
-    } for i, r in enabled]
+    } for i, r in enumerate(filters)]
 
     text_by_index = {i: r["text"] for i, r in enabled}
     co_occurrence = [
@@ -211,6 +224,34 @@ def compute_filter_stats(log_lines: List[str], filters: List[Dict],
         "preview": surviving_preview,
         "total_lines": len(log_lines),
     }
+
+
+def matched_keywords_for_line(filters: List[Dict], matched_filter_indices) -> List[Dict]:
+    """Resolve a labeled line's matched filter indices into the actual
+    keyword identities: [{"text", "excluding"}, ...], deduplicated.
+
+    `matched_filter_indices` are positions in `filters`, exactly what
+    compute_filter_stats' per-line "matched" list contains. This is what a
+    labeled line's evidence is FOR. Unlike attributing to a historical edit
+    (a Step in the operation journal), a filter's keyword+role is ALWAYS
+    present and unambiguous, whether it was typed in by hand or came in
+    wholesale from a loaded skill/.tat file — so there is no "couldn't
+    correlate" state and no manual-correction UI needed. A line that co-fires
+    2+ include filters credits ALL of them (the same idea compute_filter_
+    stats' own overlap_count already tracks).
+    """
+    seen = set()
+    result = []
+    for idx in (matched_filter_indices or []):
+        if not isinstance(idx, int) or not (0 <= idx < len(filters)):
+            continue
+        f = filters[idx]
+        key = (str(f.get("text", "")).casefold(), bool(f.get("excluding")))
+        if key in seen:
+            continue
+        seen.add(key)
+        result.append({"text": str(f.get("text", "")), "excluding": bool(f.get("excluding"))})
+    return result
 
 
 def preprocess_log_for_llm(log_lines: List[str]) -> List[str]:

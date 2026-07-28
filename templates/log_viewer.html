@@ -134,6 +134,7 @@
             <span class="c-mod">Mod</span>
             <span class="c-pat">Pattern (<span id="filterCount">0</span> enabled)</span>
             <span class="c-hit">Hits</span>
+            <span class="c-evid" title="Labeled evidence / counterexample lines for this keyword">Ev</span>
             <span class="c-del"></span>
           </div>
           <div id="filterList"></div>
@@ -153,19 +154,20 @@
     </div>
 
     <!-- Session menu — two clickable columns, bottom-left under TAT Filter:
-         「消費」(token + USD cost this session) and Readiness (score %). Each
+         Spending (USD cost this session) and Readiness (score %). Each
          column opens its own popover anchored right here. Readiness's popover
          shows only the coverage bars + a Detail button that pops the fuller
          gaps / claim-check list out separately. -->
     <div class="session-menu mt-2">
-      <!-- Column 1: 消費 / Spending -->
+      <!-- Column 1: Spending — badge shows the USD total only; the popover
+           breaks that down into tokens and the conversion formula. -->
       <button type="button" class="session-col" id="spendCol" onclick="toggleSpendPanel(event)"
-              title="消費 — this session's token usage and its US-dollar cost (input/output priced separately). Click to expand.">
-        <span id="tokenBadge" class="token-badge">🪙 0</span>
+              title="This session's US-dollar cost (input/output priced separately). Click to expand.">
+        <span id="tokenBadge" class="token-badge">🪙 $0.0000</span>
         <i class="fas fa-chevron-down session-menu-chevron"></i>
       </button>
-      <!-- Spending popover: token count + USD, input vs output at different
-           Claude Sonnet 6 rates. Refreshed on every updateTokenBadge(). -->
+      <!-- Spending popover: USD total broken into input/output token counts
+           and their conversion formula. Refreshed on every updateTokenBadge(). -->
       <div id="spendPanel" class="session-popover" style="display:none;"></div>
 
       <div class="session-col-sep"></div>
@@ -205,7 +207,7 @@
        so it sits flush against Steps, split by one border line instead of a
        visible gap between two separate cards. -->
   <div class="col-lg-6 chat-panel-joined">
-    <div class="card" style="min-height:64vh; max-height:84vh; display:flex; flex-direction:column; overflow:hidden;">
+    <div class="card" style="height:74vh; display:flex; flex-direction:column; overflow:hidden;">
       <div class="card-header py-1 d-flex align-items-center gap-2">
         <span><i class="fas fa-comments"></i> Skill-building chat</span>
         <!-- Conversation-mode toggle sits right next to the title now — ON =
@@ -226,7 +228,7 @@
              easy to overlook. -->
         <div class="d-flex align-items-center gap-2 ms-auto">
           <button type="button" class="icon-btn" onclick="resetChat()" title="Clear the conversation">
-            <i class="fas fa-broom"></i>
+            <i class="fas fa-eraser"></i>
           </button>
           <!-- Export Skill — shrunk and recolored from a full-width green bar
                at the very bottom into a compact pill. Still the same
@@ -251,15 +253,17 @@
     </div>
   </div>
 
-  <!-- Steps — narrow column on chat's right, matching chat's own height
-       (64vh-84vh) instead of a fixed independent scroll cap, with smaller
-       type since the column itself is narrow (see .step-panel-narrow).
+  <!-- Steps — narrow column on chat's right, matching chat's own fixed height
+       (74vh, same literal value as chat's card — a shared min/max range let
+       the two drift apart since each card's actual height depended on its
+       own content) instead of an independent scroll cap, with smaller type
+       since the column itself is narrow (see .step-panel-narrow).
        step-panel-joined squares off its left edge to sit flush against chat,
        split by one border line. No open/close toggle: it's the same
        read-only timeline of filter edits (see renderStepPanel), always fully
        shown. The 🎓 teach icon on each row is unchanged. -->
   <div class="col-lg-3 step-panel-joined">
-    <div class="card step-panel-narrow" style="min-height:64vh; max-height:84vh; display:flex; flex-direction:column; overflow:hidden;">
+    <div class="card step-panel-narrow" style="height:74vh; display:flex; flex-direction:column; overflow:hidden;">
       <div class="card-header py-1"><i class="fas fa-map-signs"></i> Steps</div>
       <div class="card-body p-2 d-flex flex-column" style="flex:1 1 auto; min-height:0;">
         <div id="stepPanel" class="step-panel"></div>
@@ -273,6 +277,7 @@
 <script>
 let filterData = {{ state.filters|tojson }};
 let operationData = {{ (state.operations or [])|tojson }};
+let annotationData = {{ (state.log_annotations or [])|tojson }};
 let activeSkillKey = {{ (state.active_skill_key or '')|tojson }};
 let currentQuestions = [];
 let currentDraft = null;
@@ -378,10 +383,24 @@ function renderFilters() {
         const patClass = 'tat-filter-pattern' + (f.excluding ? ' is-exclude' : '');
         const badge = f.excluding ? '<span class="badge-exclude">EXCL</span> ' : '';
         const hits = (f.hits !== undefined) ? f.hits : '';
+        // Authoritative teaching-evidence tally for this exact keyword+role
+        // — always unambiguous (unlike the Steps panel's best-effort view),
+        // since a filter's identity never depends on how/when it was added.
+        const filterAnn = annotationData.filter(a =>
+            (a.matched_keywords || []).some(k => k.excluding === f.excluding
+                && k.text.toLowerCase() === String(f.text || '').toLowerCase())
+        );
+        const evN = filterAnn.filter(a => a.label === 'evidence').length;
+        const cxN = filterAnn.filter(a => a.label === 'counterexample').length;
+        const evidTitle = (evN || cxN)
+            ? `${evN} evidence line(s), ${cxN} counterexample(s) labeled for this keyword`
+            : 'No labeled evidence yet';
+        const evidText = (evN || cxN) ? `${evN}E/${cxN}X` : '';
         html += `<div class="tat-filter-row">
             <span class="c-mod"><input type="checkbox" id="f_${i}" ${f.enabled ? 'checked' : ''} onchange="toggleFilter(${i}, this.checked)"><label for="f_${i}" class="tat-filter-letter">${letterLabel(i)}</label></span>
             <span class="c-pat"><span class="${patClass}" style="${patStyle}">${badge}${escapeHtml(f.text)}</span></span>
             <span class="c-hit">${hits}</span>
+            <span class="c-evid" title="${evidTitle}">${evidText}</span>
             <span class="c-del"><button class="btn-remove-filter" onclick="removeFilter(${i})" title="Remove">&times;</button></span>
         </div>`;
     });
@@ -550,6 +569,26 @@ function renderStepPanel() {
         item.appendChild(el('span', 'step-text', o.verb + ' "' + (o.label || o.text) + '"'));
         if (o.effect_phrase) item.appendChild(el('span', 'step-effect', o.effect_phrase));
         if (o.reason) item.appendChild(el('span', 'step-has-reason', '✓ why'));
+        if (o.reason) item.appendChild(el('span', 'step-has-reason', o.evidence_status === 'measured' ? 'measured' : 'asserted'));
+        // Per-step teaching evidence — an INDIRECT, best-effort view: counts
+        // log_annotations whose matched_keywords include this Step's own
+        // keyword+role (see tat_parser.matched_keywords_for_line). The
+        // authoritative count lives on the Filter list (renderFilters) since
+        // filter attribution is always unambiguous; a "load skill/.tat" Step
+        // brought in many keywords at once with no single one of its own, so
+        // it deliberately shows nothing here.
+        const stepAnn = (o.action === 'load_skill' || o.action === 'load_tat') ? [] : annotationData.filter(a =>
+            (a.matched_keywords || []).some(k => k.excluding === o.excluding
+                && k.text.toLowerCase() === String(o.text || '').toLowerCase())
+        );
+        if (stepAnn.length) {
+            const evN = stepAnn.filter(a => a.label === 'evidence').length;
+            const cxN = stepAnn.filter(a => a.label === 'counterexample').length;
+            const parts = [];
+            if (evN) parts.push(evN + ' evidence');
+            if (cxN) parts.push(cxN + ' counterexample' + (cxN === 1 ? '' : 's'));
+            if (parts.length) item.appendChild(el('span', 'step-evidence-count', parts.join(' / ')));
+        }
         if (count) item.appendChild(el('span', 'step-msgcount', count + ' msg' + (count === 1 ? '' : 's')));
         item.title = 'Jump to what was said around this edit';
         item.onclick = () => jumpToStep(from, to);
@@ -674,14 +713,50 @@ function renderLogRows(preview, emptyMessage) {
         // panel jump to the nearest log line by time, and lets a log-row click
         // find the nearest event.
         const ms = parseLogTimeMs(p.text);
-        return `<div class="tat-log-row"${ms != null ? ` data-ms="${ms}"` : ''}>` +
+         const annotation = annotationData.find(item => item.line_no === p.line_no);
+         const annotationClass = annotation ? ` is-annotated annotation-${annotation.label}` : '';
+         const activeCls = (label) => (annotation && annotation.label === label) ? ' is-active' : '';
+         const matchedArr = '[' + (p.matched || []).join(',') + ']';
+         const annotationButtons = p.line_no == null ? '' : `<span class="log-annotation-tools">
+             <button type="button" class="${activeCls('evidence').trim()}" title="Evidence" onclick="annotateLogLine(event, ${p.line_no}, 'evidence', ${matchedArr})">E</button>
+             <button type="button" class="${activeCls('counterexample').trim()}" title="Counterexample" onclick="annotateLogLine(event, ${p.line_no}, 'counterexample', ${matchedArr})">X</button>
+         </span>`;
+         return `<div class="tat-log-row${annotationClass}" data-line-no="${p.line_no == null ? '' : p.line_no}" data-raw-text="${escapeHtml(p.text)}"${ms != null ? ` data-ms="${ms}"` : ''}>` +
                `<span class="tat-log-lineno">${p.line_no != null ? p.line_no : ''}</span>` +
                `<span class="tat-log-text" style="${style}">${formatLogLine(p.text)}</span>` +
+             annotationButtons +
                `</div>`;
     }).join('');
     box.innerHTML = rowsHtml
         ? `<div class="tat-log-inner">${rowsHtml}</div>`
         : `<div class="tat-log-empty">${emptyMessage || 'Empty file'}</div>`;
+}
+
+function annotateLogLine(event, lineNo, label, matchedFilters) {
+    event.stopPropagation();
+    const row = event.target.closest('.tat-log-row');
+    fetch("{{ url_for('log_viewer.annotate_line') }}", {
+        method: 'POST', headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({
+            line_no: lineNo, label: label, text: row ? row.dataset.rawText : '',
+            matched_filters: matchedFilters || [],
+        })
+    }).then(r => r.json()).then(d => {
+        if (!d.success) { alert(d.message || 'Annotation failed'); return; }
+        annotationData = d.annotations || [];
+        const annotation = annotationData.find(item => item.line_no === lineNo);
+        row.className = 'tat-log-row' + (annotation ? ` is-annotated annotation-${annotation.label}` : '');
+        // Re-mark which single button (E/C/N/X) is the active one for this
+        // line now — toggling off clears every button back to inactive.
+        row.querySelectorAll('.log-annotation-tools button').forEach((btn) => {
+            btn.classList.toggle('is-active', !!annotation && btn.textContent.trim().toLowerCase() === annotation.label[0]);
+        });
+        // A new/changed annotation can change which filter(s) show an
+        // evidence/counterexample count — keep the Filter list and Steps
+        // panel in sync live (both derive their counts from annotationData).
+        renderFilters();
+        renderStepPanel();
+    }).catch(e => alert('Annotation failed: ' + e));
 }
 
 // Parse a driver-log line's leading "MM/DD/YYYY-HH:MM:SS.mmm" timestamp into
@@ -1112,12 +1187,15 @@ function applyFilter() {
                 `${d.overlap_count} lines matched 2+ keywords`;
 
             // Merge hit counts into the filter table (that IS the stats display now).
-            const hitsByText = {};
-            d.per_filter.forEach(f => { hitsByText[f.text] = f.hits; });
-            filterData.forEach(f => { if (f.text in hitsByText) f.hits = hitsByText[f.text]; });
+            // Index-based, not text-based: per_filter is now returned for
+            // EVERY filter position (including disabled ones) in the same
+            // order as filterData, so this also survives duplicate-text
+            // filters that a text-keyed lookup would silently collide on.
+            d.per_filter.forEach((f, i) => { if (filterData[i]) filterData[i].hits = f.hits; });
             renderFilters();
             syncOps(d); // effects for prior edits are now measured
 
+            annotationData = d.annotations || annotationData;
             renderLogRows(d.preview, 'No lines matched');
         });
 }
@@ -1305,59 +1383,68 @@ function appendMsg(role, content, stepTag) {
 const USD_PER_MTOK_IN = 3.0;    // input / prompt tokens
 const USD_PER_MTOK_OUT = 15.0;  // output / completion tokens
 // Last session usage {prompt_tokens, completion_tokens, total_tokens, calls},
-// kept so the 消費 popover can recompute the USD breakdown on demand without
-// a refetch.
+// kept so the Spending popover can recompute the USD breakdown on demand
+// without a refetch.
 let lastSessionUsage = null;
 
 function updateTokenBadge(sessionUsage) {
     if (!sessionUsage) return;
     lastSessionUsage = sessionUsage;
     const badge = document.getElementById('tokenBadge');
-    const k = sessionUsage.total_tokens >= 1000 ? (sessionUsage.total_tokens / 1000).toFixed(1) + 'k' : sessionUsage.total_tokens;
-    badge.textContent = `🪙 ${k}`;
-    badge.title = `${sessionUsage.total_tokens} tokens across ${sessionUsage.calls} LLM call(s) this session`;
-    // Keep the 消費 popover live if it's currently open.
+    const usd = spendUsd(sessionUsage);
+    badge.textContent = `🪙 $${usd.total.toFixed(4)}`;
+    badge.title = `${sessionUsage.total_tokens} tokens across ${sessionUsage.calls} LLM call(s) this session — click for the breakdown`;
+    // Keep the spending popover live if it's currently open.
     const sp = document.getElementById('spendPanel');
     if (sp && sp.style.display !== 'none') renderSpendPanel();
 }
 
-// tiny token formatter (1234 -> "1.2k")
-function fmtTok(n) { return n >= 1000 ? (n / 1000).toFixed(1) + 'k' : String(n); }
+// tiny token formatter (1234 -> "1,234")
+function fmtTok(n) { return (n || 0).toLocaleString('en-US'); }
 
-// One 消費 popover row: label on the left, "<tokens> · $<usd>" on the right.
-function spendRow(label, tokStr, usdStr, cls) {
-    const row = el('div', 'spend-row' + (cls ? ' ' + cls : ''));
-    row.appendChild(el('span', 'spend-label', label));
-    const right = el('span', 'spend-val');
-    right.textContent = usdStr ? `${tokStr} · ${usdStr}` : tokStr;
-    row.appendChild(right);
+// Shared USD math so the badge and the popover never drift apart.
+function spendUsd(u) {
+    const inTok = (u && u.prompt_tokens) || 0;
+    const outTok = (u && u.completion_tokens) || 0;
+    const usdIn = inTok / 1e6 * USD_PER_MTOK_IN;
+    const usdOut = outTok / 1e6 * USD_PER_MTOK_OUT;
+    return {inTok, outTok, usdIn, usdOut, total: usdIn + usdOut};
+}
+
+// One spending-popover line, laid out as a fixed-column grid so every row's
+// label / formula / result line up regardless of digit count:
+// Input | 12,345 tok x $3.00/1M | $0.0370
+function spendLine(label, formula, usdStr, cls) {
+    const row = el('div', 'spend-line' + (cls ? ' ' + cls : ''));
+    row.appendChild(el('span', 'spend-line-label', label));
+    row.appendChild(el('span', 'spend-line-formula', formula));
+    row.appendChild(el('span', 'spend-line-usd', usdStr));
     return row;
 }
 
-// 消費 popover — token spend split into input vs output (each at its own
-// Claude Sonnet 6 USD rate) plus the combined total. Built via the DOM so it
-// stays consistent with the readiness popover's building style.
+// Spending popover — token spend split into input vs output (each at its own
+// Claude Sonnet 6 USD rate, shown as the actual conversion formula) plus the
+// combined total. Built via the DOM so it stays consistent with the
+// readiness popover's building style.
 function renderSpendPanel() {
     const p = document.getElementById('spendPanel');
     p.innerHTML = '';
     const u = lastSessionUsage || {prompt_tokens: 0, completion_tokens: 0, total_tokens: 0, calls: 0};
-    const inTok = u.prompt_tokens || 0;
-    const outTok = u.completion_tokens || 0;
+    const {inTok, outTok, usdIn, usdOut, total} = spendUsd(u);
     const totTok = u.total_tokens || (inTok + outTok);
-    const usdIn = inTok / 1e6 * USD_PER_MTOK_IN;
-    const usdOut = outTok / 1e6 * USD_PER_MTOK_OUT;
-    const usdTot = usdIn + usdOut;
 
-    p.appendChild(el('div', 'readiness-panel-title', '消費 · Spending'));
-    p.appendChild(spendRow('輸入 Input', fmtTok(inTok), '$' + usdIn.toFixed(4)));
-    p.appendChild(spendRow('輸出 Output', fmtTok(outTok), '$' + usdOut.toFixed(4)));
-    p.appendChild(el('div', 'spend-divider'));
-    p.appendChild(spendRow('合計 Total', fmtTok(totTok), '$' + usdTot.toFixed(4), 'spend-total'));
-    p.appendChild(el('div', 'spend-sub', `${u.calls || 0} LLM call(s) · Claude Sonnet 6 ($${USD_PER_MTOK_IN}/$${USD_PER_MTOK_OUT} per 1M in/out)`));
+    p.appendChild(el('div', 'readiness-panel-title', 'Spending'));
+    const table = el('div', 'spend-table');
+    table.appendChild(spendLine('Input', `${fmtTok(inTok)} tok x $${USD_PER_MTOK_IN.toFixed(2)}/1M`, '$' + usdIn.toFixed(4)));
+    table.appendChild(spendLine('Output', `${fmtTok(outTok)} tok x $${USD_PER_MTOK_OUT.toFixed(2)}/1M`, '$' + usdOut.toFixed(4)));
+    table.appendChild(el('div', 'spend-divider'));
+    table.appendChild(spendLine('Total', `${fmtTok(totTok)} tok`, '$' + total.toFixed(4), 'spend-total'));
+    p.appendChild(table);
+    p.appendChild(el('div', 'spend-sub', `${u.calls || 0} LLM call(s) this session · Claude Sonnet 6`));
 }
 
-// 消費 column click — open its popover (and close Readiness's so only one
-// floats at a time).
+// Spending column click — open its popover (and close Readiness's so only
+// one floats at a time).
 function toggleSpendPanel(evt) {
     if (evt) evt.stopPropagation();
     const p = document.getElementById('spendPanel');
@@ -1486,9 +1573,9 @@ function toggleReadinessPanel(evt) {
         }
     }
 }
-// Now floating popovers (anchored under the 消費 / Readiness columns, bottom-
-// left) instead of inline flex siblings of chatBox — close both on any click
-// outside the session-menu.
+// Now floating popovers (anchored under the Spending / Readiness columns,
+// bottom-left) instead of inline flex siblings of chatBox — close both on
+// any click outside the session-menu.
 document.addEventListener('click', function(e) {
     const menu = document.querySelector('.session-menu');
     if (!menu || menu.contains(e.target)) return;
@@ -1498,7 +1585,7 @@ document.addEventListener('click', function(e) {
     if (sp) sp.style.display = 'none';
 });
 
-const _COVER_LABELS = {knowledge: 'Knowledge & rules', scope: 'Scope (non-overlapping)', keywords: 'Minimal keywords'};
+const _COVER_LABELS = {knowledge: 'Knowledge & rules', scope: 'Scope (non-overlapping)', keywords: 'Minimal keywords', evidence: 'Evidence (labeled lines)'};
 const _VALID_META = {
     verified:      {icon: '✅', cls: 'v-ok',   label: 'verified from log'},
     asserted:      {icon: '⚠️', cls: 'v-warn', label: 'stated, not log-verified'},
@@ -1527,7 +1614,7 @@ function renderReadinessPanel(a) {
     const cov = a.coverage || {};
     if (Object.keys(cov).length) {
         const box = el('div', 'readiness-cov');
-        ['knowledge', 'scope', 'keywords'].forEach(k => {
+        ['knowledge', 'scope', 'keywords', 'evidence'].forEach(k => {
             const v = typeof cov[k] === 'number' ? cov[k] : 0;
             const row = el('div', 'cov-row');
             row.appendChild(el('span', 'cov-label', _COVER_LABELS[k]));

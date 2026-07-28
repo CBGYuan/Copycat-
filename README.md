@@ -5,12 +5,34 @@ an engineer's filtering + debugging judgment into reusable, versioned
 **skills** an LLM can apply on the next log. It's a trimmed-down,
 independently-built sibling of
 [wireless_ce_avatar/IntelAvatar](https://github.com/kj-fang/wireless_ce_avatar),
-keeping only the log-viewing/filtering + chat + skill-learning line, with the
-skill lifecycle rebuilt around ideas from
-[**AutoSkill**](https://github.com/ECNU-ICALK/AutoSkill) (*"Experience-Driven
-Lifelong Learning via Skill Self-Evolution"*): retrieval-assisted skill
-management, an add/merge/discard judge, and versioned merging — grounded in
-this project's own filter statistics rather than text similarity alone.
+keeping only the log-viewing/filtering + chat + skill-learning line.
+
+## Responsibility boundary: Copycat is a teaching workbench, not a validator
+
+**Copycat measures how COMPLETE the teaching evidence is, never whether the
+skill is CORRECT.** That distinction is load-bearing throughout the codebase:
+
+- **Copycat** collects the teaching trajectory — filter edits with measured
+  effect, engineer-written reasons, evidence/counterexample-labeled log
+  lines, LLM-clarified scope — and synthesizes it into a skill draft with an
+  evidence summary attached (`learning_service.assess_teaching_evidence`).
+  It never computes TP/FP/FN or a pass/fail verdict from that same session's
+  data — see that function's docstring for why: a skill that looks good
+  against the log it was taught on is not evidence it generalizes.
+- **[wireless_ce_avatar](https://github.com/kj-fang/wireless_ce_avatar)** is
+  the system of record for "is this a good skill" — it runs a candidate
+  against real historical issues/logs and reports the actual TP/FP/FN,
+  success rate, and stability. Copycat only *prepares* what that system needs
+  (`learning_service.build_validation_packet`) and *stores* whatever comes
+  back (`apply_external_validation`) — the live integration itself isn't
+  wired up yet (see [Status](#status--whats-not-done-yet)).
+
+The skill lifecycle (retrieval, add/merge/discard judge, versioned merging)
+is built around ideas from [**AutoSkill**](https://github.com/ECNU-ICALK/AutoSkill)
+(*"Experience-Driven Lifelong Learning via Skill Self-Evolution"*), grounded
+in this project's own filter statistics rather than text similarity alone.
+The interview/clarification layer draws on a few more papers, cited
+precisely (not overclaimed) in [Paper grounding](#paper-grounding) below.
 
 ## What it does
 
@@ -21,36 +43,70 @@ this project's own filter statistics rather than text similarity alone.
   respected).
 - WiFi vs Bluetooth is auto-detected from the picked log (filename hints,
   then a content sniff), which switches the skill dropdown to the right pool
-  and normalizes dateless BT `.hci.txt` / WiFi DDD timestamp formats into one
-  canonical shape.
+  and normalizes dateless BT `.hci.txt` / WiFi DDD timestamp formats
+  (including a tab-separated `frame#\tHH:MM:SS:mmm\t...` variant) into one
+  canonical shape. Switching to a log in a *different* domain than the one
+  currently filtered clears the stale filter instead of silently re-running
+  it and reporting a confusing "0 lines matched."
 - Include/exclude keywords, checkbox-toggle, or load an existing skill's
   keyword set as the starting filter — every edit re-runs the filter and is
   recorded with its *measured marginal effect*: hit count, unique
   contribution, noise dropped, and its top co-firing keyword — powering
-  everything downstream instead of re-scanning the log.
+  everything downstream instead of re-scanning the log. A **Show all** button
+  jumps back to the unfiltered view without re-picking the file. Skills carry
+  no color info of their own (only a `.tat` file does), so a skill-loaded
+  filter set is auto-assigned a color palette, alternating full-block and
+  text-only treatments so a long filter list doesn't read as a wall of
+  saturated color.
 - A collapsible **System Event Log** panel (BT captures) auto-discovers the
   matching Windows System event export next to the driver log; rows
-  click-sync to the nearest driver-log line by timestamp, and vice versa.
+  click-sync to the nearest driver-log line by timestamp, and vice versa. The
+  driver log is customer-local time while the event log is UTC — Copycat
+  reads the capture machine's fixed UTC offset from a `systeminfo.txt`/
+  `system_info.txt` sitting near the log (same field IntelAvatar's own
+  timezone resolver reads) and corrects for it, rather than comparing the two
+  raw and landing on a plausible-looking but wrong line.
 - A deterministic (zero-LLM-cost) **red-flag detector** notices a redundant
   keyword, a no-op exclude, a suspiciously large expansion/drop, or removing
   something load-bearing — and surfaces it as an inline question the instant
   it happens.
+- **Evidence / counterexample line annotation** — mark any visible log line
+  `E` (supports a filter/rule) or `X` (counterexample — an edge case or line
+  that would be a false positive). Attribution is by **filter identity**
+  (`tat_parser.matched_keywords_for_line`), never by guessing which historical
+  edit "owns" a line — a loaded skill/`.tat` file never recorded a per-keyword
+  edit history to guess from in the first place, so identity-based
+  attribution is the only version of this that's actually reliable (two
+  earlier approaches — guessing from the edit history, then a manual
+  step-picker UI — were both tried and dropped). The filter table's `Ev`
+  column (`2E/1X`) is the one authoritative view; the Steps panel's own E/X
+  counts are explicitly an indirect, secondary cross-reference, never claimed
+  as "this step caused this evidence."
 
 ### 2. Skill-Building Chat
 - Claude-style layout: your messages sit in a right-aligned bubble; the
   assistant's replies flow as plain full-width Markdown text.
-- **Log Round & Analyze** — one LLM call that analyzes the current filter
-  state, asks 1–3 grounded follow-up questions (structured choice-or-custom,
-  same shape as Claude's own `AskUserQuestion`), and self-scores readiness
-  (0–100) plus per-goal coverage (knowledge / scope / minimal-keywords) and a
-  claim-by-claim verified-vs-asserted validation — so a threshold the
-  engineer stated but the log never proved can't silently be exported as
-  fact.
+- **Log Round & Analyze**, with an **Ambiguity Gate** — one LLM call analyzes
+  the current filter state and self-scores readiness (0–100), per-goal
+  coverage (knowledge / scope / minimal-keywords / evidence), and a
+  claim-by-claim verified-vs-asserted validation. It only asks a follow-up
+  question when it can show the ambiguity is real: it first drafts 2–3
+  concrete interpretations of the most important unexplained edit, each with
+  its own predicted observable behavior; if every interpretation lands on the
+  same behavior, it asks nothing. Only on genuine divergence does it ask the
+  ONE question that would discriminate between those behaviors — never a
+  generic "is this temporary or permanent?" template. (See
+  [Paper grounding](#paper-grounding) — ClarifyGPT's consistency check +
+  GATE's discriminating-question framing.) A nudge card appears in-chat when
+  there are unlogged filter changes worth a round — gated on whether an edit
+  actually moved something measurable (a load-bearing keyword, dropped noise,
+  a meaningful survivor swing), not on raw edit count, so exploring a long
+  filter list checkbox-by-checkbox doesn't spam it.
 - **Per-step teaching** — click 🎓 on any filter edit in the Steps panel to
   explain, in your own words, why you made it; the LLM condenses it into a
   confirmable knowledge-core statement, adds its own expert second opinion,
-  and may ask one interactive follow-up (answer or skip) without losing the
-  thread of what step it's about.
+  and may ask one interactive follow-up (answer or skip). The response is
+  kept as a permanent, structured chat entry (not lost once dismissed).
 - Every message is tagged with the step it concerns (`#N`) or `All` for
   general knowledge, via a compact selector next to Send — replay after a
   page reload preserves the same tags.
@@ -60,8 +116,18 @@ this project's own filter statistics rather than text similarity alone.
 
 ### 3. Export → Self-Evolving Skill Lifecycle (AutoSkill-integrated)
 Exporting doesn't just dump a new file — every synthesized draft goes through
-a retrieval → judge → merge pipeline, **advisory only**: nothing is written
-until you confirm in the Edit-Skill modal.
+a **teaching-evidence assessment**, then a retrieval → judge → merge
+pipeline, **advisory only**: nothing is written until you confirm in the
+Edit-Skill modal.
+
+- **Teaching evidence assessment** (`assess_teaching_evidence`) — reports
+  which keywords were actually exercised on the log, whether every material
+  edit has an engineer explanation, and how many counterexamples were
+  flagged. This is provenance for you to review, explicitly **not** a
+  correctness score — see the [Responsibility boundary](#responsibility-boundary-copycat-is-a-teaching-workbench-not-a-validator)
+  above. The same data is packaged (`build_validation_packet`) for eventual
+  hand-off to `wireless_ce_avatar`, and there's a slot to store whatever
+  comes back (`apply_external_validation`) — the live call isn't wired up yet.
 
 - **Versioning** — every skill carries a `version` (bumped on each edit) and
   a rolling `version_history` snapshot of its pre-edit state, so a skill's
@@ -107,26 +173,41 @@ configs/
   set_up_app.py             Startup: configure LLM, load skill sources
 blueprints/
   main/                     Landing page
-  log_viewer/                Log/filter picking, apply_filter, event log, red-flag Q&A
+  log_viewer/                Log/filter picking, apply_filter, event log,
+                               red-flag Q&A, line annotation (/annotate_line),
+                               show_all (unfiltered view)
   chatbot/                   Free-form chat send/reset (step-tagged)
-  learning/                   Log Round, per-step teach/ask, readiness, converge/save
+  learning/                   Log Round (Ambiguity Gate), per-step teach/ask,
+                               readiness, converge/save, teaching-evidence
+                               assessment
   skills/                     Skill library CRUD
 services/
   llm_service.py               LLM_helper — Anthropic/OpenAI-compatible client,
                                  token usage tracking, prompt caching
   session_store.py             Per-browser-session working state
-  event_log_service.py         Windows System Event Log (.evt/.evtx) reader
+                                 (incl. log_annotations)
+  event_log_service.py         Windows System Event Log (.evt/.evtx) reader +
+                                 capture-machine UTC-offset detection
+                                 (systeminfo.txt) for click-sync
   skill_service.py             Skill model + YAML read/write, versioning
   skill_retrieval.py           Agent C — keyword-set similarity retrieval
-  learning_service.py          Interview prompts, readiness assessment,
-                                 skill synthesis, judge (Agent B),
-                                 stat-validated merge (Agent D)
+  learning_service.py          Interview prompts (Ambiguity Gate), readiness
+                                 assessment, skill synthesis, judge (Agent B),
+                                 stat-validated merge (Agent D), teaching-
+                                 evidence assessment + external-validation
+                                 packet/hook (assess_teaching_evidence /
+                                 build_validation_packet /
+                                 apply_external_validation)
 utils/
-  tat_parser.py                 .tat XML parsing + filter/stats engine
+  tat_parser.py                 .tat XML parsing + filter/stats engine +
+                                 matched_keywords_for_line (E/X attribution
+                                 by filter identity)
   operation_journal.py          Per-edit journal with measured effect + red flags
   file_picker.py, browser_utils.py, helpers.py, json_utils.py
 templates/, static/           log_viewer.html (main workbench), skills.html,
                                 shared skill_editor.js modal, style.css
+tests/                          Unit tests for the learning pipeline
+                                  (see Tests below)
 data/skills/
   local/                        THIS engineer's own copycat-originated
                                   skills — the only files the app writes to
@@ -134,6 +215,63 @@ data/skills/
                                   auto-refreshed every app startup — never
                                   hand-edited, gitignored (regenerated data)
 ```
+
+## Paper grounding
+
+Cited precisely — each entry states exactly what's implemented vs. referenced
+as a future direction, so this list doesn't overclaim:
+
+- **[ClarifyGPT](https://arxiv.org/abs/2310.10996)** + **[GATE](https://arxiv.org/abs/2310.11589)**
+  (*"Eliciting Human Preferences with Language Models"*) — the Log Round
+  Ambiguity Gate: only ask when alternate interpretations of an edit would
+  produce genuinely different observable behavior, and the question itself
+  must discriminate between those behaviors rather than being a generic
+  template. Implemented in `learning_service.analyze_round`.
+- **[ASI — Agent Skill Induction](https://arxiv.org/abs/2504.06821)** — the
+  induction/verification split: Copycat induces the candidate skill and
+  reports what evidence backs it (`assess_teaching_evidence`), but real
+  verification runs in the actual target environment — here, that's
+  `wireless_ce_avatar`, not a same-session self-check.
+- **[AutoSkill](https://github.com/ECNU-ICALK/AutoSkill)** — retrieval-
+  assisted skill management, an add/merge/discard judge, and versioned
+  merging (see Export section above). Fully implemented for the single-draft
+  case; a periodic *Consolidator* pass across the whole local skill bank
+  (AutoManual-style batch merge/redundancy cleanup) is deliberately **not**
+  built yet — see Status below.
+- **[AutoManual](https://arxiv.org/abs/2405.16247)** — conceptual reference
+  for preserving trajectory + reason + effect + provenance together (the
+  Steps panel + operation journal), and for the future Consolidator idea
+  above. Not a full reimplementation of AutoManual's Planner/Builder/
+  Consolidator agent framework.
+- **τ-bench** — reference point for *future* repeated-trial/reliability
+  checking. That kind of evaluation belongs in `wireless_ce_avatar` (running
+  a skill repeatedly against real cases), not as a Copycat script measuring
+  itself against the same data it was taught on.
+
+## Status — what's not done yet
+
+- **`wireless_ce_avatar` integration is not live.** `build_validation_packet`/
+  `apply_external_validation` exist and are unit-tested, but there's no actual
+  HTTP/API call wired up yet — that needs the real endpoint, auth, and
+  request/response schema from that system first.
+- **No Consolidator / `consolidate_skill_bank` yet.** Deliberately deferred
+  until enough externally-validated cases have accumulated to make batch
+  merging meaningful — not just "not implemented yet," but not *ready* to
+  design in detail until that data exists.
+- **No repeated-execution/reliability reporting in Copycat itself** (see the
+  τ-bench note above) — that stays in `wireless_ce_avatar`'s scope.
+
+## Tests
+
+```powershell
+python -m unittest discover -s tests -v
+```
+
+Covers the Ambiguity Gate (only asks on genuine behavioral divergence),
+`assess_teaching_evidence` (reports counterexamples without scoring
+correctness), deterministic (non-LLM) evidence-coverage computation,
+filter-identity-based E/X attribution, and that a session reset clears
+case-specific teaching state.
 
 ## Setup
 

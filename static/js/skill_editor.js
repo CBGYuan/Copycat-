@@ -19,6 +19,7 @@
     rules: [],       // array of raw rule-block strings (each may be multi-line)
     preamble: "",
     diff: null,      // {new_keywords, new_exclusive, rules_added_text} from an extend-draft, or null
+    teachingEvidence: null,
     domain: "wifi",
     options: {},
   };
@@ -137,6 +138,21 @@
     el.style.display = "flex";
   }
 
+  function renderVerificationBanner() {
+    const el = document.getElementById("skm-verification-banner");
+    const evidence = state.teachingEvidence;
+    if (!el || !evidence) {
+      if (el) el.style.display = "none";
+      return;
+    }
+    const checks = (evidence.checks || []).map((check) =>
+      `<div><b>${escapeHtml(check.name)}</b>: ${escapeHtml(check.status)} - ${escapeHtml(check.note)}</div>`
+    ).join("");
+    const externalLine = `<div class="mt-1"><b>External validation</b>: not run — run this skill in wireless_ce_avatar to measure real TP/FP/FN.</div>`;
+    el.innerHTML = `<i class="fas fa-clipboard-list mt-1"></i><div><b>Teaching evidence</b> - ${escapeHtml(evidence.summary)}${checks}${externalLine}</div>`;
+    el.style.display = "flex";
+  }
+
   function renderDescMeter() {
     const desc = document.getElementById("skm-desc").value;
     const s = descStrength(desc);
@@ -158,6 +174,7 @@
     // (learning_service.compute_skill_diff) — drives the green "NEW"
     // highlighting on chips/rules below plus the summary banner.
     state.diff = data.diff || null;
+    state.teachingEvidence = data.teaching_evidence || null;
     state.domain = data.domain || "wifi";
     state.options = {
       skillKey: data.skill_key || "",
@@ -182,6 +199,7 @@
     document.getElementById("skm-delete-btn").style.display = state.options.deleteUrl ? "inline-block" : "none";
 
     renderDiffBanner();
+    renderVerificationBanner();
     renderChips("skm-keywords", state.keywords, state.diff ? new Set(state.diff.new_keywords) : null);
     renderChips("skm-exclusive", state.exclusive, state.diff ? new Set(state.diff.new_exclusive) : null);
     renderRules();
