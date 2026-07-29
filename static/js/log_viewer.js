@@ -962,7 +962,7 @@ function renderExportBaselineBadge() {
 function clearExportBaseline() {
     if (isBusy()) return;
     setBusy(true);
-    fetch(LV.url.skills_activate, {method: 'POST'})
+    fetch(LV.url.skills_clear_baseline, {method: 'POST'})
         .then(r => r.json())
         .then(d => {
             setBusy(false);

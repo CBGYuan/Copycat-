@@ -145,7 +145,20 @@ def restore_route(skill_key):
     return jsonify({"success": True, "skill_key": saved})
 
 
-@skills_bp.route("/activate", methods=["POST"], defaults={"skill_key": ""})
+@skills_bp.route("/clear_baseline", methods=["POST"])
+def clear_baseline():
+    """Drop the export baseline without touching the filters on screen — the
+    mirror image of activate() below.
+
+    A separate endpoint rather than activate() with an empty key: expressing
+    "no key" as a `defaults={"skill_key": ""}` rule builds fine on some
+    Werkzeug versions and raises BuildError on others (which is exactly how
+    this page started 500-ing). An explicit path has no such ambiguity.
+    """
+    session_store.get_state().active_skill_key = ""
+    return jsonify({"success": True, "active_key": "", "active_name": ""})
+
+
 @skills_bp.route("/activate/<skill_key>", methods=["POST"])
 def activate(skill_key):
     """Mark a skill as the LOADED skill for this session — the same slot

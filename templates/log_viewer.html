@@ -340,7 +340,7 @@
       log_viewer_show_all: "{{ url_for('log_viewer.show_all') }}",
       log_viewer_toggle_filter: "{{ url_for('log_viewer.toggle_filter') }}",
       main_llm_status: "{{ url_for('main.llm_status') }}",
-      skills_activate: "{{ url_for('skills.activate') }}"
+      skills_clear_baseline: "{{ url_for('skills.clear_baseline') }}"
     },
     boot: {
       activeSkillKey: {{ (state.active_skill_key or '')|tojson }},
