@@ -1,5 +1,6 @@
 from flask import Blueprint, render_template, request, jsonify
 
+from configs import set_up_app
 from configs.global_configs import app_config
 from services import session_store, skill_service
 from utils import skill_dedup
@@ -38,6 +39,50 @@ def index():
     return render_template("skills.html", skills=_all_skills(), bt_keys=list(app_config.bt_skills.keys()))
 
 
+@skills_bp.route("/sources")
+def sources():
+    """Which baseline YAMLs this domain can stand on, and which one it is
+    standing on now. The list is the local mirror of the corp share (see
+    skill_service.refresh_shared_cache), so it answers "which version of the
+    team's knowledge base am I working against" — a question the old implicit
+    shared+contribution merge gave no way to ask or answer."""
+    domain = (request.args.get("domain") or "wifi").lower()
+    domain = "bt" if domain == "bt" else "wifi"
+    items = skill_service.list_skill_sources(domain)
+    active = app_config.source_for(domain) or skill_service.default_source_path(domain)
+    return jsonify({"success": True, "domain": domain, "active": active, "sources": items})
+
+
+@skills_bp.route("/sources/select", methods=["POST"])
+def select_source():
+    """Switch this domain's baseline file and rebuild its pool.
+
+    The chosen file becomes the WHOLE baseline — not a layer merged on top of
+    the team file. That is what lets the Export path promise the inherited
+    half of a skill is exactly this file's content (see
+    utils.skill_dedup.build_extension_skill); a hidden merge underneath would
+    make that untrue. Locally-saved skills still layer on top, since those are
+    this workbench's own output rather than part of any baseline.
+    """
+    data = request.get_json(silent=True) or {}
+    domain = (data.get("domain") or "wifi").lower()
+    domain = "bt" if domain == "bt" else "wifi"
+    path = (data.get("path") or "").strip()
+
+    # Only ever a file this domain actually offers — never an arbitrary path
+    # off the request, which would let any file on disk be read as skills.
+    allowed = {s["path"] for s in skill_service.list_skill_sources(domain)}
+    if path and path not in allowed:
+        return jsonify({"success": False, "message": "Unknown skill source for this domain."}), 400
+
+    app_config.set_source(domain, path)
+    set_up_app.reload_pools()
+    pool = app_config.bt_skills if domain == "bt" else app_config.skills
+    return jsonify({"success": True, "domain": domain,
+                    "active": app_config.source_for(domain) or skill_service.default_source_path(domain),
+                    "skill_count": len(pool)})
+
+
 @skills_bp.route("/graph")
 def graph():
     """Everything the Skill Library page needs to draw one domain's skills as
@@ -54,7 +99,7 @@ def graph():
     domain = (request.args.get("domain") or "wifi").lower()
     domain = "bt" if domain == "bt" else "wifi"
     pool = app_config.bt_skills if domain == "bt" else app_config.skills
-    origins = skill_service.skill_origins(domain)
+    origins = skill_service.skill_origins(domain, app_config.source_for(domain))
     active_key = session_store.get_state().active_skill_key or ""
 
     nodes = []
@@ -94,7 +139,8 @@ def versions(skill_key):
     if not skill:
         return jsonify({"success": False, "message": "Not found"}), 404
     domain = _domain_of(skill_key)
-    is_local = skill_service.skill_origins(domain).get(skill_key) == "local"
+    origins = skill_service.skill_origins(domain, app_config.source_for(domain))
+    is_local = origins.get(skill_key) == "local"
 
     entries = [{
         "version": skill.version,
@@ -120,7 +166,7 @@ def versions(skill_key):
             "restorable": is_local,
         })
     return jsonify({"success": True, "skill_key": skill_key, "domain": domain,
-                    "origin": skill_service.skill_origins(domain).get(skill_key, "local"),
+                    "origin": origins.get(skill_key, "local"),
                     "parent": skill.parent, "lineage": list(skill.lineage),
                     "versions": entries})
 
@@ -139,9 +185,7 @@ def restore_route(skill_key):
         return jsonify({"success": False,
                         "message": "Only locally-saved skills can be restored, "
                                    "and only to a version in their own history."}), 400
-    loaded = skill_service.load_shared_skills()
-    app_config.set_skills(loaded["wifi"])
-    app_config.set_bt_skills(loaded["bt"])
+    set_up_app.reload_pools()
     return jsonify({"success": True, "skill_key": saved})
 
 
@@ -232,9 +276,7 @@ def save_skill_route():
         saved_key = skill_service.save_skill(skill_key, skill, domain=domain, base=base_pool)
     except skill_service.SkillStoreError as e:
         return _store_error(e)
-    loaded = skill_service.load_shared_skills()
-    app_config.set_skills(loaded["wifi"])
-    app_config.set_bt_skills(loaded["bt"])
+    set_up_app.reload_pools()
     return jsonify({"success": True, "skill_key": saved_key})
 
 
@@ -246,7 +288,5 @@ def delete_skill_route(skill_key):
     except skill_service.SkillStoreError as e:
         return _store_error(e)
     if ok:
-        loaded = skill_service.load_shared_skills()
-        app_config.set_skills(loaded["wifi"])
-        app_config.set_bt_skills(loaded["bt"])
+        set_up_app.reload_pools()
     return jsonify({"success": ok})

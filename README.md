@@ -230,6 +230,21 @@ skill rather than from taste:
 ### 4. Skill Library
 A two-pane page (`/skills/`) for everything the workbench can see.
 
+- **Base YAML picker** (top of the page) — which file this domain's skills are
+  read from. The list is the local mirror of the corp share: the team baseline
+  (`skills.yaml` / `bt_skills.yaml`) plus, for WiFi, each engineer contribution
+  file found there. WiFi and Bluetooth each keep their own choice, and the
+  choice survives page reloads and switching between the Log Viewer and here.
+
+  **The chosen file is the WHOLE baseline**, not a layer on top of the team
+  file. Before this, the pool was an implicit three-way merge — team baseline
+  → this engineer's contribution → local — that nobody could see or reproduce:
+  a skill could resolve from any of the three, and the UI could only report
+  which had won after the fact. That also quietly broke the Export promise
+  that an inherited skill's inherited half is exactly one file's content.
+  Locally-saved skills still layer on top, because those are this workbench's
+  own output rather than part of any baseline.
+
 - **Left — lineage forest.** Skills drawn by ancestry: indent is generation,
   with connector elbows. Each row carries an origin dot (blue `shared`,
   purple `contribution`, green `local`), a `LOADED` badge for the session's
@@ -524,6 +539,12 @@ so a broken local file never stops the app from starting.
   is unreachable that startup, the app keeps serving whatever was cached
   from the last successful sync instead of the pool going empty). Never
   hand-edited, never written to by the UI, gitignored (regenerated data).
+  Every file in here is a candidate baseline in the Skill Library's Base YAML
+  picker; exactly one is active per domain at a time.
+
+So each domain's pool is exactly two layers — **one chosen baseline file, then
+the local file on top**. A skill's origin dot in the Library says which layer
+it came from, and only `local` entries are writable.
 
 Phase 2's retrieval-assisted skill maintenance (add/merge/discard judge)
 only ever considers `local/` skills as merge targets — a shared-drive skill

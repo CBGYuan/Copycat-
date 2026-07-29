@@ -1,5 +1,6 @@
 from flask import Blueprint, request, jsonify
 
+from configs import set_up_app
 from configs.global_configs import app_config
 from services import session_store, learning_service, skill_service
 from utils import operation_journal, divergence, skill_dedup
@@ -937,9 +938,7 @@ def save():
         # the modal stays open with the engineer's work intact, rather than a
         # 500 they would read as "it probably went through".
         return jsonify({"success": False, "message": str(e)}), 409
-    loaded = skill_service.load_shared_skills()
-    app_config.set_skills(loaded["wifi"])
-    app_config.set_bt_skills(loaded["bt"])
+    set_up_app.reload_pools()
 
     state.active_skill_key = saved_key
     state.skill_draft = []

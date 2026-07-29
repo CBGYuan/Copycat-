@@ -1,9 +1,20 @@
 {% extends "base.html" %}
 {% block content %}
 <div class="lib-head">
-  <div>
-    <h5 class="mb-1"><i class="fas fa-sitemap"></i> Skill Library</h5>
-    <div class="text-muted small">
+  <div class="lib-head-main">
+    <div class="lib-title-row">
+      <h5 class="mb-0"><i class="fas fa-sitemap"></i> Skill Library</h5>
+      <!-- Which YAML this domain's skills are read from. Everything below is
+           that file plus this workbench's own locally-saved skills — nothing
+           is merged in behind it, which is what lets an inherited Export say
+           its inherited half is exactly this file's content. -->
+      <div class="lib-source">
+        <label for="lib-source-select">Base YAML</label>
+        <select id="lib-source-select" class="form-select form-select-sm"></select>
+        <span id="lib-source-meta" class="lib-source-meta"></span>
+      </div>
+    </div>
+    <div class="text-muted small mt-1">
       Every skill visible to this workbench, drawn by ancestry. Pick one to inspect its
       revision trail, load it as the baseline the next Export inherits from, or edit it.
     </div>
@@ -72,6 +83,45 @@ function esc(s) {
 }
 
 // ── Left pane ───────────────────────────────────────────────────────────
+
+// ── Base YAML selector ──────────────────────────────────────────────────
+// Which file this domain's skills are read from. Reloaded whenever the
+// domain changes, because the WiFi and Bluetooth pools have different
+// candidate files (only WiFi has per-engineer contribution files).
+function loadSources() {
+  fetch(`/skills/sources?domain=${libDomain}`)
+    .then(r => r.json())
+    .then(d => {
+      if (!d.success) return;
+      const sel = document.getElementById("lib-source-select");
+      sel.innerHTML = d.sources
+        .map(s => `<option value="${esc(s.path)}"${s.path === d.active ? " selected" : ""}>${esc(s.label)}</option>`)
+        .join("");
+      sel.disabled = d.sources.length < 2;
+      renderSourceMeta(d.sources.find(s => s.path === d.active));
+    });
+}
+
+function renderSourceMeta(src) {
+  const el = document.getElementById("lib-source-meta");
+  if (!src) { el.textContent = ""; return; }
+  const when = (src.updated || "").replace("T", " ");
+  el.textContent = `${src.skill_count} skills` + (when ? ` · synced ${when}` : "");
+}
+
+function selectSource(path) {
+  fetch("/skills/sources/select", {
+    method: "POST", headers: {"Content-Type": "application/json"},
+    body: JSON.stringify({domain: libDomain, path: path}),
+  }).then(r => r.json()).then(d => {
+    if (!d.success) { alert(d.message || "Could not switch source"); return; }
+    // The pool changed underneath, so the selection may no longer exist.
+    libSelected = null;
+    clearDetail();
+    loadSources();
+    loadGraph(false);
+  });
+}
 
 function loadGraph(keepSelection) {
   fetch(`/skills/graph?domain=${libDomain}`)
@@ -347,10 +397,15 @@ document.addEventListener("DOMContentLoaded", function () {
       libDomain = this.dataset.domain;
       libSelected = null;
       clearDetail();
+      loadSources();
       loadGraph(false);
     }));
+  document.getElementById("lib-source-select").addEventListener("change", function () {
+    selectSource(this.value);
+  });
   document.getElementById("lib-load-btn").addEventListener("click", doActivate);
   document.getElementById("lib-edit-btn").addEventListener("click", editSelected);
+  loadSources();
   loadGraph(false);
 });
 </script>

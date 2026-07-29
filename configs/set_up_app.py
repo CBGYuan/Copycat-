@@ -15,24 +15,34 @@ def _resolve_key_path():
     return None
 
 
-def _load_skills_into_config(log_prefix: str) -> None:
-    """Load the skill knowledge base from whatever's currently in the local
-    read-only mirror (data/skills/shared_cache/) — shared corp baseline +
-    this engineer's own shared contribution + local edits (WiFi), and the
-    shared Bluetooth baseline + its own local edits (BT). See services/
-    skill_service.load_shared_skills(). Never touches the network — safe to
-    call both before AND after refresh_shared_cache() (see set_up() /
-    _refresh_shared_cache_then_reload() below)."""
-    loaded = skill_service.load_shared_skills()
+def reload_pools() -> dict:
+    """Rebuild both skill pools in app_config from the CURRENTLY SELECTED
+    baseline files (app_config.wifi_source / bt_source) plus the local files.
+
+    The single place that repopulates the pools. Every route that writes a
+    skill has to refresh them afterwards, and each one doing its own
+    `load_shared_skills()` was how a call site could silently drop the
+    engineer's chosen baseline and snap back to the team default. Returns the
+    `sources` dict so callers can report what actually loaded.
+
+    Never touches the network — safe to call both before AND after
+    refresh_shared_cache() (see set_up() / _refresh_shared_cache_then_reload()).
+    """
+    loaded = skill_service.load_shared_skills(
+        wifi_source=app_config.wifi_source or None,
+        bt_source=app_config.bt_source or None)
     app_config.set_skills(loaded["wifi"])
     app_config.set_bt_skills(loaded["bt"])
-    src = loaded["sources"]
+    return loaded["sources"]
+
+
+def _load_skills_into_config(log_prefix: str) -> None:
+    src = reload_pools()
     print(f"{log_prefix} Loaded {len(app_config.skills)} WiFi skill(s) "
-          f"[shared={'y' if src['shared_wifi'] else 'n'} "
-          f"contribution={'y' if src['contribution'] else 'n'} "
+          f"[base={os.path.basename(src['wifi_source'])} "
           f"local={'y' if src['local'] else 'n'}], "
           f"{len(app_config.bt_skills)} BT skill(s) "
-          f"[shared={'y' if src['bt'] else 'n'} "
+          f"[base={os.path.basename(src['bt_source'])} "
           f"local={'y' if src['local_bt'] else 'n'}]")
 
 

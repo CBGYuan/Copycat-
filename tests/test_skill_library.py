@@ -377,6 +377,102 @@ class DurableWriteTests(_LocalFileCase):
         self.assertIn(skill_service.BACKUP_SUFFIX, body["message"])
 
 
+class BaselineSourceTests(_LocalFileCase):
+    """Which YAML a domain's pool is read from is now an explicit choice.
+
+    It used to be an implicit three-way merge (team file -> this engineer's
+    contribution -> local) that nobody could see or reproduce: a skill could
+    resolve from any of the three, and the UI could only report which had won
+    after the fact. The Export path promises that an inherited skill's
+    inherited half is exactly one file's content, which that merge made
+    untrue."""
+
+    def setUp(self):
+        super().setUp()
+        self.cache = tempfile.mkdtemp()
+        self.contrib_dir = os.path.join(self.cache, "user_contributions")
+        os.makedirs(self.contrib_dir, exist_ok=True)
+        self._saved_cache = (path_configs.SKILLS_CACHE_DIR,
+                             path_configs.SKILLS_CACHE_WIFI_PATH,
+                             path_configs.SKILLS_CACHE_BT_PATH,
+                             path_configs.SKILLS_CACHE_USER_CONTRIB_DIR)
+        path_configs.SKILLS_CACHE_DIR = self.cache
+        path_configs.SKILLS_CACHE_WIFI_PATH = os.path.join(self.cache, "skills.yaml")
+        path_configs.SKILLS_CACHE_BT_PATH = os.path.join(self.cache, "bt_skills.yaml")
+        path_configs.SKILLS_CACHE_USER_CONTRIB_DIR = self.contrib_dir
+
+        self._write(path_configs.SKILLS_CACHE_WIFI_PATH, {"team_skill": "Team Skill"})
+        self._write(path_configs.SKILLS_CACHE_BT_PATH, {"bt_team": "BT Team"})
+        self._write(os.path.join(self.contrib_dir, "someone__skills_2026-05-13.yaml"),
+                    {"contrib_skill": "Contributed Skill", "team_skill": "Overridden"})
+
+    def tearDown(self):
+        (path_configs.SKILLS_CACHE_DIR,
+         path_configs.SKILLS_CACHE_WIFI_PATH,
+         path_configs.SKILLS_CACHE_BT_PATH,
+         path_configs.SKILLS_CACHE_USER_CONTRIB_DIR) = self._saved_cache
+        shutil.rmtree(self.cache, ignore_errors=True)
+        super().tearDown()
+
+    @staticmethod
+    def _write(path, entries):
+        raw = {k: {"name": n, "description": "d", "keywords": ["kw"], "expert_rules": ""}
+               for k, n in entries.items()}
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(skill_service._dump_skills_yaml(raw))
+
+    def test_wifi_offers_the_team_file_and_every_contribution(self):
+        srcs = skill_service.list_skill_sources("wifi")
+        self.assertEqual([s["kind"] for s in srcs], ["shared", "contribution"])
+        self.assertEqual(srcs[0]["path"], path_configs.SKILLS_CACHE_WIFI_PATH)
+        self.assertEqual(srcs[0]["skill_count"], 1)
+
+    def test_bt_offers_only_its_team_file(self):
+        # There is no per-engineer contribution file for Bluetooth on the share.
+        srcs = skill_service.list_skill_sources("bt")
+        self.assertEqual([s["kind"] for s in srcs], ["shared"])
+
+    def test_the_default_baseline_is_the_team_file(self):
+        pools = skill_service.load_shared_skills()
+        self.assertEqual(set(pools["wifi"]), {"team_skill"})
+        self.assertEqual(pools["wifi"]["team_skill"].name, "Team Skill")
+
+    def test_choosing_a_contribution_replaces_the_baseline_rather_than_layering(self):
+        contrib = skill_service.list_skill_sources("wifi")[1]["path"]
+        pools = skill_service.load_shared_skills(wifi_source=contrib)
+        # The team file's own entries are GONE, not merged underneath — and
+        # team_skill resolves to the contribution's version of it.
+        self.assertEqual(set(pools["wifi"]), {"contrib_skill", "team_skill"})
+        self.assertEqual(pools["wifi"]["team_skill"].name, "Overridden")
+
+    def test_local_skills_still_layer_on_top_of_any_chosen_baseline(self):
+        # Local is this workbench's own output, not part of any baseline.
+        skill_service.save_skill(None, Skill(**DRAFT), domain="wifi", base={})
+        contrib = skill_service.list_skill_sources("wifi")[1]["path"]
+        pools = skill_service.load_shared_skills(wifi_source=contrib)
+        self.assertIn("Roam_Grade_Analysis", pools["wifi"])
+        self.assertIn("contrib_skill", pools["wifi"])
+
+    def test_an_unreadable_source_falls_back_instead_of_emptying_the_pool(self):
+        pools = skill_service.load_shared_skills(wifi_source=os.path.join(self.cache, "nope.yaml"))
+        self.assertEqual(set(pools["wifi"]), {"team_skill"})
+
+    def test_origins_report_the_kind_of_baseline_actually_chosen(self):
+        contrib = skill_service.list_skill_sources("wifi")[1]["path"]
+        self.assertEqual(skill_service.skill_origins("wifi")["team_skill"], "shared")
+        self.assertEqual(skill_service.skill_origins("wifi", contrib)["contrib_skill"],
+                         "contribution")
+
+    def test_switching_the_source_never_touches_the_local_file(self):
+        key = skill_service.save_skill(None, Skill(**DRAFT), domain="wifi", base={})
+        before = self.local_text()
+        contrib = skill_service.list_skill_sources("wifi")[1]["path"]
+        skill_service.load_shared_skills(wifi_source=contrib)
+        skill_service.load_shared_skills()
+        self.assertEqual(self.local_text(), before)
+        self.assertIn(key, skill_service.load_all_skills("wifi"))
+
+
 class SkillOriginTests(_LocalFileCase):
     def test_a_locally_saved_skill_reports_as_local(self):
         key = skill_service.save_skill(None, Skill(**DRAFT), domain="wifi", base={})

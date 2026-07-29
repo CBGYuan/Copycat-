@@ -246,84 +246,161 @@ def refresh_shared_cache() -> Dict[str, bool]:
     return refreshed
 
 
-def load_shared_skills() -> Dict[str, Dict]:
-    """Load every skill source and return:
-      {"wifi": {key: Skill}, "bt": {key: Skill}, "sources": {...}}
-    `wifi` is the merge of shared baseline -> this user's shared
-    contribution -> local data/skills/local/skills.yaml (later wins). `bt`
-    is the shared Bluetooth baseline -> local data/skills/local/
-    bt_skills.yaml (later wins) — same override shape as wifi, just without
-    a shared per-user contribution file for BT.
+def list_skill_sources(domain: str = "wifi") -> List[Dict]:
+    """Every YAML in the local mirror that can serve as this domain's baseline.
 
-    "shared baseline" / "contribution" here mean the LOCAL read-only mirror
-    (SKILLS_CACHE_*), NOT a live network read — see refresh_shared_cache(),
-    which is what actually keeps that mirror in sync with the real share.
-    This keeps every load (including the post-save app_config refresh in
-    skills_routes.py/learning_routes.py) fast and immune to the network
-    being unreachable mid-session; only a fresh app startup re-syncs it.
+    The mirror is a copy of the corp share (see refresh_shared_cache), so this
+    is "which version of the team's knowledge base am I standing on" — the
+    team baseline for the domain, plus, for WiFi, each engineer contribution
+    file found there. Entries are ordered baseline-first, then contributions
+    newest-first, and each carries enough to be chosen from a dropdown without
+    a second round-trip.
+    """
+    domain = "bt" if domain == "bt" else "wifi"
+    out: List[Dict] = []
+
+    def _entry(path: str, kind: str, label: str) -> Optional[Dict]:
+        if not path or not os.path.isfile(path):
+            return None
+        try:
+            mtime = datetime.fromtimestamp(os.path.getmtime(path)).isoformat(timespec="seconds")
+        except OSError:
+            mtime = None
+        return {
+            "key": os.path.basename(path),
+            "path": path,
+            "kind": kind,
+            "label": label,
+            "skill_count": len(_load_yaml_skills_from_path(path)),
+            "updated": mtime,
+        }
+
+    if domain == "wifi":
+        base = _entry(path_configs.SKILLS_CACHE_WIFI_PATH, "shared", "Team baseline (skills.yaml)")
+        if base:
+            out.append(base)
+        contribs = sorted(
+            glob.glob(os.path.join(path_configs.SKILLS_CACHE_USER_CONTRIB_DIR, "*.yaml")),
+            key=os.path.getmtime, reverse=True)
+        for path in contribs:
+            name = os.path.basename(path)
+            who = name.split("__")[0] if "__" in name else name
+            e = _entry(path, "contribution", f"{who}'s contribution ({name})")
+            if e:
+                out.append(e)
+    else:
+        base = _entry(path_configs.SKILLS_CACHE_BT_PATH, "shared", "Team baseline (bt_skills.yaml)")
+        if base:
+            out.append(base)
+    return out
+
+
+def default_source_path(domain: str = "wifi") -> str:
+    """The baseline used when nothing has been chosen: the team's own file for
+    this domain, which is what the app has always started on."""
+    return (path_configs.SKILLS_CACHE_BT_PATH if domain == "bt"
+            else path_configs.SKILLS_CACHE_WIFI_PATH)
+
+
+def load_shared_skills(wifi_source: Optional[str] = None,
+                       bt_source: Optional[str] = None) -> Dict[str, Dict]:
+    """Load each domain's pool and return:
+      {"wifi": {key: Skill}, "bt": {key: Skill}, "sources": {...}}
+
+    Each domain is exactly TWO layers: ONE chosen baseline file, then this
+    app's own local file on top (local wins).
+
+    `wifi_source` / `bt_source` name the baseline file — any entry from
+    list_skill_sources(); omitted means that domain's team file
+    (default_source_path). An unreadable or unknown path falls back to the
+    default rather than leaving the pool empty.
+
+    There is deliberately NO automatic contribution merge any more. It used to
+    stack shared -> this engineer's contribution -> local implicitly, which
+    meant the effective baseline was a three-way merge nobody could see or
+    reproduce: a skill could resolve from any of the three and the UI could
+    only say which one won after the fact. A contribution file is now simply
+    one of the baselines you can CHOOSE, and whatever is chosen is the whole
+    of it — which is also what makes "the inherited part is immutable and is
+    exactly this file" a statement that can be honoured (see
+    utils.skill_dedup.build_extension_skill).
+
+    "baseline" here means the LOCAL read-only mirror (SKILLS_CACHE_*), NOT a
+    live network read — see refresh_shared_cache(), which keeps that mirror in
+    sync with the real share. This keeps every load (including the post-save
+    app_config refresh in skills_routes.py/learning_routes.py) fast and immune
+    to the network being unreachable mid-session; only a fresh app startup
+    re-syncs it.
 
     `sources` records which paths actually loaded, for the startup log line.
     """
-    username = _current_username()
-    contrib_path = _find_user_contribution_path(username, path_configs.SKILLS_CACHE_USER_CONTRIB_DIR)
+    def _resolve(path: Optional[str], domain: str) -> str:
+        if path and os.path.isfile(path):
+            return path
+        return default_source_path(domain)
+
+    wifi_path = _resolve(wifi_source, "wifi")
+    bt_path = _resolve(bt_source, "bt")
 
     ensure_skills_file("wifi")
     ensure_skills_file("bt")
-    shared_wifi = _load_yaml_skills_from_path(path_configs.SKILLS_CACHE_WIFI_PATH)
-    contrib = _load_yaml_skills_from_path(contrib_path) if contrib_path else {}
+    base_wifi = _load_yaml_skills_from_path(wifi_path)
     local_wifi = _load_yaml_skills_from_path(path_configs.SKILLS_YAML_PATH)
-    shared_bt = _load_yaml_skills_from_path(path_configs.SKILLS_CACHE_BT_PATH)
+    base_bt = _load_yaml_skills_from_path(bt_path)
     local_bt = _load_yaml_skills_from_path(path_configs.SKILLS_BT_YAML_PATH)
 
     wifi: Dict[str, Skill] = {}
-    wifi.update(shared_wifi)
-    wifi.update(contrib)
+    wifi.update(base_wifi)
     wifi.update(local_wifi)
 
     bt: Dict[str, Skill] = {}
-    bt.update(shared_bt)
+    bt.update(base_bt)
     bt.update(local_bt)
 
     return {
         "wifi": wifi,
         "bt": bt,
         "sources": {
-            "shared_wifi": path_configs.SKILLS_CACHE_WIFI_PATH if shared_wifi else None,
-            "contribution": contrib_path if contrib else None,
+            "shared_wifi": wifi_path if base_wifi else None,
+            "wifi_source": wifi_path,
+            "bt_source": bt_path,
             "local": path_configs.SKILLS_YAML_PATH if local_wifi else None,
-            "bt": path_configs.SKILLS_CACHE_BT_PATH if shared_bt else None,
+            "bt": bt_path if base_bt else None,
             "local_bt": path_configs.SKILLS_BT_YAML_PATH if local_bt else None,
         },
     }
 
 
-def skill_origins(domain: str = "wifi") -> Dict[str, str]:
+def skill_origins(domain: str = "wifi", source_path: Optional[str] = None) -> Dict[str, str]:
     """Which FILE each visible skill key actually resolves from:
     "local" | "contribution" | "shared".
 
-    Same precedence as load_shared_skills' merge (local beats contribution
-    beats shared), so the answer is always the source whose content is the one
-    in play. The Skills page needs this to be honest about what can be edited:
-    only "local" entries are writable — everything else is a read-only mirror
-    of the corp drive, and Save on one of those mints a NEW local skill rather
-    than modifying the shared original (see save_skill).
+    Same two layers and precedence as load_shared_skills (local beats the
+    chosen baseline), so the answer is always the source whose content is the
+    one in play. "contribution" vs "shared" distinguishes only WHAT KIND of
+    baseline was chosen — both are read-only mirrors of the corp drive.
+
+    The Skills page needs this to be honest about what can be edited: only
+    "local" entries are writable, and Save on anything else mints a NEW local
+    skill rather than modifying the shared original (see save_skill).
     """
     domain = "bt" if domain == "bt" else "wifi"
-    origins: Dict[str, str] = {}
-    if domain == "wifi":
-        for key in _load_yaml_skills_from_path(path_configs.SKILLS_CACHE_WIFI_PATH):
-            origins[key] = "shared"
-        contrib_path = _find_user_contribution_path(
-            _current_username(), path_configs.SKILLS_CACHE_USER_CONTRIB_DIR)
-        if contrib_path:
-            for key in _load_yaml_skills_from_path(contrib_path):
-                origins[key] = "contribution"
-    else:
-        for key in _load_yaml_skills_from_path(path_configs.SKILLS_CACHE_BT_PATH):
-            origins[key] = "shared"
+    path = source_path if (source_path and os.path.isfile(source_path)) else default_source_path(domain)
+    kind = "contribution" if _is_contribution_path(path) else "shared"
+    origins: Dict[str, str] = {key: kind for key in _load_yaml_skills_from_path(path)}
     for key in _load_yaml_skills_from_path(_local_path(domain)):
         origins[key] = "local"
     return origins
+
+
+def _is_contribution_path(path: str) -> bool:
+    """A per-engineer contribution file rather than the team baseline — they
+    live in the mirror's user_contributions/ subfolder."""
+    try:
+        return os.path.basename(os.path.dirname(path or "")) == os.path.basename(
+            path_configs.SKILLS_CACHE_USER_CONTRIB_DIR)
+    except Exception:
+        return False
 
 
 def ensure_skills_file(domain: str = "wifi") -> None:

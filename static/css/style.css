@@ -1587,6 +1587,18 @@ a.btn-primary {
   gap: 16px; flex-wrap: wrap; margin-bottom: 14px;
 }
 .lib-head-actions { display: flex; align-items: center; gap: 8px; }
+.lib-head-main { min-width: 0; flex: 1 1 420px; }
+.lib-title-row { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; }
+
+/* Base-YAML picker — which file the pool below is read from. Sits beside the
+   title because it scopes everything on the page, not just one pane. */
+.lib-source { display: flex; align-items: center; gap: 7px; min-width: 0; }
+.lib-source label {
+  font-size: 0.68rem; font-weight: 700; text-transform: uppercase;
+  letter-spacing: 0.04em; color: var(--text-muted); margin: 0; white-space: nowrap;
+}
+.lib-source select { width: auto; min-width: 210px; max-width: 340px; font-size: 0.78rem; }
+.lib-source-meta { font-size: 0.68rem; color: var(--text-muted); white-space: nowrap; }
 
 .lib-grid {
   display: grid; grid-template-columns: minmax(280px, 4fr) 6fr; gap: 14px;
