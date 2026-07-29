@@ -249,6 +249,24 @@ a.btn-primary {
   padding: 8px 10px; margin-bottom: 14px; font-size: 0.8rem; color: #6b5300;
 }
 .skm-diff-banner b { color: #4a3a00; }
+
+/* Per-draft notices — what used to be a chain of native alert() dialogs fired
+   before this modal opened. Stacked at the top of the body so they stay
+   readable while the fields they describe are being edited. */
+.skm-notices { display: flex; flex-direction: column; gap: 8px; }
+.skm-notices:not(:empty) { margin-bottom: 14px; }
+.skm-notice {
+  display: flex; align-items: flex-start; gap: 8px;
+  padding: 8px 10px; border-radius: 8px;
+  font-size: 0.78rem; line-height: 1.5;
+}
+.skm-notice-icon { flex: 0 0 auto; line-height: 1.4; }
+.skm-notice-info { background: #f5faff; border: 1px solid #b7d9f5; color: var(--primary-dark); }
+.skm-notice-warn { background: #fffdf3; border: 1px solid var(--warn); color: #6b5300; }
+.skm-notice-list {
+  margin: 5px 0 0; padding-left: 18px;
+  font-family: Consolas, "Courier New", monospace; font-size: 0.72rem;
+}
 .chip.chip-new {
   border-color: #2fa45a; background: #f1faf3; color: #1e7a40;
 }
@@ -1540,6 +1558,24 @@ a.btn-primary {
    question-card family it reuses the option/custom-answer layout from. */
 .step-ask-card { border-color: #b7d9f5 !important; background: #f5faff; }
 .step-ask-skip-row { display: flex; justify-content: flex-end; margin-top: 4px; }
+
+/* Export baseline indicator (Log Viewer) — shown only when the skill the next
+   Export inherits from is NOT the one whose keywords are in the filter table.
+   Blue, matching "came from the parent/cloud side" everywhere else. */
+.export-baseline-badge {
+  display: flex; align-items: center; gap: 6px;
+  margin-top: 6px; padding: 4px 8px;
+  border: 1px solid var(--primary-light); border-radius: 8px;
+  background: #eef6fd; color: var(--primary-dark);
+  font-size: 0.7rem;
+}
+.export-baseline-badge b { font-weight: 700; }
+.export-baseline-clear {
+  margin-left: auto; background: transparent; border: none;
+  color: var(--primary-dark); opacity: 0.6; font-size: 1rem; line-height: 1;
+  padding: 0 2px;
+}
+.export-baseline-clear:hover { opacity: 1; color: var(--bad); }
 
 /* ===== Skill Library (templates/skills.html) =============================
    Two panes: a lineage forest on the left, a version trail on the right.

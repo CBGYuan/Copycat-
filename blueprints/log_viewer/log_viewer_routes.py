@@ -145,8 +145,15 @@ def index():
     state = session_store.get_state()
     llm_ready = bool(app_config.llm_helper and app_config.llm_helper.is_ready)
     session_usage = app_config.llm_helper.session_usage if llm_ready else None
+    # Name of the skill the next Export inherits from, resolved across BOTH
+    # pools: the baseline can be set from the Skill Library, which lists WiFi
+    # and BT together, so looking it up in only one pool would silently render
+    # an empty badge for a BT baseline.
+    baseline = (app_config.skills.get(state.active_skill_key)
+                or app_config.bt_skills.get(state.active_skill_key))
     return render_template("log_viewer.html", state=state, skills=app_config.skills,
-                            llm_ready=llm_ready, session_usage=session_usage)
+                            llm_ready=llm_ready, session_usage=session_usage,
+                            baseline_skill_name=baseline.name if baseline else "")
 
 
 RAW_PREVIEW_LINES = 500
@@ -407,6 +414,10 @@ def pick_tat():
         return jsonify({"success": False, "message": "File not found"}), 400
     state = session_store.get_state()
     state.tat_path = path
+    # A raw .tat file replaces the filter set, so no skill produced what is on
+    # screen any more. The teaching baseline (active_skill_key) is left alone —
+    # loading a .tat is not a statement about what the export should inherit.
+    state.filter_skill_key = ""
     try:
         state.filters = tat_parser.parse_filter_file(path)
     except Exception as e:
@@ -425,7 +436,10 @@ def load_skill():
         return jsonify({"success": False, "message": "Skill not found"}), 404
 
     state = session_store.get_state()
+    # Both, because this route is the one place that does both things: it makes
+    # the skill the teaching baseline AND puts its keywords on screen.
     state.active_skill_key = skill_key
+    state.filter_skill_key = skill_key
     if skill.tat_path and os.path.exists(skill.tat_path):
         state.tat_path = skill.tat_path
         state.filters = tat_parser.parse_filter_file(skill.tat_path)

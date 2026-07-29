@@ -145,6 +145,7 @@ def restore_route(skill_key):
     return jsonify({"success": True, "skill_key": saved})
 
 
+@skills_bp.route("/activate", methods=["POST"], defaults={"skill_key": ""})
 @skills_bp.route("/activate/<skill_key>", methods=["POST"])
 def activate(skill_key):
     """Mark a skill as the LOADED skill for this session — the same slot
@@ -157,7 +158,10 @@ def activate(skill_key):
         return jsonify({"success": False, "message": "Skill not found"}), 404
     state = session_store.get_state()
     state.active_skill_key = skill_key or ""
-    return jsonify({"success": True, "active_key": state.active_skill_key})
+    skill = (app_config.skills.get(state.active_skill_key)
+             or app_config.bt_skills.get(state.active_skill_key))
+    return jsonify({"success": True, "active_key": state.active_skill_key,
+                    "active_name": skill.name if skill else ""})
 
 
 @skills_bp.route("/get/<skill_key>")

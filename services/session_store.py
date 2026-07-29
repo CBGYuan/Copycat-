@@ -108,8 +108,23 @@ class WorkingState:
         self.learning_questions: list = []
         self.learning_answers: list = []
         self.skill_draft: list = []        # list of draft skill dicts from the last /learning/converge (usually 1, can be more — see synthesize_skill_draft)
-        self.active_skill_key: str = ""    # skill currently loaded/being taught, if any
-        self.round_count: int = 0          # how many "Log Round & Analyze" clicks this session
+        # TWO different questions, deliberately kept as two fields — one field
+        # answering both is what made the Log Viewer's skill dropdown lie.
+        #
+        #   active_skill_key — the skill this TEACHING SESSION is built on:
+        #     what the interview treats as already-known, what route_draft
+        #     checks for continuity, and what the next Export inherits from.
+        #     Set by log_viewer.load_skill AND by the Skill Library's
+        #     "Load as baseline" (which deliberately does not touch filters).
+        #
+        #   filter_skill_key — which skill PRODUCED the filter set currently on
+        #     screen, or "" when the filters came from a raw .tat file or were
+        #     built by hand. Only the Log Viewer's own load_skill sets this,
+        #     and pick_tat clears it. This is the one the dropdown renders, so
+        #     it can never show a skill whose keywords aren't actually loaded.
+        self.active_skill_key: str = ""
+        self.filter_skill_key: str = ""
+        self.round_count: int = 0          # how many analysis rounds this session
         # Conversation mode, set by which Log Round button was used and sticky
         # for the rest of the session (the interview questions, the per-answer
         # assessment, and the final export all read it): False = teach from

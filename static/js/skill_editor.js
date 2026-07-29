@@ -24,6 +24,8 @@
     // /learning/converge + utils.skill_dedup.build_extension_skill). Drives
     // the blue "INH" vs green "NEW" split below.
     lineageInfo: null,
+    // Caller-supplied banners about this draft (see renderNotices).
+    notices: [],
     teachingEvidence: null,
     domain: "wifi",
     // Ancestry of whatever was opened. Held verbatim and sent straight back on
@@ -175,6 +177,31 @@
   // Summary strip above the form when this draft extends an existing skill —
   // spells out counts so the highlighted chips/rules below aren't the only
   // signal that something is being added rather than freshly created.
+  // Caller-supplied notices about this draft, rendered as stacked banners
+  // instead of the chain of native alert() dialogs this used to be. Each is
+  // {kind: "info"|"warn"|"lineage", icon, title, body, list}.
+  function renderNotices() {
+    const box = document.getElementById("skm-notices");
+    if (!box) return;
+    const notices = state.notices || [];
+    if (!notices.length) {
+      box.innerHTML = "";
+      return;
+    }
+    box.innerHTML = notices
+      .map((n) => {
+        const list = (n.list || []).length
+          ? `<ul class="skm-notice-list">${n.list.map((i) => `<li>${escapeHtml(i)}</li>`).join("")}</ul>`
+          : "";
+        const title = n.title ? `<b>${escapeHtml(n.title)}</b> ` : "";
+        return `<div class="skm-notice skm-notice-${escapeHtml(n.kind || "info")}">
+          <span class="skm-notice-icon">${escapeHtml(n.icon || "")}</span>
+          <div>${title}${escapeHtml(n.body || "")}${list}</div>
+        </div>`;
+      })
+      .join("");
+  }
+
   function renderDiffBanner() {
     const el = document.getElementById("skm-diff-banner");
     // An inheritance draft has its own banner: it must state the legend for
@@ -291,6 +318,7 @@
     // highlighting on chips/rules below plus the summary banner.
     state.diff = data.diff || null;
     state.lineageInfo = data.lineage_info || null;
+    state.notices = options.notices || [];
     state.teachingEvidence = data.teaching_evidence || null;
     state.domain = data.domain || "wifi";
     state.parent = data.parent || null;
@@ -317,6 +345,7 @@
     document.getElementById("skm-preamble").value = state.preamble;
     document.getElementById("skm-delete-btn").style.display = state.options.deleteUrl ? "inline-block" : "none";
 
+    renderNotices();
     renderDiffBanner();
     renderVerificationBanner();
     renderChips("skm-keywords", state.keywords, newKwSet(), inhKwSet());

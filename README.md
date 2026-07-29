@@ -246,6 +246,18 @@ A two-pane page (`/skills/`) for everything the workbench can see.
   deliberately does *not* replace the filters on screen — the Log Viewer's own
   skill dropdown owns that.
 
+Those are two genuinely different things, so they are two separate pieces of
+state and two separate controls:
+
+| | what it answers | set by |
+|---|---|---|
+| the Log Viewer's **skill dropdown** | whose keywords are on screen right now | loading a skill in the Log Viewer (cleared by opening a raw `.tat`) |
+| the **"Export inherits from" badge** | what the next Export inherits from | "Load as baseline" in the Skill Library, or loading a skill in the Log Viewer |
+
+The badge appears only when the two differ — which is exactly the state that
+used to be invisible and made the dropdown look like it was lying. Its `×`
+drops the inheritance without touching the filters.
+
 Three rules the restore path holds to:
 
 1. **Restore moves the version forward, never backward.** Restoring v0.1.1
@@ -308,8 +320,17 @@ utils/
                                   builder, lineage-depth + description-conflict
                                   guards (zero LLM cost)
   file_picker.py, browser_utils.py, helpers.py, json_utils.py
-templates/, static/           log_viewer.html (main workbench), skills.html,
-                                shared skill_editor.js modal, style.css
+templates/                    log_viewer.html (main workbench markup + a
+                                single bootstrap object of server values),
+                                skills.html (Skill Library), base.html
+static/js/
+  log_viewer.js               All Log Viewer behaviour. Kept out of the
+                                template so the browser can cache it, editors
+                                can lint it, and a stale copy shows up as a
+                                stale file rather than silently inside a
+                                re-rendered page. Reads server values only
+                                through the `LV` object the template defines.
+  skill_editor.js             The shared Edit-Skill modal
 tests/                          Unit tests for the learning pipeline
                                   (see Tests below)
 data/skills/

@@ -275,9 +275,15 @@ def _filter_signature(state) -> str:
     re-baseline against the engineer's own edit — erasing the comparison and
     costing an LLM call per click. Loading a different .tat/skill DOES change
     the text set, which is the case that should invalidate it.
+
+    Keys off filter_skill_key, NOT active_skill_key: this is the identity of
+    what is on screen. Choosing a different export baseline from the Skill
+    Library changes active_skill_key without touching a single filter, and
+    folding that in here would mark the baseline stale and burn an LLM call
+    re-reading a filter set that did not change.
     """
     texts = sorted(f"{f['text']}\x00{int(bool(f['excluding']))}" for f in state.filters)
-    return f"{state.tat_path}\x01{state.active_skill_key}\x01" + "\x02".join(texts)
+    return f"{state.tat_path}\x01{state.filter_skill_key}\x01" + "\x02".join(texts)
 
 
 @learning_bp.route("/baseline", methods=["POST"])
