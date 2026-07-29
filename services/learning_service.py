@@ -176,6 +176,87 @@ Output ONLY this JSON object, no markdown fences, no extra prose:
 }
 """
 
+# The BASELINE read: a committed, falsifiable interpretation of the default
+# filter set, formed BEFORE the engineer has touched anything.
+#
+# Why it must be structured rather than prose: this object is the null
+# hypothesis that every later engineer action is diffed against (see
+# analyze_baseline). Prose can't be diffed — "did the engineer disable
+# something this read called load-bearing?" is only answerable if the read
+# committed to a NAMED list up front. That diff is what turns the
+# ClarifyGPT ambiguity gate from LLM-self-reported ("do I feel uncertain?")
+# into an observable divergence between two concrete interpretations.
+#
+# `open_unknowns` is load-bearing for the same reason, in the opposite
+# direction: it's what lets a later engineer action be classified as an
+# OMISSION (the read never had a view on this) rather than a CONTRADICTION
+# (the read committed, and the engineer went the other way). Only the latter
+# deserves a discriminating question; omissions are provenance gaps and
+# belong to the Steps panel's own explain path.
+#
+# Deliberately asks NO questions: nobody has said anything to clarify yet.
+BASELINE_SYS_PROMPT = """\
+You are a senior Wi-Fi/BT debug expert. A log has just been opened with a
+filter set that the engineer has NOT yet modified — it came wholesale from a
+.tat file or a saved skill. Nobody has explained anything to you yet.
+
+Give your OWN first read of what this default filter appears to be looking
+for. This read is a COMMITTED PREDICTION: the engineer is about to start
+adjusting the filter, and their adjustments will be compared against what you
+say here. So be specific and falsifiable, and keep the two halves honest:
+
+ - Things you genuinely believe from the evidence in front of you go in
+   `expected_key_keywords` / `expected_noise_keywords` / `expected_scenario`.
+   Name ACTUAL keyword strings from the filter set shown below, never invented
+   ones. Ground each `why` in a hit count, a co-occurrence, or a sample line,
+   in ONE short clause.
+ - Things the default filter alone genuinely cannot tell you go in
+   `open_unknowns`. Do NOT pad the believed lists with guesses to look
+   thorough — a wrong "key keyword" here manufactures a fake disagreement
+   later, while an honest unknown costs nothing. When in doubt, put it in
+   `open_unknowns`.
+
+Be STRICT about what counts as key. List a keyword in `expected_key_keywords`
+only if you would actively push back were the engineer to disable it — that
+is exactly how this list gets used. Two consequences:
+ - A keyword whose hits are almost entirely already caught by other keywords
+   (low `unique_hits` relative to `hits`) is REDUNDANT, not load-bearing,
+   however structurally important it looks. It does not belong in the key
+   list.
+ - Listing every include-keyword as key is always wrong. If the filter set
+   really is uniformly essential, say so in `open_unknowns` instead and keep
+   the key list to the ones you would genuinely defend.
+A high hit count alone is not evidence of importance — a very noisy keyword
+may equally be the housekeeping chatter the engineer is about to cut.
+
+Also say how you WOULD locate the moment the issue happened in a log like
+this (`expected_issue_time_hint`) — e.g. which line pattern or which event
+would mark it. If nothing in the evidence supports a guess, use null.
+
+DO NOT ask the engineer any questions. There is no answer to clarify against
+yet; your job here is only to commit to a starting interpretation.
+
+ASSESS the starting point honestly: no engineer knowledge has been
+contributed yet, so readiness and the knowledge/scope coverage scores must
+reflect the default filter ALONE and start LOW. `gaps` = what a reusable
+skill would still need beyond what the filter itself shows. `validation` MUST
+be an empty array — the engineer has asserted nothing yet, so there is
+nothing to sanity-check.
+
+""" + _SKILL_GOALS + """
+
+Output ONLY this JSON object, no markdown fences, no extra prose:
+{
+  "analysis": "<2-4 sentences, your first read, for the engineer to see>",
+  "expected_scenario": "<ONE sentence: the scenario this default filter appears to target>",
+  "expected_key_keywords": [{"text": "<exact keyword from the filter set>", "why": "<grounded in a hit count / co-occurrence / sample line>"}],
+  "expected_noise_keywords": [{"text": "<exact keyword from the filter set>", "why": "<why you read it as low-signal>"}],
+  "expected_issue_time_hint": "<how you would locate the issue moment, or null>",
+  "open_unknowns": ["<what the default filter alone cannot tell you>", "..."],
+""" + _ASSESS_JSON + """
+}
+"""
+
 # The interview runs in one of two CONVERSATION MODES, chosen by the two Log
 # Round buttons and sticky for the whole session. The mode changes WHAT the
 # LLM probes for — appended to both the Log-Round and per-answer-assess system
@@ -350,6 +431,154 @@ omit it). Each `description` must be mutually exclusive from every skill in
 """
 
 
+# Asked when the engineer's action CONTRADICTS the committed baseline read
+# (utils.divergence: the read called a keyword load-bearing and they cut it,
+# or called it noise and they promoted it).
+#
+# This is the one place in the app that genuinely meets ClarifyGPT's bar
+# without having to ask a model to introspect about its own uncertainty: two
+# concrete readings are already on the table and they keep DIFFERENT lines,
+# which is an observable behavioural difference, not a feeling. So the prompt
+# doesn't need to establish that a question is warranted — divergence.detect
+# already established it — and its only job is to make the one question
+# actually discriminate.
+#
+# The scope axis ("always, or only in this scenario?") is mandatory because it
+# is what the skill needs: "always noise" makes the keyword a permanent
+# `exclusive` entry, "only here" makes it a conditional expert_rule. A
+# question that merely extracts "because it's noise" leaves that undecided and
+# the export has to guess.
+#
+# Tone matters for a non-obvious reason: this system captures teaching, it does
+# not adjudicate correctness (correctness is measured externally, by running
+# the skill in wireless_ce_avatar). A question implying the engineer must
+# justify themselves against the model's read would both misrepresent that
+# boundary and, in practice, get shorter and more defensive answers.
+CLARIFY_SYS_PROMPT = """\
+You are a senior Wi-Fi/BT debug expert. Earlier you committed to a first read
+of a filter set. The engineer has since done something your read did not
+expect. Both readings are plausible; they simply keep different log lines.
+
+Ask exactly ONE question that DISCRIMINATES between them — its answer must
+settle which behaviour is right for a reusable skill. Requirements:
+
+ - Ground it in the specific keyword and its MEASURED effect (the hit counts
+   below), not in generalities.
+ - Cover the scope axis: does the engineer's treatment hold ALWAYS for this
+   kind of log, or ONLY in this scenario? This is the part a reusable skill
+   cannot be written without.
+ - Options, when you use them, must be BEHAVIOURS ("always exclude it",
+   "exclude only when X is present"), never opinions ("it's noise").
+ - Do NOT ask the engineer to justify themselves and do NOT defend your
+   earlier read. You are not judging who is correct — you are capturing what
+   the engineer knows that your read did not. Never imply either side is
+   wrong.
+ - No preamble, no apology, no restating the situation back to them. One
+   question, in an engineer's register.
+ - LENGTH: the question itself must be at most 25 words and a single sentence,
+   and each option at most 12 words. It renders in a narrow chat column, and a
+   paragraph-length question with four clause-heavy options gets skipped
+   rather than answered — which costs you the knowledge entirely. Put the
+   nuance in the options' distinctions, not in a longer question stem.
+
+Question `type` is either:
+ - "choice": you can enumerate the realistic behaviours — give 2-4 concrete
+   options. Do NOT add an "Other" option; the UI already offers free text.
+ - "open": genuinely open-ended, no small fixed set of sensible answers.
+
+Output ONLY this JSON object, no markdown fences, no extra prose:
+{
+  "question": {"question": "<one discriminating question>", "type": "choice|open", "options": ["<behaviour A>", "<behaviour B>"]},
+  "captures": "<the one short sentence of skill knowledge this answer will pin down>"
+}
+"""
+
+# Asked once when the engineer sets an issue-time focus window. Not a
+# contradiction — a focus doesn't change what any keyword means — but "how did
+# you know to look at 09:41?" is often the most transferable thing in a whole
+# triage session, and it is invisible in the filter set, so nothing else in
+# this pipeline would ever capture it.
+CLARIFY_FOCUS_SYS_PROMPT = """\
+You are a senior Wi-Fi/BT debug expert. The engineer has narrowed the log to a
+window around a specific issue time. How they knew to look THERE is reusable
+diagnostic knowledge that the filter set alone does not encode.
+
+Ask exactly ONE short question that pins down the LOCATING RULE — what signal
+told them the problem was at that moment, in a form someone else could follow
+on a different log of the same kind. If your own read proposed a way to locate
+the issue and they picked a different moment, contrast the two concretely
+rather than asking a blank "why". Do not ask them to justify the choice; ask
+what the tell was.
+
+LENGTH: the question itself must be at most 25 words and a single sentence,
+and each option at most 12 words. It renders in a narrow chat column, and a
+paragraph-length question with clause-heavy options gets skipped rather than
+answered — which costs you the knowledge entirely. Put the nuance in the
+options' distinctions, not in a longer question stem.
+
+Output ONLY this JSON object, no markdown fences, no extra prose:
+{
+  "question": {"question": "<one question>", "type": "choice|open", "options": ["<concrete locating signal A>", "<B>"]},
+  "captures": "<the one short sentence of skill knowledge this answer will pin down>"
+}
+"""
+
+
+def clarify_divergence(llm_helper, target: Dict, use_prior_knowledge: bool = False) -> Optional[Dict]:
+    """One discriminating question about ONE divergence (utils.divergence).
+
+    `target` is either
+      {"kind": "contradiction", "text", "action_phrase", "effect_phrase",
+       "baseline_stance", "baseline_why", "domain"}
+    or
+      {"kind": "focus", "center", "window_min", "baseline_hint", "domain"}
+
+    Returns {"question": {...}, "captures": str} or None if the model produced
+    nothing usable — None is a normal outcome the caller must handle by simply
+    not interrupting, never by falling back to a generic question (a
+    non-discriminating question is exactly what the ambiguity gate exists to
+    prevent).
+    """
+    if target.get("kind") == "focus":
+        system = CLARIFY_FOCUS_SYS_PROMPT
+        lines = [
+            f"Domain: {(target.get('domain') or 'wifi').upper()}",
+            f"The engineer focused on: {target.get('center')} (±{target.get('window_min')} minutes)",
+        ]
+        if target.get("baseline_hint"):
+            lines.append("Your earlier read proposed locating the issue this way:\n"
+                         f"  {target['baseline_hint']}")
+        else:
+            lines.append("Your earlier read had no proposal for locating the issue moment.")
+    else:
+        system = CLARIFY_SYS_PROMPT
+        stance = target.get("baseline_stance")
+        stance_txt = ("load-bearing for this scenario" if stance == "key"
+                      else "low-signal noise")
+        lines = [
+            f"Domain: {(target.get('domain') or 'wifi').upper()}",
+            f"Keyword: \"{target.get('text')}\"",
+            f"Your earlier read called it {stance_txt}, because: {target.get('baseline_why') or '(no reason recorded)'}",
+            f"What the engineer just did: {target.get('action_phrase')}",
+            f"Measured effect of that action: {target.get('effect_phrase') or '(no effect measured)'}",
+        ]
+
+    raw = llm_helper.chat(
+        messages=[{"role": "user", "content": "\n\n".join(lines)}],
+        system_content=_interview_system_prompt(system, use_prior_knowledge),
+        temperature=0.3,
+        max_tokens=700,
+    )
+    parsed = parse_json_loose(raw)
+    if not parsed:
+        print(f"⚠️  clarify_divergence: could not parse LLM output as JSON ({len(raw)} chars).")
+        return None
+    question = _normalize_question(parsed.get("question"))
+    if not question:
+        return None
+    return {"question": question, "captures": str(parsed.get("captures") or "").strip()}
+
+
 def _build_context_block(context: Dict) -> str:
     lines = [
         f"Domain: {(context.get('domain') or 'wifi').upper()} — only route/compare against "
@@ -462,6 +691,28 @@ def _build_context_block(context: Dict) -> str:
             "Existing skills, same domain as this log (decide overlap/extend-vs-new "
             "against these; keep any new description mutually exclusive from them):\n" + rows
         )
+
+    # The LOADED skill, called out separately from the list above. It is not
+    # just one more skill to stay clear of: the export will physically copy all
+    # of its keywords into the new skill (flat inheritance — see
+    # utils.skill_dedup.build_extension_skill), so the two WILL be
+    # keyword-identical apart from what this session added, and the
+    # description is the only field left that can distinguish them. One extra
+    # line of prompt, in exchange for the failure it prevents.
+    baseline = context.get("baseline_skill")
+    if baseline:
+        lines.append(
+            f"BASELINE SKILL (currently loaded): {baseline['name']} "
+            f"(key: {baseline['key']}) — {baseline['description']}\n"
+            "  The skill you emit will INHERIT every keyword of this baseline, so a "
+            "downstream agent choosing between them sees two entries with the same "
+            "filters and can only go by the description. Write this skill's "
+            "`description` so it names the narrower situation THIS session is about, "
+            "and so a reader could decide which of the two to reach for without "
+            "looking at anything else. Never restate or lightly reword the baseline's "
+            "description."
+        )
+
     sample = context.get("sample_lines") or []
     if sample:
         # Caller (learning_routes._sample_lines) already picked the right
@@ -619,6 +870,91 @@ def analyze_round(llm_helper, context: Dict, round_num: int,
             "requires_clarification": requires_clarification,
             "divergent_behaviors": divergent if requires_clarification else [],
         },
+        "assessment": _parse_assessment(parsed, context.get("log_annotations")) if parsed else None,
+    }
+
+
+def _normalize_prediction(raw_list, known_texts: Dict[str, str]) -> List[Dict]:
+    """Coerce one of the baseline's predicted keyword lists into
+    [{text, why}], keeping ONLY entries whose text actually exists in the
+    current filter set.
+
+    The filter is the point, not defensive tidying: this list is the thing
+    later engineer actions get diffed against, so an invented or paraphrased
+    keyword would manufacture a permanent phantom disagreement that the
+    engineer can never resolve (they can't "restore" a keyword that was never
+    in their filter). Matching is case-insensitive against the filter's own
+    spelling, and the stored `text` is snapped back to that spelling so the
+    diff compares like with like.
+    """
+    out: List[Dict] = []
+    seen = set()
+    for item in raw_list or []:
+        if isinstance(item, str):
+            text, why = item.strip(), ""
+        elif isinstance(item, dict):
+            text, why = str(item.get("text") or "").strip(), str(item.get("why") or "").strip()
+        else:
+            continue
+        canonical = known_texts.get(text.lower())
+        if not canonical or canonical in seen:
+            continue
+        seen.add(canonical)
+        out.append({"text": canonical, "why": why})
+    return out
+
+
+def analyze_baseline(llm_helper, context: Dict, use_prior_knowledge: bool = False) -> Dict:
+    """The LLM's own first read of a freshly-loaded default filter set, before
+    the engineer has edited anything — a committed, structured prediction plus
+    a starting assessment.
+
+    This is the null hypothesis the rest of the session is measured against.
+    `expected_key_keywords` / `expected_noise_keywords` are what make the
+    later divergence check deterministic (the engineer disabling something
+    listed as key is an observable CONTRADICTION, no LLM judgment needed),
+    and `open_unknowns` is what keeps an OMISSION — an engineer action on
+    something this read had no view about — from being mistaken for one.
+
+    Returns the same {analysis, ..., assessment} envelope shape as
+    analyze_round, including assessment=None on a total parse failure, so
+    callers can treat both uniformly. Asks no questions by construction.
+    """
+    user_prompt = _build_context_block(context)
+    raw = llm_helper.chat(
+        messages=[{"role": "user", "content": user_prompt}],
+        system_content=_interview_system_prompt(BASELINE_SYS_PROMPT, use_prior_knowledge),
+        temperature=0.3,
+        max_tokens=3000,
+    )
+    parsed = parse_json_loose(raw)
+    if not parsed:
+        print(f"⚠️  analyze_baseline: could not parse LLM output as JSON ({len(raw)} chars). "
+              f"Raw tail: ...{raw[-200:]!r}")
+    parsed = parsed or {}
+
+    # Every keyword currently in the filter set, by lowercased text -> the
+    # filter's own spelling. Both include- and exclude-side entries count:
+    # the baseline is allowed to have a view on a noise term too.
+    known_texts = {}
+    for pf in ((context.get("filter_stats") or {}).get("per_filter") or []):
+        text = str(pf.get("text") or "").strip()
+        if text:
+            known_texts.setdefault(text.lower(), text)
+
+    analysis = str(parsed.get("analysis") or "").strip()
+    if not analysis:
+        analysis = "⚠️ The baseline read couldn't be parsed — the filter is loaded, but there's no starting interpretation to compare against."
+    hint = parsed.get("expected_issue_time_hint")
+    hint = str(hint).strip() if hint and str(hint).strip().lower() not in ("null", "none") else ""
+
+    return {
+        "analysis": analysis,
+        "expected_scenario": str(parsed.get("expected_scenario") or "").strip(),
+        "expected_key_keywords": _normalize_prediction(parsed.get("expected_key_keywords"), known_texts),
+        "expected_noise_keywords": _normalize_prediction(parsed.get("expected_noise_keywords"), known_texts),
+        "expected_issue_time_hint": hint,
+        "open_unknowns": [str(u).strip() for u in (parsed.get("open_unknowns") or []) if str(u).strip()],
         "assessment": _parse_assessment(parsed, context.get("log_annotations")) if parsed else None,
     }
 

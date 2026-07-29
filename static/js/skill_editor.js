@@ -19,8 +19,18 @@
     rules: [],       // array of raw rule-block strings (each may be multi-line)
     preamble: "",
     diff: null,      // {new_keywords, new_exclusive, rules_added_text} from an extend-draft, or null
+    // {parent_name, inherited_keywords, inherited_exclusive, ...} when this
+    // draft was rebuilt on a LOADED skill's framework (see
+    // /learning/converge + utils.skill_dedup.build_extension_skill). Drives
+    // the blue "INH" vs green "NEW" split below.
+    lineageInfo: null,
     teachingEvidence: null,
     domain: "wifi",
+    // Ancestry of whatever was opened. Held verbatim and sent straight back on
+    // save: the editor never sets or reasons about it, it only makes sure a
+    // trip through this modal doesn't erase it.
+    parent: null,
+    lineage: [],
     options: {},
   };
 
@@ -30,10 +40,18 @@
     return div.innerHTML;
   }
 
+  // The boundary build_extension_skill writes between inherited rules and the
+  // ones added this session. Matched loosely (marker text only, not the whole
+  // generated sentence) so a re-worded label doesn't break the split.
+  const INHERIT_MARKER_RE = /^#\s*─*\s*Extension:/;
+
   // Split "expert_rules" free text into a preamble (everything before the
   // first top-level numbered item) + a list of rule blocks. Sub-numbering
   // like "2-1." / "3-2." does NOT start a new block (it stays nested inside
   // the block it follows) — only "<digits>. " at the start of a line does.
+  // The inheritance marker also starts a block, so it becomes its own entry
+  // and can be drawn as a divider instead of being swallowed by the last
+  // inherited rule (which is where it would otherwise land).
   function splitExpertRules(text) {
     const lines = (text || "").split("\n");
     const topLevelRe = /^\d+\.\s/;
@@ -42,7 +60,11 @@
     let current = null;
     let inPreamble = true;
     for (const line of lines) {
-      if (topLevelRe.test(line)) {
+      if (INHERIT_MARKER_RE.test(line)) {
+        if (current !== null) blocks.push(current.join("\n").replace(/\s+$/, ""));
+        current = [line];
+        inPreamble = false;
+      } else if (topLevelRe.test(line)) {
         if (current !== null) blocks.push(current.join("\n").replace(/\s+$/, ""));
         current = [line];
         inPreamble = false;
@@ -77,12 +99,19 @@
     return { pct: 100, label: "Strong", cls: "strong" };
   }
 
-  function renderChips(containerId, list, newSet) {
+  // `inheritedSet` is only non-null for a draft built on a LOADED parent. When
+  // it is, EVERY chip gets an explicit category — blue INH (came from the
+  // parent) or green NEW (taught this session) — rather than new chips being
+  // green and everything else unmarked. With 19 inherited and 1 new, "unmarked"
+  // reads as "the default", which is the opposite of what it means here.
+  function renderChips(containerId, list, newSet, inheritedSet) {
     const box = document.getElementById(containerId);
     box.innerHTML = list
       .map((val, i) => {
-        const isNew = newSet && newSet.has(val);
-        return `<span class="chip${isNew ? " chip-new" : ""}">${escapeHtml(val)}<button type="button" class="chip-x" data-list="${containerId}" data-idx="${i}">&times;</button></span>`;
+        let cls = "";
+        if (inheritedSet) cls = inheritedSet.has(val) ? " chip-inherited" : " chip-new";
+        else if (newSet && newSet.has(val)) cls = " chip-new";
+        return `<span class="chip${cls}">${escapeHtml(val)}<button type="button" class="chip-x" data-list="${containerId}" data-idx="${i}">&times;</button></span>`;
       })
       .join("");
   }
@@ -100,14 +129,39 @@
     const addedLines = state.diff && state.diff.rules_added_text
       ? new Set(state.diff.rules_added_text.split("\n").map((l) => l.trim()).filter(Boolean))
       : null;
+    // On an inheritance draft the marker block IS the boundary — everything
+    // before it came from the parent, everything after was added this session.
+    // No text comparison needed: build_extension_skill guarantees that order.
+    const markerIdx = state.lineageInfo
+      ? state.rules.findIndex((r) => INHERIT_MARKER_RE.test(r.split("\n")[0] || ""))
+      : -1;
+
+    let ruleNo = 0;
     box.innerHTML = state.rules
       .map((r, i) => {
-        const isNew = addedLines && r.split("\n").some((l) => addedLines.has(l.trim()));
+        if (i === markerIdx) {
+          // Not an editable rule — a labelled separator. It stays in
+          // state.rules so joinExpertRules writes it back out unchanged.
+          return `<div class="rule-divider"><span>added in this session</span></div>`;
+        }
+        ruleNo += 1;
+        let cls = "";
+        let tag = "";
+        if (markerIdx >= 0) {
+          const inherited = i < markerIdx;
+          cls = inherited ? " rule-point-inherited" : " rule-point-new";
+          tag = inherited
+            ? '<span class="rule-point-inh-tag">INH</span>'
+            : '<span class="rule-point-new-tag">NEW</span>';
+        } else if (addedLines && r.split("\n").some((l) => addedLines.has(l.trim()))) {
+          cls = " rule-point-new";
+          tag = '<span class="rule-point-new-tag">NEW</span>';
+        }
         return `
-      <div class="rule-point${isNew ? " rule-point-new" : ""}">
-        <span class="rule-badge">${i + 1}</span>
+      <div class="rule-point${cls}">
+        <span class="rule-badge">${ruleNo}</span>
         <textarea class="form-control form-control-sm rule-text" data-idx="${i}" rows="${Math.min(6, Math.max(2, r.split("\n").length))}">${escapeHtml(r)}</textarea>
-        ${isNew ? '<span class="rule-point-new-tag">NEW</span>' : ""}
+        ${tag}
         <div class="rule-actions">
           <button type="button" class="btn btn-sm btn-outline-secondary" data-act="up" data-idx="${i}" title="Move up">&uarr;</button>
           <button type="button" class="btn btn-sm btn-outline-secondary" data-act="down" data-idx="${i}" title="Move down">&darr;</button>
@@ -123,6 +177,23 @@
   // signal that something is being added rather than freshly created.
   function renderDiffBanner() {
     const el = document.getElementById("skm-diff-banner");
+    // An inheritance draft has its own banner: it must state the legend for
+    // the two colours, because here almost everything on screen is inherited
+    // and the handful of new items is what the engineer came to review.
+    const li = state.lineageInfo;
+    if (li) {
+      const dropped = li.removed_as_duplicate
+        ? ` <span class="skm-legend-note">${li.removed_as_duplicate} duplicate(s) already dropped.</span>` : "";
+      el.innerHTML = `<i class="fas fa-code-branch mt-1"></i><div>
+        <b>Built on &ldquo;${escapeHtml(li.parent_name)}&rdquo;</b> — the loaded skill's content is carried over in full so this
+        skill still runs standalone.${dropped}
+        <div class="skm-legend">
+          <span class="chip chip-inherited skm-legend-chip">inherited from parent</span>
+          <span class="chip chip-new skm-legend-chip">new in this skill</span>
+        </div></div>`;
+      el.style.display = "flex";
+      return;
+    }
     const d = state.diff;
     if (!d || (!d.new_keywords.length && !d.new_exclusive.length && !d.rules_added_text)) {
       el.style.display = "none";
@@ -160,6 +231,51 @@
     bar.style.width = s.pct + "%";
     bar.className = "desc-strength-bar " + s.cls;
     document.getElementById("skm-desc-label").textContent = s.label;
+    renderDescWarning(desc);
+  }
+
+  // A child inherits every keyword its parent has, so downstream (Avatar's
+  // agent picks a skill from `name: description` alone) this one line is the
+  // only thing that can tell the two apart. Re-checked live as the engineer
+  // types, so rewriting it clears the warning immediately instead of only
+  // being re-judged on the next export.
+  function renderDescWarning(desc) {
+    const el = document.getElementById("skm-desc-warn");
+    if (!el) return;
+    const conflict = state.lineageInfo && state.lineageInfo.description_conflict;
+    if (!conflict || !conflict.parent_description) {
+      el.style.display = "none";
+      return;
+    }
+    if (similarEnough(desc, conflict.parent_description)) {
+      el.innerHTML =
+        '<i class="fas fa-triangle-exclamation"></i> <b>Too close to the parent\'s description.</b> ' +
+        "This skill inherits all of the parent's keywords, so this sentence is the only thing " +
+        "that distinguishes them — as written, whoever picks between them is guessing.<br>" +
+        `<span class="skm-desc-warn-parent">Parent: &ldquo;${escapeHtml(conflict.parent_description)}&rdquo;</span>`;
+      el.style.display = "block";
+    } else {
+      el.style.display = "none";
+    }
+  }
+
+  // Same measure the server used (difflib's ratio is a normalised longest-
+  // matching-block score); reimplemented here only so the warning can update
+  // per keystroke without a round-trip. The server's verdict is what gets
+  // recorded — this is the live echo of it.
+  function similarEnough(a, b) {
+    const norm = (s) => (s || "").trim().toLowerCase().replace(/\s+/g, " ");
+    const x = norm(a), y = norm(b);
+    if (!x || !y) return false;
+    if (x === y) return true;
+    // Token overlap (Dice coefficient) — cheap, and for two one-sentence
+    // descriptions it tracks the server's ratio closely enough for a warning.
+    const tx = new Set(x.split(/[^a-z0-9]+/).filter(Boolean));
+    const ty = new Set(y.split(/[^a-z0-9]+/).filter(Boolean));
+    if (!tx.size || !ty.size) return false;
+    let shared = 0;
+    tx.forEach((t) => { if (ty.has(t)) shared += 1; });
+    return (2 * shared) / (tx.size + ty.size) >= 0.75;
   }
 
   function open(data, options) {
@@ -174,8 +290,11 @@
     // (learning_service.compute_skill_diff) — drives the green "NEW"
     // highlighting on chips/rules below plus the summary banner.
     state.diff = data.diff || null;
+    state.lineageInfo = data.lineage_info || null;
     state.teachingEvidence = data.teaching_evidence || null;
     state.domain = data.domain || "wifi";
+    state.parent = data.parent || null;
+    state.lineage = (data.lineage || []).slice();
     state.options = {
       skillKey: data.skill_key || "",
       domain: state.domain,
@@ -200,8 +319,8 @@
 
     renderDiffBanner();
     renderVerificationBanner();
-    renderChips("skm-keywords", state.keywords, state.diff ? new Set(state.diff.new_keywords) : null);
-    renderChips("skm-exclusive", state.exclusive, state.diff ? new Set(state.diff.new_exclusive) : null);
+    renderChips("skm-keywords", state.keywords, newKwSet(), inhKwSet());
+    renderChips("skm-exclusive", state.exclusive, newExSet(), inhExSet());
     renderRules();
     renderDescMeter();
 
@@ -219,6 +338,14 @@
   function newExSet() {
     return state.diff ? new Set(state.diff.new_exclusive) : null;
   }
+  // Null unless this draft inherits — renderChips only switches to the
+  // two-colour scheme when it gets one of these.
+  function inhKwSet() {
+    return state.lineageInfo ? new Set(state.lineageInfo.inherited_keywords || []) : null;
+  }
+  function inhExSet() {
+    return state.lineageInfo ? new Set(state.lineageInfo.inherited_exclusive || []) : null;
+  }
 
   function collect() {
     state.preamble = document.getElementById("skm-preamble").value;
@@ -234,6 +361,8 @@
         keywords: state.keywords,
         exclusive: state.exclusive,
         expert_rules: joinExpertRules(),
+        parent: state.parent,
+        lineage: state.lineage,
       },
       state.options.extraPayload
     );
@@ -300,7 +429,7 @@
         e.preventDefault();
         state.keywords.push(this.value.trim());
         this.value = "";
-        renderChips("skm-keywords", state.keywords, newKwSet());
+        renderChips("skm-keywords", state.keywords, newKwSet(), inhKwSet());
       }
     });
     document.getElementById("skm-ex-input").addEventListener("keydown", function (e) {
@@ -308,7 +437,7 @@
         e.preventDefault();
         state.exclusive.push(this.value.trim());
         this.value = "";
-        renderChips("skm-exclusive", state.exclusive, newExSet());
+        renderChips("skm-exclusive", state.exclusive, newExSet(), inhExSet());
       }
     });
 
@@ -319,13 +448,13 @@
       const btn = e.target.closest(".chip-x");
       if (!btn) return;
       state.keywords.splice(Number(btn.dataset.idx), 1);
-      renderChips("skm-keywords", state.keywords, newKwSet());
+      renderChips("skm-keywords", state.keywords, newKwSet(), inhKwSet());
     });
     document.getElementById("skm-exclusive").addEventListener("click", function (e) {
       const btn = e.target.closest(".chip-x");
       if (!btn) return;
       state.exclusive.splice(Number(btn.dataset.idx), 1);
-      renderChips("skm-exclusive", state.exclusive, newExSet());
+      renderChips("skm-exclusive", state.exclusive, newExSet(), inhExSet());
     });
 
     document.getElementById("skm-add-rule").addEventListener("click", function () {

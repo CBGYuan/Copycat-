@@ -263,6 +263,52 @@ a.btn-primary {
   font-size: 0.6rem; font-weight: 700; padding: 1px 6px;
 }
 
+/* ---- Inheritance draft: two explicit categories, not "green vs unmarked" --
+   Blue = carried over from the LOADED parent, green = taught this session.
+   Same colour language as the Skill Library's origin dots (blue = came from
+   the shared/cloud side, green = originated locally), so the two screens
+   don't teach contradictory meanings for the same two colours. */
+.chip.chip-inherited {
+  border-color: var(--primary-light); background: #eef6fd; color: var(--primary-dark);
+}
+.chip.chip-inherited::before {
+  content: "INH "; font-size: 0.62rem; font-weight: 700; opacity: 0.75;
+}
+.rule-point.rule-point-inherited { border-color: var(--primary-light); background: #f3f9fe; }
+.rule-point.rule-point-inherited .rule-badge { background: var(--primary); }
+.rule-point-inh-tag {
+  flex: 0 0 auto; align-self: flex-start; margin-top: 2px;
+  background: var(--primary); color: #fff; border-radius: 999px;
+  font-size: 0.6rem; font-weight: 700; padding: 1px 6px;
+}
+
+/* The boundary build_extension_skill writes into expert_rules, drawn as a
+   labelled rule instead of an editable block (it is structure, not content). */
+.rule-divider {
+  display: flex; align-items: center; gap: 8px;
+  margin: 4px 0; font-size: 0.64rem; font-weight: 700;
+  text-transform: uppercase; letter-spacing: 0.06em; color: #2fa45a;
+}
+.rule-divider::before, .rule-divider::after {
+  content: ""; flex: 1; border-top: 1px dashed #2fa45a;
+}
+
+/* Legend inside the inheritance banner — the chips are shown at their real
+   size and colour so the mapping needs no explaining. */
+.skm-legend { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; }
+.skm-legend-chip { padding: 3px 10px; font-size: 0.72rem; }
+.skm-legend-note { color: var(--text-muted); }
+
+/* Parent/child descriptions too alike to choose between. Amber, not red:
+   it is a judgement the engineer can legitimately overrule, and Save is
+   never blocked on it. */
+.skm-desc-warn {
+  margin-top: 6px; padding: 7px 10px; border-radius: 8px;
+  background: #fffdf3; border: 1px solid var(--warn);
+  font-size: 0.73rem; line-height: 1.45;
+}
+.skm-desc-warn-parent { color: var(--text-muted); font-style: italic; }
+
 .badge-exclude {
   flex: 0 0 auto;
   font-size: 0.6rem;
@@ -453,6 +499,31 @@ a.btn-primary {
   font-weight: 600;
   color: #b8860b;
   margin-left: 6px;
+}
+
+/* Issue-time focus (±5 min) — sits left of "Show all" in the Filtered Log
+   header. Narrow input + mini buttons, matching .tat-mini-btn's footprint so
+   it doesn't crowd that already-tight header row. */
+.focus-input-group {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+.focus-time-input {
+  width: 108px;
+  font-size: 0.68rem;
+  padding: 1px 6px;
+  height: auto;
+  line-height: 1.6;
+}
+.focus-badge {
+  font-size: 0.65rem;
+  font-weight: 600;
+  color: var(--primary-dark);
+  background: rgba(0, 113, 197, 0.1);
+  border-radius: 999px;
+  padding: 2px 8px;
+  white-space: nowrap;
 }
 .evt-body {
   max-height: 26vh;
@@ -996,6 +1067,40 @@ a.btn-primary {
 .step-ask-btn { color: var(--primary-dark); font-weight: 700; }
 .step-ask-btn:hover { background: rgba(0, 113, 197, 0.08); }
 .step-teach-btn:disabled, .step-ask-btn:disabled { opacity: 0.5; cursor: default; }
+
+/* OMISSION hint (see utils/divergence.py): this edit had a measured effect,
+   is still unexplained, and the baseline read had no view on it — so the
+   knowledge behind it exists only in the engineer's head. Deliberately a
+   soft, slow tint rather than a red badge or a hard blink: it's a
+   suggestion, never a blocker, and an alarm the engineer is free to ignore
+   would just train them to ignore it. Stops after a few cycles for the same
+   reason — a permanently animating icon becomes wallpaper. The hint clears
+   on its own once a reason is recorded, since the edit then leaves the
+   omission list server-side. */
+/* Clarifying-question card (a baseline contradiction, or the issue-time
+   locating question). Tinted apart from the plain step-ask card because it
+   isn't a generic follow-up: something the model committed to in writing is
+   being revisited, and the answer decides whether a rule generalises. */
+.clarify-card { border-left: 3px solid var(--primary-dark); }
+.clarify-captures {
+  font-size: 0.66rem;
+  color: var(--text-muted);
+  font-style: italic;
+  margin: 2px 0 6px;
+}
+
+.step-teach-suggest {
+  border-color: #b9a3ea;
+  background: #f6f2ff;
+  animation: step-teach-breathe 2.4s ease-in-out 3;
+}
+@keyframes step-teach-breathe {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(106, 79, 184, 0); }
+  50%      { box-shadow: 0 0 0 3px rgba(106, 79, 184, 0.18); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .step-teach-suggest { animation: none; }
+}
 /* Momentary highlight applied to chat bubbles when jumping to a step. */
 .step-highlight { animation: step-flash 1.8s ease-out; border-radius: 6px; }
 @keyframes step-flash {
@@ -1435,3 +1540,164 @@ a.btn-primary {
    question-card family it reuses the option/custom-answer layout from. */
 .step-ask-card { border-color: #b7d9f5 !important; background: #f5faff; }
 .step-ask-skip-row { display: flex; justify-content: flex-end; margin-top: 4px; }
+
+/* ===== Skill Library (templates/skills.html) =============================
+   Two panes: a lineage forest on the left, a version trail on the right.
+   The visual language is deliberately shared with the rest of the app —
+   `.chip` for keywords, the same green "added" accent as the Edit-Skill
+   modal — so a keyword highlighted here means what it means there. */
+.lib-head {
+  display: flex; align-items: flex-start; justify-content: space-between;
+  gap: 16px; flex-wrap: wrap; margin-bottom: 14px;
+}
+.lib-head-actions { display: flex; align-items: center; gap: 8px; }
+
+.lib-grid {
+  display: grid; grid-template-columns: minmax(280px, 4fr) 6fr; gap: 14px;
+  align-items: start;
+}
+@media (max-width: 900px) { .lib-grid { grid-template-columns: 1fr; } }
+
+.lib-card { border: 1px solid var(--border); border-radius: 12px; overflow: hidden; }
+.lib-card-header {
+  display: flex; align-items: center; justify-content: space-between; gap: 10px;
+  font-size: 0.82rem; font-weight: 600; background: var(--bg-soft);
+}
+.lib-detail-actions { display: inline-flex; gap: 6px; }
+.lib-legend {
+  display: inline-flex; align-items: center; gap: 4px;
+  font-weight: 400; font-size: 0.68rem; color: var(--text-muted);
+}
+.lib-legend .lib-dot { margin-left: 7px; }
+
+/* Origin dot — which FILE a skill resolves from. Colour is the only form of
+   the read-only/writable distinction compact enough to repeat on every row,
+   so it is used identically in the tree, the legend and the detail note. */
+.lib-dot {
+  flex: 0 0 auto; width: 9px; height: 9px; border-radius: 50%;
+  display: inline-block; border: 1px solid rgba(0, 0, 0, 0.12); margin-top: 5px;
+}
+.lib-dot.origin-shared { background: var(--primary-light); }
+.lib-dot.origin-contribution { background: var(--accent-purple); }
+.lib-dot.origin-local { background: var(--good); }
+
+/* ---- Lineage forest ---------------------------------------------------- */
+.lib-tree { max-height: 68vh; overflow: auto; padding: 10px; }
+.lib-node-wrap { position: relative; }
+/* Depth drives the indent as a custom property so the connector elbow is
+   positioned from the same number — the two cannot drift apart. */
+.lib-node {
+  position: relative;
+  display: flex; align-items: flex-start; gap: 8px;
+  margin-left: calc(var(--depth) * 22px);
+  padding: 7px 9px; margin-bottom: 4px;
+  border: 1px solid var(--border); border-radius: 9px; background: #fff;
+  cursor: pointer;
+  transition: border-color .15s ease, box-shadow .15s ease, transform .15s ease;
+}
+.lib-node:hover { border-color: var(--primary-light); transform: translateX(1px); }
+.lib-node.selected {
+  border-color: var(--primary); box-shadow: 0 0 0 2px rgba(0, 113, 197, 0.15);
+}
+/* An ancestor OF the selection — deliberately dimmer than `.selected`,
+   because it is context for the selection, not a second selection. */
+.lib-node.ancestor { border-color: var(--primary-light); background: #f5fbff; }
+.lib-node.active { border-left: 3px solid var(--good); }
+.lib-node-wrap .lib-node::after {
+  content: ""; position: absolute; left: -12px; top: 50%;
+  width: 10px; border-top: 1px solid var(--border);
+  display: var(--elbow, block);
+}
+.lib-tree > .lib-node-wrap > .lib-node { --elbow: none; }
+
+.lib-node-body { min-width: 0; flex: 1; }
+.lib-node-title { font-size: 0.82rem; font-weight: 600; color: var(--text-main); }
+.lib-node-meta { font-size: 0.68rem; color: var(--text-muted); margin-top: 1px; }
+.lib-node-meta code { font-size: 0.68rem; color: var(--primary-dark); }
+.lib-orphan { font-size: 0.66rem; color: #9a7b10; margin-top: 2px; }
+
+.lib-badge {
+  display: inline-block; border-radius: 999px; padding: 0 6px;
+  font-size: 0.6rem; font-weight: 700; vertical-align: middle; margin-left: 3px;
+}
+.lib-badge-loaded { background: var(--good); color: #fff; }
+.lib-badge-inherit { background: rgba(0, 113, 197, 0.12); color: var(--primary-dark); }
+.lib-badge-hist { background: var(--bg-soft); color: var(--text-muted); border: 1px solid var(--border); }
+
+/* ---- Detail pane ------------------------------------------------------- */
+.lib-detail { max-height: 68vh; overflow: auto; }
+.lib-chain {
+  display: flex; align-items: center; flex-wrap: wrap; gap: 4px;
+  padding: 8px 10px; margin-bottom: 10px;
+  background: var(--bg-soft); border: 1px solid var(--border); border-radius: 9px;
+}
+.lib-chain-node {
+  font-size: 0.76rem; font-weight: 600; color: var(--primary-dark);
+  padding: 2px 8px; border-radius: 999px; background: #fff;
+  border: 1px solid var(--primary-light); cursor: pointer;
+}
+.lib-chain-node:hover { background: #eaf5ff; }
+.lib-chain-node.current {
+  background: var(--primary); border-color: var(--primary); color: #fff; cursor: default;
+}
+.lib-chain-arrow { color: var(--text-muted); font-size: 0.7rem; }
+.lib-chain-root .lib-chain-node.current { background: var(--text-muted); border-color: var(--text-muted); }
+
+.lib-origin {
+  display: flex; align-items: flex-start; gap: 7px;
+  font-size: 0.72rem; color: var(--text-muted);
+  padding: 6px 10px; margin-bottom: 12px;
+  border: 1px dashed var(--border); border-radius: 8px;
+}
+.lib-origin .lib-dot { margin-top: 3px; }
+
+.lib-section-label {
+  font-size: 0.68rem; font-weight: 700; text-transform: uppercase;
+  letter-spacing: 0.04em; color: var(--text-muted); margin-bottom: 5px;
+}
+.lib-field { margin-bottom: 12px; }
+.lib-desc { font-size: 0.82rem; }
+.lib-rules {
+  font-family: Consolas, "Courier New", monospace; font-size: 0.72rem;
+  background: var(--bg-soft); border: 1px solid var(--border); border-radius: 8px;
+  padding: 8px 10px; max-height: 260px; overflow: auto; white-space: pre-wrap;
+  margin: 0;
+}
+
+/* ---- Version timeline -------------------------------------------------- */
+.lib-timeline {
+  display: flex; align-items: stretch; overflow-x: auto;
+  padding: 2px 0 10px; margin-bottom: 12px;
+}
+.lib-tl-rail { flex: 0 0 16px; align-self: center; border-top: 2px dotted var(--border); }
+.lib-tl-item {
+  flex: 0 0 auto; display: flex; flex-direction: column; align-items: center; gap: 2px;
+  background: #fff; border: 1px solid var(--border); border-radius: 9px;
+  padding: 6px 12px; cursor: pointer; transition: all .15s ease;
+}
+.lib-tl-item:hover { border-color: var(--primary-light); }
+.lib-tl-item.selected { border-color: var(--primary); box-shadow: 0 0 0 2px rgba(0, 113, 197, 0.15); }
+.lib-tl-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--border); }
+.lib-tl-item.current .lib-tl-dot { background: var(--good); }
+.lib-tl-item.selected .lib-tl-dot { background: var(--primary); }
+.lib-tl-ver { font-size: 0.74rem; font-weight: 700; color: var(--text-main); }
+.lib-tl-when { font-size: 0.62rem; color: var(--text-muted); white-space: nowrap; }
+
+/* Viewing a past revision: what a restore would bring back vs take away.
+   Green reuses the Edit-Skill modal's "added" accent; red is reserved for the
+   losing side, so the two directions are never confusable at a glance. */
+.lib-diffbar {
+  display: flex; gap: 8px; align-items: flex-start;
+  font-size: 0.74rem; padding: 8px 10px; margin-bottom: 12px;
+  background: #fffdf3; border: 1px solid var(--warn); border-radius: 8px;
+}
+.lib-swatch { display: inline-block; width: 10px; height: 10px; border-radius: 3px; vertical-align: -1px; }
+.chip-restore-swatch { background: #f1faf3; border: 1px solid #2fa45a; }
+.chip-lost-swatch { background: #fdf2f2; border: 1px solid var(--bad); }
+.chip.chip-restore { border-color: #2fa45a; background: #f1faf3; color: #1e7a40; }
+.chip.chip-lost {
+  border-color: var(--bad); background: #fdf2f2; color: var(--bad); text-decoration: line-through;
+}
+.lib-lost { margin-top: 6px; display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+.lib-lost-label { font-size: 0.68rem; color: var(--bad); font-weight: 600; }
+.lib-version-actions { margin-top: 10px; }

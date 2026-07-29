@@ -57,6 +57,10 @@
         <input id="skm-desc" class="form-control form-control-sm" placeholder="One sentence describing when this skill applies">
         <div class="desc-strength mt-1"><div class="desc-strength-bar" id="skm-desc-bar"></div></div>
         <div class="small text-muted" id="skm-desc-label">&nbsp;</div>
+        <!-- Shown only on an inheritance draft whose description reads too
+             close to its parent's. Sits under the field it is about, because
+             the fix is to rewrite that field right here. -->
+        <div class="skm-desc-warn" id="skm-desc-warn" style="display:none;"></div>
       </div>
       <div class="mb-3">
         <label class="form-label small fw-bold">Keywords</label>

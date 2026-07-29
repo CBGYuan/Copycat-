@@ -41,6 +41,59 @@ class WorkingState:
         # excluding=True entries drop a line even if another filter matched it
         # (same semantic as skills.yaml's `exclusive` field / TAT's excluding="y").
         self.filters: list = []
+        # Issue-time focus window — narrows both the raw preview and every
+        # /apply_filter run to a ±focus_window_min slice around
+        # focus_center_iso ("MM/DD/YYYY-HH:MM:SS.mmm") instead of the whole
+        # file, so toggling a filter checkbox on a multi-million-line capture
+        # doesn't re-scan the entire thing each time (see utils.tat_parser.
+        # slice_by_focus_window). Empty string = no focus, work the whole file.
+        self.focus_center_iso: str = ""
+        self.focus_window_min: int = 5
+        # The LLM's committed first read of the CURRENT default filter set,
+        # formed before the engineer edited anything (see learning_service.
+        # analyze_baseline): {analysis, expected_scenario,
+        # expected_key_keywords, expected_noise_keywords,
+        # expected_issue_time_hint, open_unknowns}. This is the null
+        # hypothesis every later engineer action is diffed against, which is
+        # what makes the clarification gate an OBSERVABLE divergence between
+        # two interpretations rather than the LLM rating its own uncertainty.
+        #
+        # Scoped to the FILTER SET, not to the conversation: like
+        # state.filters itself, it survives a Clear (reset_teaching_progress)
+        # and is replaced when a different .tat/skill is loaded. Clearing it
+        # on reset would leave a session with no baseline and no way to
+        # re-establish one short of reloading the filter file.
+        # baseline_filter_sig records which filter set it describes, so a
+        # stale baseline can be detected instead of silently compared against
+        # filters it never saw.
+        self.baseline: dict = {}
+        self.baseline_filter_sig: str = ""
+        # len(operations) when the baseline was formed. Divergence is only
+        # meaningful for edits made AFTER the read was committed: the edits
+        # that built the filter set the baseline was looking at are the thing
+        # it described, not a deviation from it. Without this, loading a .tat
+        # and then baselining would immediately report the .tat's own
+        # keywords as contradicting the read of those same keywords.
+        self.baseline_op_seq: int = 0
+        # Divergences already put to the engineer (see /learning/clarify), so
+        # a SKIPPED question isn't asked again on the next filter run. An
+        # ANSWERED one drops out on its own — the answer becomes the
+        # operation's `reason`, which removes it from the unexplained set —
+        # so this list exists purely for the dismissed case. Being asked and
+        # declining is itself a decision; re-prompting would override it.
+        self.clarified_seqs: list = []
+        self.focus_clarified: bool = False
+        # The engineer's answer to "how did you know the issue was here?"
+        # (see /learning/clarify's focus branch). Kept separately from the
+        # operation journal because a focus window isn't a filter edit and so
+        # has no operation to hang a `reason` on — but it is exactly the kind
+        # of locating rule a reusable skill needs.
+        self.focus_reason: str = ""
+        # Which focus window state.prev_survivors was measured under, so
+        # operation_journal.annotate_effects can tell a survivor count that is
+        # comparable to the previous run from one taken over a different slice
+        # of the file (see its docstring).
+        self.prev_focus_sig: str = ""
         self.filtered_preview: list = []   # plain-text surviving lines, chronological order (for LLM context)
         self.filter_stats: dict = {}       # last compute_filter_stats() result (per-filter hits, overlap, colored preview)
         # Operation journal: the ordered sequence of filter edits the engineer
@@ -116,6 +169,13 @@ class WorkingState:
         # Line labels belong to the prior teaching case and must not leak
         # into the next one.
         self.log_annotations = []
+        # Which divergences have already been put to the engineer belongs to
+        # the CONVERSATION, not to the filter set (unlike self.baseline, which
+        # deliberately survives) — starting the teaching over should let the
+        # same question be asked again rather than silently suppressing it.
+        self.clarified_seqs = []
+        self.focus_clarified = False
+        self.focus_reason = ""
 
 
 def get_state() -> WorkingState:

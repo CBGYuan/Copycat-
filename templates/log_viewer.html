@@ -1,10 +1,11 @@
 {% extends "base.html" %}
 {% block content %}
 {% if not llm_ready %}
-<div class="alert alert-warning py-2 mb-3">
-  <i class="fas fa-exclamation-triangle"></i> LLM is not configured yet — Chat and Teach This Scenario will be
-  unavailable until the corporate share's <code>keys.py</code> is reachable, or you create
-  <code>configs/keys_local.py</code> (same schema as your key.py), then restart the app.
+<div id="llmBanner" class="alert alert-warning py-2 mb-3">
+  <i class="fas fa-exclamation-triangle"></i> LLM is still connecting (checking the corporate key share) — Chat and
+  Teach This Scenario will be unavailable until it's reachable, or you create
+  <code>configs/keys_local.py</code> (same schema as your key.py). This banner clears itself once ready — no need to
+  reload.
 </div>
 {% endif %}
 <div class="row g-2">
@@ -80,6 +81,22 @@
           <span id="dateSynthWarn" class="date-synth-warn" style="display:none;" title="This log's own lines carry a time-of-day but no date (BT's dateless HCI export / WiFi's DDD export) — the date shown was estimated from the loaded System Event Log's earliest event, or the file's own save time if no event log is loaded. Only the DATE is a guess; the time-of-day is exact.">⚠ date estimated</span>
         </span>
         <span class="d-flex align-items-center gap-2">
+          <!-- Issue-time focus (±5 min) — narrows the working log to a slice
+               around a typed issue time so filter checkbox toggles stay fast
+               on multi-million-line captures (see /log_viewer/set_focus). -->
+          <span class="focus-input-group">
+            <input id="focusTimeInput" type="text" class="form-control form-control-sm focus-time-input"
+                   placeholder="issue time HH:MM:SS"
+                   title="Issue time to focus on (±5 min) — narrows the log so filter toggles stay fast on huge captures"
+                   onkeydown="if (event.key === 'Enter') focusLogTime();">
+            <button type="button" class="btn btn-outline-secondary tat-mini-btn" onclick="focusLogTime()" title="Narrow the log to ±5 minutes around this time">
+              <i class="fas fa-crosshairs"></i> Focus
+            </button>
+            <button type="button" id="clearFocusBtn" class="btn btn-outline-secondary tat-mini-btn" onclick="clearFocus()" style="display:none;" title="Clear focus window — work the whole file again">
+              <i class="fas fa-times"></i>
+            </button>
+          </span>
+          <span id="focusBadge" class="focus-badge" style="display:none;"></span>
           <button type="button" class="btn btn-outline-secondary tat-mini-btn" onclick="showAllLog()" title="Back to the full unfiltered log">
             <i class="fas fa-list"></i> Show all
           </button>
@@ -220,12 +237,11 @@
           <input class="form-check-input" type="checkbox" role="switch" id="priorToggle" onchange="onPriorToggle()">
           <label class="form-check-label small text-muted" for="priorToggle" id="priorToggleLabel">Load skills</label>
         </span>
-        <!-- Everything else shifts right of it. Log Round & Analyze no longer
-             lives here as a standalone icon — it's now a nudge card that
-             appears IN the chat itself (see checkRoundNudge/renderRoundNudge)
-             whenever there are filter edits since the last round, so the
-             prompt to use it is inline and visible instead of a static icon
-             easy to overlook. -->
+        <!-- No Log Round control here or anywhere else. Analysis is no
+             longer something the engineer submits: the LLM reads the filter
+             set itself the moment one is loaded (see requestBaseline), and
+             follow-up questions fire only when a later edit actually
+             contradicts that read (see maybeClarify / utils/divergence.py). -->
         <div class="d-flex align-items-center gap-2 ms-auto">
           <button type="button" class="icon-btn" onclick="resetChat()" title="Clear the conversation">
             <i class="fas fa-eraser"></i>
@@ -278,18 +294,45 @@
 let filterData = {{ state.filters|tojson }};
 let operationData = {{ (state.operations or [])|tojson }};
 let annotationData = {{ (state.log_annotations or [])|tojson }};
+// Last /apply_filter's divergence report (utils/divergence.py): which of the
+// engineer's material, still-unexplained edits CONTRADICT the baseline read
+// (worth one clarifying question) vs. which the baseline simply had no view
+// on (omissions — a passive 🎓 hint in the Steps panel, never a question).
+// Computed server-side with no LLM call, so it refreshes on every filter run.
+let divergenceData = {};
 let activeSkillKey = {{ (state.active_skill_key or '')|tojson }};
 let currentQuestions = [];
 let currentDraft = null;
-// len(operations) as of the last successful Log Round — seeded from server
-// state so a page reload doesn't lose track of what's already been logged.
-// See checkRoundNudge().
-let lastRoundOpCount = {{ (state.last_round_op_count or 0)|tojson }};
 // Fixed UTC offset (minutes) of the machine that captured the current BT log
 // (see event_log_service.find_capture_utc_offset_minutes) — null means none
 // was found, so the event<->log click-sync applies no correction. Updated
 // whenever a log or event log is (re)picked — see pickLog()/pickEventLog().
 let captureUtcOffsetMin = {{ state.capture_utc_offset_min|tojson }};
+
+// The LLM key.py read (UNC corp share, no timeout of its own) now happens on
+// a background thread AFTER the server starts listening (see configs.
+// set_up_app._configure_llm) instead of blocking app startup — so a page
+// loaded in the first few seconds can render with llm_ready still false even
+// though it'll very likely be true moments later. Poll /llm_status and clear
+// the banner in place once it flips, instead of leaving a stale "not
+// configured" warning that only a manual reload would fix.
+{% if not llm_ready %}
+(function pollLlmStatus(attempt) {
+    attempt = attempt || 0;
+    if (attempt > 20) return; // ~60s — genuinely unreachable by then, stop polling
+    fetch("{{ url_for('main.llm_status') }}")
+        .then(r => r.json())
+        .then(d => {
+            if (d.ready) {
+                const banner = document.getElementById('llmBanner');
+                if (banner) banner.remove();
+            } else {
+                setTimeout(() => pollLlmStatus(attempt + 1), 3000);
+            }
+        })
+        .catch(() => setTimeout(() => pollLlmStatus(attempt + 1), 3000));
+})();
+{% endif %}
 
 // Global "one async action at a time" lock — every control that triggers an
 // LLM call or a state-mutating fetch (Log Round, Export Skill, chat send,
@@ -417,7 +460,6 @@ function syncOps(d) {
         surfaceRedFlags();
         renderStepPanel();
         renderStepTagSelector();
-        checkRoundNudge();
     }
 }
 
@@ -537,7 +579,7 @@ function showRedFlagCard(seq, question, opts) {
 // used after answer_red_flag's own response, which only carries the reason
 // update (no new flags to show, panel already reflects the just-answered one).
 function syncOpsQuiet(d) {
-    if (d && d.operations) { operationData = d.operations; renderStepPanel(); checkRoundNudge(); }
+    if (d && d.operations) { operationData = d.operations; renderStepPanel(); }
 }
 
 // ---- Step viewer -----------------------------------------------------------
@@ -605,6 +647,19 @@ function renderStepPanel() {
             teachBtn.type = 'button';
             teachBtn.innerHTML = '<i class="fas fa-graduation-cap"></i>';
             teachBtn.title = 'Teach this step — write your explanation, then LLM may ask a follow-up';
+            // OMISSION hint: this edit had a measured effect, is still
+            // unexplained, and the baseline read had no view on it either
+            // (see utils/divergence.py). That's a provenance gap, not an
+            // ambiguity — so it gets a passive, ignorable nudge here rather
+            // than a clarifying question in chat. Never blocks anything, and
+            // clears by itself once a reason is recorded (the edit then drops
+            // out of the omission list server-side).
+            const hint = (divergenceData.omissions || []).find(om => om.seq === o.seq && om.highlight);
+            if (hint) {
+                teachBtn.classList.add('step-teach-suggest');
+                teachBtn.title = `Not explained yet — ${hint.effect_phrase}. `
+                    + 'The first read of this filter had no view on this keyword, so this is knowledge only you have.';
+            }
             teachBtn.disabled = isBusy();
             teachBtn.onclick = (e) => { e.stopPropagation(); openStepExplainBox(o.seq, teachBtn); };
             row.appendChild(teachBtn);
@@ -801,6 +856,11 @@ function pickLog() {
                         ? `no filter applied yet — first ${d.preview.length} of ${d.total_lines} lines`
                         : 'no filter applied yet';
                 renderLogRows(d.preview);
+                // A new log always clears any focus window server-side (see
+                // /pick_log) — an issue time from the OLD file's frame could
+                // silently slice this one down to zero lines. Reset the UI too.
+                document.getElementById('focusTimeInput').value = '';
+                setFocusUiState(null);
                 // BT capture → reveal the event panel (auto-discovered file
                 // enables it; WiFi/none hides it). Reset any open state first.
                 captureUtcOffsetMin = d.capture_utc_offset_min;
@@ -822,7 +882,9 @@ function pickLog() {
                 if (d.filters_cleared) {
                     showPathStatus('tatStatus', 'Different log domain — previous filter cleared', 'ok');
                 } else if (filterData.length) {
-                    applyFilter(); // filters already set up — run right away, replaces this raw view
+                    // Filters already set up — run right away (replaces this
+                    // raw view), then read the filter set against the NEW log.
+                    applyFilter().then(() => requestBaseline());
                 }
             } else showPathStatus('logStatus', d.message, 'err');
         });
@@ -846,7 +908,70 @@ function showAllLog() {
                     ? `no filter applied — first ${d.preview.length} of ${d.total_lines} lines`
                     : '';
             renderLogRows(d.preview);
+            // /show_all always clears any active focus window server-side —
+            // mirror that in the UI so the Focus controls don't lie about state.
+            setFocusUiState(null);
         });
+}
+
+// ── Issue-time focus window (±N min) ────────────────────────────────────────
+// Narrows both the raw preview and every subsequent /apply_filter run to a
+// small time-bounded slice around a picked "issue time" (see utils.tat_parser.
+// slice_by_focus_window / /log_viewer/set_focus). The point isn't the
+// narrower view by itself — it's that a checkbox toggle on a multi-million-
+// line capture then only rescans that slice instead of the whole file.
+// Persists server-side until cleared or a different log is picked.
+function focusLogTime() {
+    const raw = document.getElementById('focusTimeInput').value.trim();
+    if (!raw) return;
+    fetch("{{ url_for('log_viewer.set_focus') }}", {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({time: raw}),
+    })
+        .then(r => r.json())
+        .then(d => {
+            if (!d.success) { alert(d.message); return; }
+            setFocusUiState({center: d.focus_center, window_min: d.focus_window_min});
+            // Re-run whatever view is currently active so the narrowing takes
+            // effect immediately instead of waiting for the next edit.
+            if (filterData.some(f => f.enabled && !f.excluding)) {
+                applyFilter();
+            } else {
+                document.getElementById('logPaneTitle').textContent = 'Log';
+                document.getElementById('matchCount').textContent = d.preview.length;
+                document.getElementById('totalLines').textContent = d.total_lines;
+                renderLogRows(d.preview);
+            }
+        });
+}
+
+function clearFocus() {
+    fetch("{{ url_for('log_viewer.clear_focus') }}", {method: 'POST'})
+        .then(r => r.json())
+        .then(d => {
+            if (!d.success) return;
+            setFocusUiState(null);
+            if (filterData.some(f => f.enabled && !f.excluding)) applyFilter();
+        });
+}
+
+// Single source of truth for the Focus badge + clear button visibility, so
+// every caller (focusLogTime/clearFocus/showAllLog/applyFilter) stays in sync
+// with the server's actual state instead of each re-deriving it independently.
+function setFocusUiState(focus) {
+    const badge = document.getElementById('focusBadge');
+    const clearBtn = document.getElementById('clearFocusBtn');
+    if (!focus || !focus.center) {
+        badge.style.display = 'none';
+        badge.textContent = '';
+        clearBtn.style.display = 'none';
+        return;
+    }
+    const timePart = focus.center.split('-').pop(); // HH:MM:SS(.mmm) portion
+    badge.textContent = `🎯 focused ±${focus.window_min || 5}m around ${timePart}`;
+    badge.style.display = '';
+    clearBtn.style.display = '';
 }
 
 // ── System Event Log panel (collapsible, above the log rows) ──────────────
@@ -1078,7 +1203,10 @@ function pickTat() {
                 filterData = d.filters;
                 renderFilters();
                 syncOps(d);
-                if (document.getElementById('logPathInput').value.trim()) applyFilter();
+                // Baseline AFTER the filter run — it reads the resulting
+                // stats, which don't exist until applyFilter has populated
+                // them server-side.
+                if (document.getElementById('logPathInput').value.trim()) applyFilter().then(() => requestBaseline());
             } else showPathStatus('tatStatus', d.message, 'err');
         });
 }
@@ -1114,7 +1242,7 @@ function loadSkill(key) {
                 const t = document.getElementById('priorToggle');
                 if (t && !t.checked) t.checked = true;
             }
-            if (document.getElementById('logPathInput').value.trim()) applyFilter();
+            if (document.getElementById('logPathInput').value.trim()) applyFilter().then(() => requestBaseline());
         } else showPathStatus('tatStatus', d.message, 'err');
     }).catch(() => setBusy(false));
 }
@@ -1184,7 +1312,9 @@ function applyFilter() {
             document.getElementById('matchCount').textContent = d.total_matched;
             document.getElementById('totalLines').textContent = d.total_lines;
             document.getElementById('statsSummary').textContent =
-                `${d.overlap_count} lines matched 2+ keywords`;
+                `${d.overlap_count} lines matched 2+ keywords` +
+                (d.focus ? ` — scanned ${d.total_lines} of ${d.full_total_lines} lines in file` : '');
+            setFocusUiState(d.focus);
 
             // Merge hit counts into the filter table (that IS the stats display now).
             // Index-based, not text-based: per_filter is now returned for
@@ -1193,10 +1323,16 @@ function applyFilter() {
             // filters that a text-keyed lookup would silently collide on.
             d.per_filter.forEach((f, i) => { if (filterData[i]) filterData[i].hits = f.hits; });
             renderFilters();
+            // Set BEFORE syncOps: syncOps re-renders the Steps panel, which
+            // reads divergenceData to decide which 🎓 icons to hint on.
+            divergenceData = d.divergence || {};
             syncOps(d); // effects for prior edits are now measured
 
             annotationData = d.annotations || annotationData;
             renderLogRows(d.preview, 'No lines matched');
+            // Last, so a clarifying question never delays the filter result
+            // the engineer is actually waiting to look at.
+            maybeClarify();
         });
 }
 
@@ -1503,12 +1639,10 @@ function refreshAssessment() {
 function resetChat() {
     return fetch("{{ url_for('chatbot.reset') }}", {method: 'POST'}).then(() => {
         document.getElementById('chatBox').innerHTML = '';
-        // Server-side reset_teaching_progress() clears state.operations and
-        // state.last_round_op_count too — mirror that here so the Steps panel
-        // and the round nudge (see checkRoundNudge) don't go stale against
+        // Server-side reset_teaching_progress() clears state.operations too
+        // — mirror that here so the Steps panel doesn't go stale against
         // filter edits that no longer exist server-side.
         operationData = [];
-        lastRoundOpCount = 0;
         renderStepPanel();
     });
 }
@@ -1726,112 +1860,44 @@ function onPriorToggle() {
 
 // Single Log Round button — runs analysis in whatever mode the header toggle
 // is set to. Reusable: change the filter and click again for another round.
-// ---- Log Round nudge card ---------------------------------------------
-// Replaces the old standalone header icon (easy to overlook, always there
-// whether or not there was anything new to log). Instead, a card appears
-// automatically INSIDE the chat exactly when operationData has grown past
-// lastRoundOpCount — i.e. there are filter edits since the last logged
-// round. Only the REMINDER is passive/automatic; firing the actual LLM call
-// still takes an explicit click on the card's own button, so a mid-edit
-// state never gets analyzed by accident and cost stays predictable.
-// Don't nudge for every single checkbox click — exploring a long filter list
-// (disabling/re-enabling one keyword at a time) fires syncOps repeatedly in a
-// burst, and a card popping in after literally the FIRST toggle read as
-// nagging. Debounce so only a pause in editing evaluates it.
+// ---- Baseline read (auto, once per loaded filter set) -------------------
+// Replaces the Log Round nudge card. The old flow needed the engineer to
+// explicitly submit a "round" before anything was analyzed or scored; now the
+// LLM commits to its own read of the default filter the moment one is loaded
+// (see /learning/baseline), which both gives the session its first readiness
+// assessment without any user action and — more importantly — creates the
+// prior that every later edit is compared against (utils/divergence.py).
 //
-// Gating on raw op COUNT was the wrong signal too — a burst of 3 checkbox
-// toggles that each contributed 0 hits and 0 survivor change is not "3
-// changes worth analyzing", and a single toggle of one load-bearing keyword
-// (huge survivor swing, or hits nothing else covers) very much IS. So gate
-// on whether any new op actually MOVED something: either its own unique_hits
-// (a "special" keyword — contributes lines no other enabled filter already
-// covers) or dropped real noise, or its survivor_delta is a meaningful slice
-// of the log (proportion-based, not an absolute count). Loading a skill/.tat
-// always counts — that's inherently the start of something worth analyzing.
-const _ROUND_NUDGE_SURVIVOR_FRACTION = 0.02; // >=2% of the whole log moved
-let _roundNudgeDebounceTimer = null;
-
-function _opHasSignal(op, totalLines) {
-    if (op.action === 'load_skill' || op.action === 'load_tat') return true;
-    const eff = op.effect || {};
-    if (eff.unique_hits) return true;
-    if (eff.dropped) return true;
-    if (typeof eff.survivor_delta === 'number' && totalLines > 0) {
-        if (Math.abs(eff.survivor_delta) / totalLines >= _ROUND_NUDGE_SURVIVOR_FRACTION) return true;
-    }
-    return false;
-}
-
-function checkRoundNudge() {
-    if (_roundNudgeDebounceTimer) clearTimeout(_roundNudgeDebounceTimer);
-    _roundNudgeDebounceTimer = setTimeout(() => {
-        if (document.querySelector('.round-nudge-card')) return; // already showing
-        const newOps = operationData.slice(lastRoundOpCount);
-        if (!newOps.length) return;
-        const totalLines = parseInt(document.getElementById('totalLines').textContent, 10) || 0;
-        if (!newOps.some(op => _opHasSignal(op, totalLines))) return;
-        renderRoundNudge();
-    }, 1500);
-}
-
-function renderRoundNudge() {
-    const box = document.getElementById('chatBox');
-    const card = el('div', 'chat-question-card round-nudge-card mb-2');
-
-    const icon = el('div', 'round-nudge-icon');
-    icon.innerHTML = '<i class="fas fa-arrows-rotate"></i>';
-    card.appendChild(icon);
-
-    const body = el('div', 'round-nudge-body');
-    const newCount = operationData.length - lastRoundOpCount;
-    body.appendChild(el('div', 'round-nudge-title',
-        `${newCount} new filter change${newCount === 1 ? '' : 's'} since your last round`));
-    body.appendChild(el('div', 'round-nudge-sub',
-        'Log this round for an updated readiness score and grounded follow-up questions.'));
-
-    const actions = el('div', 'round-nudge-actions');
-    const ctaBtn = el('button', 'btn btn-sm round-nudge-cta');
-    ctaBtn.type = 'button';
-    ctaBtn.setAttribute('data-busy-lock', '');
-    ctaBtn.disabled = isBusy(); // matches step-teach-btn's pattern — never hand out a fresh enabled button mid-request
-    ctaBtn.innerHTML = '<i class="fas fa-wand-magic-sparkles"></i> Log Round &amp; Analyze';
-    ctaBtn.onclick = () => logFilterRound(ctaBtn, card);
-    const dismissBtn = el('button', 'round-nudge-dismiss');
-    dismissBtn.type = 'button';
-    dismissBtn.title = 'Dismiss for now — reappears on the next filter change';
-    dismissBtn.innerHTML = '<i class="fas fa-xmark"></i>';
-    dismissBtn.onclick = () => card.remove();
-    actions.appendChild(ctaBtn);
-    actions.appendChild(dismissBtn);
-    body.appendChild(actions);
-    card.appendChild(body);
-
-    box.appendChild(card);
-    box.scrollTop = box.scrollHeight;
-}
-
-function logFilterRound(btn, nudgeCard) {
-    if (isBusy()) return;
-    setBusy(true);
-    const label = btn.innerHTML;
-    btn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Analyzing…';
-    fetch("{{ url_for('learning.log_round') }}", {
-        method: 'POST',
-        headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({use_prior_knowledge: priorMode()}),
+// Fires only on a filter-SET load (pickTat/loadSkill), never on an individual
+// edit: re-reading after each toggle would re-baseline against the engineer's
+// own change and destroy the comparison. The server additionally caches by
+// filter signature, so a repeat call can't spend a second LLM call.
+function requestBaseline(attempt) {
+    attempt = attempt || 0;
+    if (!filterData.length) return;                       // nothing to read yet
+    if (!document.getElementById('logPathInput').value.trim()) return;
+    fetch("{{ url_for('learning.baseline') }}", {
+        method: 'POST', headers: {'Content-Type': 'application/json'}, body: '{}',
     })
-        .then(r => r.json())
+        .then(r => r.status === 503 ? {retry: true} : r.json())
         .then(d => {
-            setBusy(false);
-            if (!d.success) { btn.innerHTML = label; alert(d.message); return; }
-            if (nudgeCard) nudgeCard.remove();
-            lastRoundOpCount = operationData.length;
+            // 503 = the LLM key is still being read on the background thread
+            // (see configs/set_up_app._configure_llm — key.py lives on a UNC
+            // corp share and no longer blocks startup). Loading a .tat within
+            // the first seconds is exactly when this lands, so retry rather
+            // than leaving the session silently baseline-less, which would
+            // disable divergence detection for the whole session with no
+            // visible symptom.
+            if (d.retry) {
+                if (attempt < 8) setTimeout(() => requestBaseline(attempt + 1), 2000);
+                return;
+            }
+            if (!d.success || d.cached) return;   // cached = already read, nothing new to show
             if (d.usage) updateTokenBadge(d.usage.session);
             if (d.assessment) applyAssessment(d.assessment);
-            appendMsg('assistant', `**Round ${d.round}:** ${d.analysis}`, 'all');
-            if (d.questions && d.questions.length) renderQuestionCards(d.questions);
+            appendMsg('assistant', `**First read of this filter:** ${d.baseline.analysis}`, 'all');
         })
-        .catch(e => { setBusy(false); btn.innerHTML = label; alert('Failed: ' + e); });
+        .catch(() => {});   // never let a failed baseline disrupt filtering
 }
 
 // "Teach this step" — USER-LED: clicking a step's 🎓 icon (see
@@ -2043,6 +2109,116 @@ function askStepQuestion(seq, btn) {
 // (dismiss, no backend call — nothing was asked "out loud" to the model to
 // walk back). Answering posts to /learning/answer_step_question, which tags
 // both messages with this step and only fills the reason if it's still empty.
+// Offer ONE clarifying question when the engineer's last edit contradicted
+// the baseline read (see /learning/clarify). This does auto-fire an LLM call
+// off a filter action — the pattern this app deliberately removed once — but
+// the gate is now categorically different: it isn't "an edit happened", it's
+// "a MEASURED, still-unexplained edit reversed a stance the model had
+// committed to in writing beforehand", which utils/divergence.py decides with
+// no model involved. In practice that's rare; ordinary filter building
+// produces none. Two backstops keep it that way:
+//   • the server refuses to re-ask a divergence already put to the engineer
+//     (state.clarified_seqs), so a double-fire can't double-charge;
+//   • nothing fires at all without contradictions, and the request is skipped
+//     client-side in that case so the common path costs literally nothing.
+function maybeClarify() {
+    const pending = (divergenceData.contradictions || []).length > 0
+        || (divergenceData.focus && !divergenceData.focus_clarified);
+    if (!pending) return;                       // no round-trip on the common path
+    if (document.querySelector('.clarify-card')) return;  // one open question at a time
+    fetch("{{ url_for('learning.clarify') }}", {
+        method: 'POST', headers: {'Content-Type': 'application/json'}, body: '{}',
+    })
+        .then(r => r.json())
+        .then(d => { if (d.success && d.question) renderClarifyCard(d); })
+        .catch(() => {});   // a failed clarification must never disrupt filtering
+}
+
+// The clarifying-question card. Contradictions reuse submitStepAnswer, whose
+// existing behaviour is exactly right here: the answer becomes that
+// operation's `reason`, which both captures the knowledge for export AND
+// drops the edit out of the unexplained set so the same divergence can't
+// come back. Focus questions have no operation to attach to and go to
+// /learning/answer_focus_clarify instead.
+function renderClarifyCard(d) {
+    const q = d.question;
+    const box = document.getElementById('chatBox');
+    const card = el('div', 'chat-question-card clarify-card mb-2');
+    card.appendChild(el('div', 'chat-q-progress',
+        d.kind === 'focus' ? '🎯 About the time you focused on'
+                           : `🔍 About "${d.keyword}"`));
+    card.appendChild(el('div', 'chat-q-text', q.question));
+    if (d.captures) card.appendChild(el('div', 'clarify-captures', d.captures));
+
+    const submit = (answer) => {
+        if (d.kind === 'focus') {
+            fetch("{{ url_for('learning.answer_focus_clarify') }}", {
+                method: 'POST', headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({question: q.question, answer}),
+            }).then(() => {
+                card.remove();
+                appendMsg('assistant', `❓ ${q.question}`, 'all');
+                appendMsg('user', answer, 'all');
+            });
+        } else {
+            submitStepAnswer(d.seq, q.question, answer, card);
+        }
+    };
+
+    const customBox = el('div', 'chat-q-custom');
+    if (q.type === 'choice' && q.options && q.options.length) {
+        customBox.style.display = 'none';
+        const optsBox = el('div', 'chat-q-opts');
+        q.options.forEach(opt => {
+            const b = el('button', 'chat-q-opt', opt);
+            b.type = 'button';
+            b.onclick = () => submit(opt);
+            optsBox.appendChild(b);
+        });
+        const otherBtn = el('button', 'chat-q-opt chat-q-opt-other', 'Other…');
+        otherBtn.type = 'button';
+        otherBtn.onclick = () => {
+            optsBox.style.display = 'none';
+            customBox.style.display = 'flex';
+            customBox.querySelector('input').focus();
+        };
+        optsBox.appendChild(otherBtn);
+        card.appendChild(optsBox);
+    } else {
+        customBox.style.display = 'flex';
+    }
+
+    const input = document.createElement('input');
+    input.type = 'text';
+    input.className = 'form-control form-control-sm';
+    input.placeholder = 'Type your answer…';
+    input.onkeypress = (e) => { if (e.key === 'Enter' && input.value.trim()) submit(input.value.trim()); };
+    const sendBtn = el('button', 'btn btn-sm btn-primary');
+    sendBtn.type = 'button';
+    sendBtn.innerHTML = '<i class="fas fa-paper-plane"></i>';
+    sendBtn.onclick = () => { if (input.value.trim()) submit(input.value.trim()); };
+    // Skipping is a real answer ("I don't want to explain this"), and the
+    // server has already recorded the divergence as asked — so it won't
+    // reappear on the next filter run.
+    const skipBtn = el('button', 'btn btn-sm btn-outline-secondary', 'Skip');
+    skipBtn.type = 'button';
+    skipBtn.onclick = () => card.remove();
+    customBox.appendChild(input);
+    customBox.appendChild(sendBtn);
+    customBox.appendChild(skipBtn);
+    card.appendChild(customBox);
+    if (q.type === 'choice' && q.options && q.options.length) {
+        const skipRow = el('div', 'step-ask-skip-row');
+        const skip2 = el('button', 'btn btn-sm btn-outline-secondary', 'Skip');
+        skip2.type = 'button';
+        skip2.onclick = () => card.remove();
+        skipRow.appendChild(skip2);
+        card.appendChild(skipRow);
+    }
+    box.appendChild(card);
+    box.scrollTop = box.scrollHeight;
+}
+
 function renderStepAskCard(seq, q) {
     const box = document.getElementById('chatBox');
     const card = el('div', 'chat-question-card step-ask-card mb-2');
@@ -2274,6 +2450,54 @@ function exportSkill() {
             draftQueue = (d.drafts || []).slice();
             draftTotal = draftQueue.length;
             if (!draftTotal) { alert('Nothing to export.'); return; }
+            // A skill was loaded, so the draft was rebuilt on its framework
+            // (server-side, see /learning/converge). Say what was separated
+            // out BEFORE showing the result — a draft that silently grew from
+            // 3 keywords to 21 looks like a bug unless the inheritance is
+            // stated. With no skill loaded this block never runs and Export
+            // behaves exactly as before.
+            // A skill WAS loaded, but the chain had already reached its depth
+            // limit, so this export deliberately came out standalone. Without
+            // saying so it looks identical to having loaded nothing.
+            if (d.lineage_blocked) {
+                const lb = d.lineage_blocked;
+                alert(
+                    `Not inherited from "${lb.parent_name}" — that skill is already ` +
+                    `${lb.parent_lineage.length} generation(s) deep, and this would make ` +
+                    `${lb.child_depth} (limit ${lb.max_depth}).\n\n` +
+                    `Each generation copies all of its parent's keywords, so by this depth ` +
+                    `the filter matches most of the log and stops narrowing anything down.\n\n` +
+                    `Your knowledge is still being exported — as a new standalone skill. ` +
+                    `If it really belongs to that family, consider editing ` +
+                    `"${lb.parent_name}" directly instead.`);
+            }
+            const li = (draftQueue[0] || {}).lineage_info;
+            if (li) {
+                const parts = [
+                    `Built on "${li.parent_name}" — inherited vs. new kept separate.`,
+                    ``,
+                    // Deliberately no inherited-RULE count here. The server
+                    // itemises rules with skill_dedup.split_rules (blank lines
+                    // and top-level bullets both split), the modal with its own
+                    // "^<digits>. " rule — on hand-authored parents with
+                    // sub-bullets those disagree (15 vs 6 on connection_flow),
+                    // and quoting a number the very next screen contradicts is
+                    // worse than not quoting one. The modal shows the split
+                    // per-rule anyway (INH/NEW tags + divider).
+                    `Inherited from parent : ${li.inherited.keywords} keywords, plus its full rule set`,
+                    `New in this skill     : ${li.added.keywords} keywords, ${li.added.rules} rules`,
+                    `Dropped as duplicate  : ${li.removed_as_duplicate}`,
+                ];
+                if (li.duplicate_keywords.length)
+                    parts.push(`    ${li.duplicate_keywords.join(', ')}`);
+                if (li.needs_review) {
+                    parts.push(`Similar, kept for you to judge: ${li.needs_review}`);
+                    parts.push(`    ${li.review_keywords.join(', ')}`);
+                }
+                parts.push(``, `Lineage: ${li.lineage.join(' → ')} → (this skill)`);
+                alert(parts.join('
+'));
+            }
             if (draftTotal > 1) {
                 alert(`This session covers ${draftTotal} mutually-exclusive scenarios — ` +
                       `you'll review and save them one at a time, starting now.`);
@@ -2396,6 +2620,5 @@ applyAssessment({
 // rather than mislabeling old messages as general knowledge they were never
 // actually confirmed to be.
 ({{ state.chat_history|tojson }}).forEach(m => appendMsg(m.role, m.content, m.step));
-checkRoundNudge(); // after replay, so it lands at the bottom if there's unlogged activity
 </script>
 {% endblock %}

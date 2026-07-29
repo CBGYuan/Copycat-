@@ -2,7 +2,7 @@ from flask import Blueprint, request, jsonify
 
 from configs.global_configs import app_config
 from services import session_store, learning_service, skill_service
-from utils import operation_journal
+from utils import operation_journal, divergence, skill_dedup
 
 # No standalone page: the "Teach This Scenario" flow lives inline inside the
 # combined Log Viewer workbench (templates/log_viewer.html) — this blueprint
@@ -131,7 +131,12 @@ def _sample_lines(lines: list, limit: int = 40, tail_fraction: float = 0.4) -> l
     return lines[:head_n] + ["... (middle lines omitted) ..."] + lines[-tail_n:]
 
 
-def _context_from_state(state, exclude_skill_key: str = "", include_existing: bool = True) -> dict:
+def _context_from_state(state, exclude_skill_key: str = "", include_existing: bool = True,
+                        baseline_skill=None) -> dict:
+    """`baseline_skill` is passed ONLY by the export path, and only when the
+    loaded skill will genuinely become this draft's parent — it makes the
+    prompt state that the new skill inherits that skill's keywords, which is
+    false anywhere else (see learning_service's BASELINE SKILL block)."""
     domain = (state.log_domain or "wifi").lower()
     including = [f["text"] for f in state.filters if f["enabled"] and not f["excluding"]]
     excluding = [f["text"] for f in state.filters if f["enabled"] and f["excluding"]]
@@ -175,6 +180,11 @@ def _context_from_state(state, exclude_skill_key: str = "", include_existing: bo
         # button), keeping that path token-cheap and guaranteeing it never
         # compares against anything already saved.
         "existing_skills": _other_skill_descriptions(exclude_skill_key, domain) if include_existing else [],
+        "baseline_skill": {
+            "key": state.active_skill_key,
+            "name": baseline_skill.name,
+            "description": baseline_skill.description,
+        } if baseline_skill else None,
         "sample_lines": _sample_lines(state.filtered_preview, limit=40),
         "log_annotations": state.log_annotations,
         "chat_history": state.chat_history,
@@ -253,6 +263,193 @@ def log_round():
         "prior_knowledge": state.prior_knowledge,
         "usage": {"last": llm_helper.last_usage, "session": llm_helper.session_usage},
     })
+
+
+def _filter_signature(state) -> str:
+    """Identity of the filter SET a baseline was formed on.
+
+    Deliberately built from the filter texts + source file only, never from
+    their enabled/disabled state: toggling a checkbox is precisely the
+    engineer action the baseline exists to be compared against, so folding
+    enabled-state in here would mark the baseline stale on every toggle and
+    re-baseline against the engineer's own edit — erasing the comparison and
+    costing an LLM call per click. Loading a different .tat/skill DOES change
+    the text set, which is the case that should invalidate it.
+    """
+    texts = sorted(f"{f['text']}\x00{int(bool(f['excluding']))}" for f in state.filters)
+    return f"{state.tat_path}\x01{state.active_skill_key}\x01" + "\x02".join(texts)
+
+
+@learning_bp.route("/baseline", methods=["POST"])
+def baseline():
+    """Form the LLM's committed first read of a just-loaded default filter set,
+    BEFORE the engineer edits anything (see learning_service.analyze_baseline).
+
+    This is the starting point of the new flow: the read commits to which
+    keywords it thinks are load-bearing, which look like noise, and what it
+    cannot tell — so later engineer actions can be diffed against it to find
+    genuine, observable disagreement instead of asking the model to rate its
+    own uncertainty. It also produces the session's FIRST assessment, taking
+    over the role round 1 used to play, so readiness/gaps are populated even
+    in a session where the engineer never needs to change the filter at all.
+
+    Re-callable cheaply: a repeat call for the same filter set returns the
+    stored baseline without spending another LLM call, so a page reload or a
+    double-fire can't quietly cost tokens. Pass force=true to re-read anyway.
+    """
+    llm_helper = app_config.llm_helper
+    if not llm_helper or not llm_helper.is_ready:
+        return jsonify({"success": False, "message": "LLM is not configured yet."}), 503
+
+    state = session_store.get_state()
+    if not state.filters:
+        return jsonify({"success": False, "message": "Load a .tat file or a skill first."}), 400
+    if not state.filtered_preview:
+        return jsonify({"success": False, "message": "Run the filter first so there's something to read."}), 400
+
+    data = request.get_json(silent=True) or {}
+    signature = _filter_signature(state)
+    if state.baseline and state.baseline_filter_sig == signature and not data.get("force"):
+        return jsonify({
+            "success": True, "cached": True,
+            "baseline": state.baseline,
+            "assessment": _assessment_payload(state),
+        })
+
+    # The baseline reads the filter set as loaded — it must NOT be shown the
+    # existing-skill library, whose descriptions would let it borrow a
+    # ready-made scenario read instead of committing to its own from the
+    # evidence. A borrowed read is not a falsifiable prediction.
+    context = _context_from_state(state, exclude_skill_key="", include_existing=False)
+    try:
+        result = learning_service.analyze_baseline(llm_helper, context, use_prior_knowledge=False)
+    except Exception as e:
+        return jsonify({"success": False, "message": f"LLM call failed: {e}"}), 500
+
+    state.baseline = {k: v for k, v in result.items() if k != "assessment"}
+    state.baseline_filter_sig = signature
+    # Everything logged so far BUILT the filter set this read just described,
+    # so it can't have deviated from it — divergence starts counting here.
+    state.baseline_op_seq = len(state.operations)
+    # Same guard as log_round: assessment=None means the JSON didn't parse,
+    # and silently zeroing a previously-good readiness would be misleading.
+    if result.get("assessment") is not None:
+        _store_assessment(state, result["assessment"])
+
+    state.chat_history.append({
+        "role": "assistant",
+        "content": f"**First read of this filter:** {result.get('analysis', '')}",
+        "step": "all",
+    })
+
+    return jsonify({
+        "success": True, "cached": False,
+        "baseline": state.baseline,
+        "assessment": _assessment_payload(state),
+        "usage": {"last": llm_helper.last_usage, "session": llm_helper.session_usage},
+    })
+
+
+@learning_bp.route("/clarify", methods=["POST"])
+def clarify():
+    """Turn ONE divergence into ONE discriminating question.
+
+    The decision of WHETHER to interrupt was already made, deterministically
+    and without a model, by utils.divergence.detect (measured materiality
+    first, baseline stance only to classify). This route just picks the single
+    highest-value target among what that found and spends one LLM call on
+    phrasing it. If nothing qualifies it returns question=None and costs
+    nothing — the common case on an ordinary filter edit.
+
+    Only CONTRADICTIONS and the focus window are asked about. Omissions are
+    deliberately never asked here: with no competing reading there is nothing
+    to discriminate between, so a question would be low-information-gain
+    prompting. Those surface as the Steps panel's passive 🎓 hints instead.
+
+    Contradictions are answered through /learning/answer_step_question, whose
+    existing behaviour closes the loop exactly right — recording the answer as
+    the operation's `reason` both captures the knowledge for export and
+    removes the edit from the unexplained set, so the same divergence cannot
+    come back.
+    """
+    llm_helper = app_config.llm_helper
+    if not llm_helper or not llm_helper.is_ready:
+        return jsonify({"success": False, "message": "LLM is not configured yet."}), 503
+
+    state = session_store.get_state()
+    report = divergence.detect(state)
+    domain = (state.log_domain or "wifi").lower()
+
+    # Contradictions first: they carry two concrete competing readings, which
+    # is strictly more information than the focus question. Most recent first
+    # — it's the edit the engineer still has in their head.
+    target = None
+    pending = [c for c in report["contradictions"] if c["seq"] not in state.clarified_seqs]
+    if pending:
+        c = sorted(pending, key=lambda x: x["seq"])[-1]
+        target = {
+            "kind": "contradiction", "domain": domain, "text": c["text"],
+            "action_phrase": operation_journal._ACTION_VERB.get(c["action"], c["action"]),
+            "effect_phrase": c["effect_phrase"],
+            "baseline_stance": c["baseline_stance"], "baseline_why": c["baseline_why"],
+            "seq": c["seq"],
+        }
+    elif report["focus"] and not state.focus_clarified:
+        target = {"kind": "focus", "domain": domain, **report["focus"]}
+
+    if not target:
+        return jsonify({"success": True, "question": None})
+
+    try:
+        result = learning_service.clarify_divergence(llm_helper, target, state.prior_knowledge)
+    except Exception as e:
+        return jsonify({"success": False, "message": f"LLM call failed: {e}"}), 500
+    if not result:
+        # No usable question came back. Deliberately NOT falling back to a
+        # generic one — an undiscriminating question is the exact thing the
+        # gate exists to avoid — and deliberately not marking the target as
+        # asked, so a transient parse failure doesn't burn it permanently.
+        return jsonify({"success": True, "question": None})
+
+    seq = target.get("seq")
+    if target["kind"] == "focus":
+        state.focus_clarified = True
+    else:
+        state.clarified_seqs.append(seq)
+
+    state.chat_history.append({
+        "role": "assistant",
+        "content": f"❓ {result['question']['question']}",
+        "step": seq if seq is not None else "all",
+    })
+    return jsonify({
+        "success": True,
+        "kind": target["kind"],
+        "seq": seq,
+        "keyword": target.get("text", ""),
+        "question": result["question"],
+        "captures": result["captures"],
+        "usage": {"last": llm_helper.last_usage, "session": llm_helper.session_usage},
+    })
+
+
+@learning_bp.route("/answer_focus_clarify", methods=["POST"])
+def answer_focus_clarify():
+    """Answer to the focus-window locating question. No LLM call. Stored on
+    state.focus_reason rather than an operation's `reason` because a focus
+    window is not a filter edit and has no operation to attach to (see
+    WorkingState.focus_reason)."""
+    data = request.get_json(silent=True) or {}
+    question = (data.get("question") or "").strip()
+    answer = (data.get("answer") or "").strip()
+    if not answer:
+        return jsonify({"success": False, "message": "Empty answer"}), 400
+    state = session_store.get_state()
+    state.focus_reason = answer
+    if question:
+        state.chat_history.append({"role": "assistant", "content": f"❓ {question}", "step": "all"})
+    state.chat_history.append({"role": "user", "content": answer, "step": "all"})
+    return jsonify({"success": True})
 
 
 @learning_bp.route("/set_mode", methods=["POST"])
@@ -558,9 +755,36 @@ def converge():
     use_prior = state.prior_knowledge
     domain = (state.log_domain or "wifi").lower()
 
+    # Resolve the parent BEFORE the LLM call, not after: if this export is
+    # going to inherit, the synthesis has to be told so while it is still
+    # writing the description (that description is the only thing that will
+    # distinguish parent from child downstream — see the BASELINE SKILL block
+    # in learning_service._build_context_block). Depth is checked here too, so
+    # a chain that has hit the cap doesn't get a prompt promising inheritance
+    # that then doesn't happen.
+    parent = _baseline_skill(state)
+    depth = skill_dedup.lineage_depth_check(parent) if parent else None
+    lineage_blocked = None
+    if parent and not depth["allowed"]:
+        # Already as deep as the chain can usefully go. Inheriting again would
+        # produce a keyword list matching most of the log, which is where
+        # Avatar's per-skill evidence payload gets head+tail truncated and the
+        # skill stops focusing anything (see skill_dedup.MAX_LINEAGE_DEPTH).
+        # Export still happens — the taught knowledge is not what's at fault —
+        # it just lands as a fresh root instead.
+        lineage_blocked = {
+            "parent_key": state.active_skill_key,
+            "parent_name": parent.name,
+            "child_depth": depth["child_depth"],
+            "max_depth": depth["max_depth"],
+            "parent_lineage": list(parent.lineage),
+        }
+        parent = None
+
     # FRESH: don't even load the existing-skills list into the prompt. PRIOR:
     # include the same-domain skills so the synthesis can carve around them.
-    context = _context_from_state(state, exclude_skill_key="", include_existing=use_prior)
+    context = _context_from_state(state, exclude_skill_key="", include_existing=use_prior,
+                                  baseline_skill=parent if use_prior else None)
     try:
         result = learning_service.synthesize_skill_draft(
             llm_helper, context, qa_pairs=[], use_prior_knowledge=use_prior)
@@ -595,6 +819,59 @@ def converge():
         routed["domain"] = domain
         drafts.append(routed)
 
+    # Whether a skill was LOADED decides the shape of the export, and it is
+    # the only thing that decides it — there is one Export button, not two.
+    #
+    #   No skill loaded  -> nothing to be redundant against. Leave the drafts
+    #                       exactly as synthesized; the only structuring is
+    #                       the mutually-exclusive split route_draft/synthesis
+    #                       already did.
+    #   Skill loaded     -> that skill is the parent. Separate what merely
+    #                       repeats it from what is genuinely new (see
+    #                       utils.skill_dedup), and rebuild each draft on the
+    #                       parent's framework with the inheritance recorded.
+    #                       Fully resolved, never delta-only: Avatar's loader
+    #                       ignores the lineage keys, so a delta-only child
+    #                       would run there with a fraction of its keywords.
+    # Deterministic, no extra LLM call. `parent` was resolved (and depth-
+    # checked) before the synthesis call above.
+    if parent:
+        rebuilt = []
+        for d in drafts:
+            diff = skill_dedup.diff_against_parent(d, parent)
+            ext = skill_dedup.build_extension_skill(
+                d, parent, state.active_skill_key, diff)
+            # What the modal needs to SHOW the separation rather than just
+            # presenting a longer list: an unexplained merge reads as either
+            # data loss or duplication depending on which way it went.
+            ext["lineage_info"] = {
+                "parent_key": state.active_skill_key,
+                "parent_name": parent.name,
+                "lineage": ext["lineage"],
+                "inherited": ext["inherited_counts"],
+                "added": ext["added_counts"],
+                "removed_as_duplicate": diff["summary"]["auto_removable"],
+                "needs_review": diff["summary"]["needs_review"],
+                "duplicate_keywords": [i["text"] for i in
+                                       diff["keywords"]["exact"] + diff["keywords"]["covered"]],
+                "review_keywords": [i["text"] for i in diff["keywords"]["near"]],
+                # The exact split the modal colours by. Counts alone can't do
+                # it: the engineer has to see WHICH chip came from the parent
+                # and which one they just taught, per item, not "19 vs 1".
+                "inherited_keywords": list(parent.keywords),
+                "inherited_exclusive": list(parent.exclusive),
+                # The child shares every one of the parent's keywords, so its
+                # description is the ONLY thing Avatar's agent can tell them
+                # apart by (see skill_dedup.description_conflict). The prompt
+                # is told to keep them exclusive; this catches it when it
+                # didn't, while the engineer still has the field in front of
+                # them and can just rewrite it.
+                "description_conflict": skill_dedup.description_conflict(
+                    d.get("description", ""), parent),
+            }
+            rebuilt.append(ext)
+        drafts = rebuilt
+
     state.skill_draft = drafts
     # Stamp the watermark AFTER a successful synthesis — the guard above
     # compares against this on the NEXT converge() call.
@@ -602,6 +879,11 @@ def converge():
     return jsonify({
         "success": True,
         "drafts": drafts,
+        "inherited_from": state.active_skill_key if parent else None,
+        # Set only when a skill WAS loaded but the chain was already at max
+        # depth, so the UI can say why this export came out standalone
+        # instead of silently looking like nothing was loaded.
+        "lineage_blocked": lineage_blocked,
         "mode": "prior" if use_prior else "fresh",
         "domain": domain,
         "usage": {"last": llm_helper.last_usage, "session": llm_helper.session_usage},
@@ -641,7 +923,14 @@ def save():
     # engineer's contribution + previous local edits) into the local file,
     # not just this one skill — see skill_service.save_skill's docstring.
     base_pool = app_config.bt_skills if domain == "bt" else app_config.skills
-    saved_key = skill_service.save_skill(skill_key, skill, domain=domain, base=base_pool)
+    try:
+        saved_key = skill_service.save_skill(skill_key, skill, domain=domain, base=base_pool)
+    except skill_service.SkillStoreError as e:
+        # The local skills file could not be read, so nothing was written and
+        # the draft is still in session state. Report it as a failed save so
+        # the modal stays open with the engineer's work intact, rather than a
+        # 500 they would read as "it probably went through".
+        return jsonify({"success": False, "message": str(e)}), 409
     loaded = skill_service.load_shared_skills()
     app_config.set_skills(loaded["wifi"])
     app_config.set_bt_skills(loaded["bt"])

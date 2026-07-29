@@ -1,13 +1,89 @@
 import os
-from datetime import date
+from datetime import date, datetime
 
 from flask import Blueprint, render_template, request, jsonify
 
 from configs.global_configs import app_config
 from services import session_store, event_log_service
-from utils import file_picker, tat_parser, helpers, operation_journal
+from utils import file_picker, tat_parser, helpers, operation_journal, divergence
 
 log_viewer_bp = Blueprint("log_viewer", __name__, url_prefix="/log_viewer")
+
+
+# ---- Read+canonicalize cache ------------------------------------------
+# /apply_filter used to call helpers.read_log_file() fresh on EVERY request —
+# a full re-read + re-canonicalize (a regex pass per line trying each of the
+# BT/WiFi timestamp formats) of the whole file, every single checkbox toggle.
+# On a multi-million-line capture that's a multi-second stall for something
+# that should feel instant. Cached here keyed by (path, mtime, fallback_date)
+# so a changed file or a different date anchor invalidates it; only the most
+# recently loaded file is kept, same bounded-memory idea as
+# event_log_service._get_cached_raw_rows. The timestamp index (for the focus
+# window below) is built lazily — most sessions never use Focus, so paying
+# for it up front on every load would be wasted work for them.
+_LOG_CACHE: dict = {}
+
+
+def _cached_log_lines(path: str, fallback_date) -> list:
+    try:
+        mtime = os.path.getmtime(path)
+    except OSError:
+        mtime = None
+    entry = _LOG_CACHE.get(path)
+    if not entry or entry["mtime"] != mtime or entry["fallback_date"] != fallback_date:
+        entry = {
+            "mtime": mtime, "fallback_date": fallback_date,
+            "lines": helpers.read_log_file(path, fallback_date=fallback_date),
+            "ts_index": None,
+        }
+        _LOG_CACHE.clear()
+        _LOG_CACHE[path] = entry
+    return entry["lines"]
+
+
+def _cached_timestamp_index(path: str, lines: list) -> list:
+    entry = _LOG_CACHE.get(path)
+    if entry is None:
+        # Shouldn't happen in practice (lines always come from the cache
+        # above first) — build it uncached rather than crash.
+        return tat_parser.build_timestamp_index(lines)
+    if entry.get("ts_index") is None:
+        entry["ts_index"] = tat_parser.build_timestamp_index(lines)
+    return entry["ts_index"]
+
+
+def _parse_focus_time(raw_time: str, lines: list):
+    """Parse a typed "issue time" into a datetime. Accepts a full canonical
+    timestamp ("MM/DD/YYYY-HH:MM:SS[.mmm]") or a bare time-of-day
+    ("HH:MM[:SS[.mmm]]"), the latter combined with the loaded log's own
+    first parseable line's date so the engineer doesn't have to type it —
+    they're looking at a log full of bare times, typing one back should just
+    work. Returns None if nothing parses."""
+    raw_time = raw_time.strip()
+    for fmt in ("%m/%d/%Y-%H:%M:%S.%f", "%m/%d/%Y-%H:%M:%S"):
+        try:
+            return datetime.strptime(raw_time, fmt)
+        except ValueError:
+            pass
+    t = None
+    for fmt in ("%H:%M:%S.%f", "%H:%M:%S", "%H:%M"):
+        try:
+            t = datetime.strptime(raw_time, fmt).time()
+            break
+        except ValueError:
+            continue
+    if t is None:
+        return None
+    first_ts = None
+    for line in lines:
+        ts = tat_parser._leading_timestamp(line)
+        if ts:
+            first_ts = ts
+            break
+    if not first_ts:
+        return None
+    base_date = datetime.strptime(first_ts, tat_parser._TS_DT_FMT).date()
+    return datetime.combine(base_date, t)
 
 
 # Skills carry no color info of their own (only a .tat file does, straight
@@ -76,15 +152,23 @@ def index():
 RAW_PREVIEW_LINES = 500
 
 
-def _raw_preview(path: str, anchor_date):
+def _raw_preview(path: str, anchor_date, focus_dt=None, focus_window_min: int = 5):
     """Uncoloured (no filter applied) preview of a log file — shared by
-    /pick_log (right after a file is chosen) and /show_all (jumping back to
-    it from a filtered view without re-opening the file dialog)."""
-    log_lines = helpers.read_log_file(path, fallback_date=anchor_date)
+    /pick_log (right after a file is chosen), /show_all (jumping back to it
+    from a filtered view without re-opening the file dialog), and /set_focus
+    (jumping to a ±focus_window_min slice around an issue time). `total_lines`
+    is always the TRUE full-file count regardless of focus, so the UI can
+    still show "N of <full total>"."""
+    log_lines = _cached_log_lines(path, anchor_date)
     total_lines = len(log_lines)
+    start_idx = 0
+    window = log_lines
+    if focus_dt is not None:
+        ts_index = _cached_timestamp_index(path, log_lines)
+        start_idx, window = tat_parser.slice_by_focus_window(log_lines, ts_index, focus_dt, focus_window_min)
     preview = [
-        {"line_no": i, "text": line.rstrip("\n"), "back_color": None, "fore_color": None}
-        for i, line in enumerate(log_lines[:RAW_PREVIEW_LINES], start=1)
+        {"line_no": start_idx + i, "text": line.rstrip("\n"), "back_color": None, "fore_color": None}
+        for i, line in enumerate(window[:RAW_PREVIEW_LINES], start=1)
     ]
     return total_lines, preview
 
@@ -100,6 +184,11 @@ def pick_log():
     prev_domain = state.log_domain
     state.log_path = path
     state.log_domain = helpers.detect_log_domain(path)
+    # A focus window from whatever log was previously loaded means nothing
+    # for this one — an issue time in the old file's frame could silently
+    # slice the new file down to zero lines, which would look identical to
+    # "this log failed to load."
+    state.focus_center_iso = ""
     # Loading a different log is the OTHER explicit "start over" trigger — a
     # skill Save no longer clears readiness/round/operation-journal state on
     # its own (see WorkingState.reset_teaching_progress), so switching logs
@@ -191,21 +280,81 @@ def pick_log():
 
 @log_viewer_bp.route("/show_all", methods=["POST"])
 def show_all():
-    """Jump the log pane back to the raw, unfiltered view — same shape as
-    /pick_log's initial preview, but reuses the already-loaded log_path/
-    date anchor instead of opening the file dialog again. Purely a view
-    reset: does not touch filters, operations, or any teaching state, so
-    re-applying the same filter afterward picks up exactly where it left
-    off."""
+    """Jump the log pane back to the raw, unfiltered, unfocused view — same
+    shape as /pick_log's initial preview, but reuses the already-loaded
+    log_path/date anchor instead of opening the file dialog again. Also
+    clears any active issue-time focus window (see /set_focus) — this is the
+    explicit "show me literally everything" escape hatch, so a lingering
+    focus window silently narrowing the result would defeat the point.
+    Otherwise purely a view reset: does not touch filters, operations, or
+    any teaching state, so re-applying the same filter afterward picks up
+    exactly where it left off."""
     state = session_store.get_state()
     if not state.log_path or not os.path.exists(state.log_path):
         return jsonify({"success": False, "message": "No log loaded yet"}), 400
+    state.focus_center_iso = ""
     anchor_date = date.fromisoformat(state.log_date_anchor) if state.log_date_anchor else None
     try:
         total_lines, raw_preview = _raw_preview(state.log_path, anchor_date)
     except Exception as e:
         return jsonify({"success": False, "message": f"Failed to read log: {e}"}), 500
     return jsonify({"success": True, "total_lines": total_lines, "preview": raw_preview})
+
+
+@log_viewer_bp.route("/set_focus", methods=["POST"])
+def set_focus():
+    """Narrow the working log to a ±window_min-minute slice around a typed
+    "issue time" — the whole point being that every subsequent /apply_filter
+    call (toggling a checkbox, adding a keyword, …) then only has to scan
+    that slice instead of the entire multi-million-line file. Persists on
+    state.focus_center_iso until explicitly cleared (/clear_focus or
+    /show_all) or a new log is picked, so it survives repeated filter edits
+    the way the filter set itself does."""
+    data = request.get_json(silent=True) or {}
+    raw_time = str(data.get("time") or "").strip()
+    window_min = data.get("window_min")
+    state = session_store.get_state()
+    if not state.log_path or not os.path.exists(state.log_path):
+        return jsonify({"success": False, "message": "No log loaded yet"}), 400
+    if not raw_time:
+        return jsonify({"success": False, "message": "Enter a time to focus on"}), 400
+
+    anchor_date = date.fromisoformat(state.log_date_anchor) if state.log_date_anchor else None
+    try:
+        lines = _cached_log_lines(state.log_path, anchor_date)
+    except Exception as e:
+        return jsonify({"success": False, "message": f"Failed to read log: {e}"}), 500
+    focus_dt = _parse_focus_time(raw_time, lines)
+    if focus_dt is None:
+        return jsonify({
+            "success": False,
+            "message": f"Couldn't parse a time from \"{raw_time}\" — try HH:MM:SS or MM/DD/YYYY-HH:MM:SS",
+        }), 400
+
+    state.focus_center_iso = focus_dt.strftime(tat_parser._TS_DT_FMT)[:-3]
+    state.focus_window_min = int(window_min) if window_min else 5
+
+    total_lines, preview = _raw_preview(state.log_path, anchor_date, focus_dt, state.focus_window_min)
+    return jsonify({
+        "success": True,
+        "focus_center": state.focus_center_iso,
+        "focus_window_min": state.focus_window_min,
+        "total_lines": total_lines,
+        "window_lines": len(preview),
+        "preview": preview,
+    })
+
+
+@log_viewer_bp.route("/clear_focus", methods=["POST"])
+def clear_focus():
+    """Drop the issue-time focus window without otherwise touching the
+    view — filters keep whatever they currently show, just re-scanning the
+    full file from here on. (Separate from /show_all, which ALSO discards
+    any active filter to show the raw view — this is just "stop narrowing
+    by time.")"""
+    state = session_store.get_state()
+    state.focus_center_iso = ""
+    return jsonify({"success": True})
 
 
 @log_viewer_bp.route("/pick_event_log", methods=["POST"])
@@ -369,9 +518,32 @@ def apply_filter():
         # Reuse the SAME date anchor /pick_log computed (never re-derive it
         # here) so a dateless BT HCI / WiFi DDD log's synthesized timestamps
         # stay identical between the raw preview and every filtered run.
+        # _cached_log_lines avoids re-reading + re-canonicalizing the WHOLE
+        # file on every single checkbox toggle — see its docstring.
         anchor_date = date.fromisoformat(state.log_date_anchor) if state.log_date_anchor else None
-        log_lines = helpers.read_log_file(state.log_path, fallback_date=anchor_date)
-        stats = tat_parser.compute_filter_stats(log_lines, state.filters, preview_limit=1000)
+        log_lines = _cached_log_lines(state.log_path, anchor_date)
+        full_total_lines = len(log_lines)
+        start_line_no = 1
+        focus_payload = None
+        if state.focus_center_iso:
+            try:
+                focus_dt = datetime.strptime(state.focus_center_iso, tat_parser._TS_DT_FMT)
+                ts_index = _cached_timestamp_index(state.log_path, log_lines)
+                start_idx, log_lines = tat_parser.slice_by_focus_window(
+                    log_lines, ts_index, focus_dt, state.focus_window_min)
+                start_line_no = start_idx + 1
+                focus_payload = {
+                    "center": state.focus_center_iso,
+                    "window_min": state.focus_window_min,
+                    "window_lines": len(log_lines),
+                }
+            except ValueError:
+                # Corrupted state value (shouldn't happen — only ever written
+                # by /set_focus in this exact format) — ignore and run on the
+                # full file rather than 500 the whole filter action over it.
+                pass
+        stats = tat_parser.compute_filter_stats(
+            log_lines, state.filters, preview_limit=1000, start_line_no=start_line_no)
     except Exception as e:
         return jsonify({"success": False, "message": f"Failed to filter log: {e}"}), 500
 
@@ -391,7 +563,13 @@ def apply_filter():
 
     return jsonify({
         "success": True,
+        # total_lines is the WINDOW size while a focus is active (matches
+        # what this scan actually covered — see stats["total_lines"]);
+        # full_total_lines is always the true whole-file count so the UI can
+        # still show "N of <full file total>" alongside the focus badge.
         "total_lines": stats["total_lines"],
+        "full_total_lines": full_total_lines,
+        "focus": focus_payload,
         "total_matched": stats["surviving_count"],
         "overlap_count": stats["overlap_count"],
         "co_occurrence": stats["co_occurrence"],
@@ -401,6 +579,12 @@ def apply_filter():
         "per_filter": stats["per_filter"],
         "operations": operation_journal.payload(state),
         "annotations": state.log_annotations,
+        # What the engineer just did that the baseline read didn't expect
+        # (utils.divergence.detect) — computed here, with no LLM call, because
+        # it runs on every filter edit. Contradictions are what may later be
+        # worth ONE clarifying question; omissions drive the Steps panel's
+        # "explain this edit" hints. See utils/divergence.py.
+        "divergence": divergence.detect(state),
     })
 
 

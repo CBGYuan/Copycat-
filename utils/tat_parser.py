@@ -20,9 +20,11 @@ filter as an including one, which is wrong: the sample connectivity.tat has
 17 `excluding="y"` rules (SCAN_REQUEST, TASK_SCAN, PROP_SET_, ...) that must
 subtract lines, not add them.
 """
+import bisect
 import re
 import xml.etree.ElementTree as ET
-from typing import List, Dict, Optional
+from datetime import datetime, timedelta
+from typing import List, Dict, Optional, Tuple
 
 
 def _to_bool(val: Optional[str]) -> bool:
@@ -97,8 +99,62 @@ def _leading_timestamp(line: str):
     return m.group(1) if m else None
 
 
+# ---- Issue-time focus window --------------------------------------------
+# Every /apply_filter call re-scans the WHOLE loaded file, which is fine for
+# a log with a few thousand lines but a multi-second stall per checkbox
+# toggle on a real multi-million-line capture. Narrowing to a ±N-minute
+# window around a typed "issue time" (see log_viewer_routes._cached_log_lines
+# / /set_focus) is the fix: everything downstream — compute_filter_stats,
+# the raw preview — then only ever has to look at that slice.
+_TS_DT_FMT = "%m/%d/%Y-%H:%M:%S.%f"
+
+
+def build_timestamp_index(log_lines: List[str]) -> List[Tuple[int, datetime]]:
+    """[(line_idx, datetime), ...] for every line with a parseable leading
+    canonical timestamp — line_idx is 0-based into `log_lines`. Used by
+    slice_by_focus_window to binary-search a time window's boundaries
+    instead of scanning every line. O(n) to build, same as a single filter
+    pass — callers should cache the result alongside the line list itself
+    (see log_viewer_routes._cached_timestamp_index) rather than rebuild it
+    on every focus/filter change."""
+    out = []
+    for i, line in enumerate(log_lines):
+        ts = _leading_timestamp(line)
+        if not ts:
+            continue
+        try:
+            out.append((i, datetime.strptime(ts, _TS_DT_FMT)))
+        except ValueError:
+            continue
+    return out
+
+
+def slice_by_focus_window(log_lines: List[str], timestamp_index: List[Tuple[int, datetime]],
+                           focus_dt: datetime, window_minutes: int = 5) -> Tuple[int, List[str]]:
+    """Narrow `log_lines` to the [focus_dt - window, focus_dt + window]
+    range using `timestamp_index` (see build_timestamp_index) to binary-
+    search the boundary rather than scan every line. Assumes log_lines are
+    chronologically ordered, true for a driver-log capture. Returns
+    (start_line_idx, sliced_lines) — the 0-based index of the slice's first
+    line within the ORIGINAL log_lines, needed by the caller to pass the
+    correct `start_line_no` on to compute_filter_stats so real file line
+    numbers survive the window (see its docstring). Falls back to the full
+    list (start_line_idx=0) when nothing in the file has a parseable
+    timestamp at all — can't window without one."""
+    if not timestamp_index:
+        return 0, log_lines
+    dts = [dt for _, dt in timestamp_index]
+    lo = bisect.bisect_left(dts, focus_dt - timedelta(minutes=window_minutes))
+    hi = bisect.bisect_right(dts, focus_dt + timedelta(minutes=window_minutes)) - 1
+    if lo > hi:
+        return 0, []
+    start_idx = timestamp_index[lo][0]
+    end_idx = timestamp_index[hi][0]
+    return start_idx, log_lines[start_idx:end_idx + 1]
+
+
 def compute_filter_stats(log_lines: List[str], filters: List[Dict],
-                          preview_limit: int = 500) -> Dict:
+                          preview_limit: int = 500, start_line_no: int = 1) -> Dict:
     """Apply every filter to `log_lines` in one pass and return:
 
       - per_filter: raw hit count for EVERY filter, enabled or not, in file
@@ -121,6 +177,14 @@ def compute_filter_stats(log_lines: List[str], filters: List[Dict],
         AND no excluding filter, in original chronological order, each tagged
         with its original 1-based file line number + which filter(s) matched
         (for color highlighting), capped at `preview_limit`.
+
+    `start_line_no` — the real 1-based file line number of `log_lines[0]`.
+    Defaults to 1 (the normal whole-file case); callers passing a WINDOWED
+    slice (see slice_by_focus_window) must pass the slice's true starting
+    line number here, otherwise every line_no in the returned preview would
+    be renumbered from 1 within the window instead of matching the file's
+    real line numbers — silently breaking annotate_line and jump-to-line,
+    which both key off the real number.
     """
     enabled = [(i, r) for i, r in enumerate(filters) if r["enabled"]]
     including = [(i, r) for i, r in enabled if not r["excluding"]]
@@ -151,7 +215,7 @@ def compute_filter_stats(log_lines: List[str], filters: List[Dict],
     first_ts = None
     last_ts = None
 
-    for line_no, line in enumerate(log_lines, start=1):
+    for line_no, line in enumerate(log_lines, start=start_line_no):
         line_lower = line.lower()
         # Raw match count for every pattern, enabled or not — independent of
         # the include/exclude interplay below.

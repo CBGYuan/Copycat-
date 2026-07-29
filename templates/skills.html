@@ -1,48 +1,357 @@
 {% extends "base.html" %}
 {% block content %}
-<div class="row">
-  <div class="col-md-4">
-    <h5><i class="fas fa-book"></i> Learned Skills</h5>
-    <div class="list-group">
-      {% for key, sk in skills.items() %}
-      <button class="list-group-item list-group-item-action" onclick="loadForEdit('{{ key }}')">{{ sk.name }}</button>
-      {% else %}
-      <div class="text-muted small">No skills yet — use the "Teach Skill" flow to create one.</div>
-      {% endfor %}
+<div class="lib-head">
+  <div>
+    <h5 class="mb-1"><i class="fas fa-sitemap"></i> Skill Library</h5>
+    <div class="text-muted small">
+      Every skill visible to this workbench, drawn by ancestry. Pick one to inspect its
+      revision trail, load it as the baseline the next Export inherits from, or edit it.
     </div>
-    <button class="btn btn-sm btn-outline-primary mt-3" onclick="newSkill()"><i class="fas fa-plus"></i> New Blank Skill</button>
   </div>
-  <div class="col-md-8">
-    <p class="text-muted small">Click a skill on the left, or "New Blank Skill", to open it in the Edit Skill popup (same layout as IntelAvatar's Log Chatbot "Edit Skills Configuration" window).</p>
+  <div class="lib-head-actions">
+    <div class="btn-group btn-group-sm" role="group" id="lib-domain">
+      <button type="button" class="btn btn-outline-primary active" data-domain="wifi"><i class="fas fa-wifi"></i> WiFi</button>
+      <button type="button" class="btn btn-outline-primary" data-domain="bt"><i class="fab fa-bluetooth-b"></i> Bluetooth</button>
+    </div>
+    <button class="btn btn-sm btn-outline-secondary" onclick="newSkill()"><i class="fas fa-plus"></i> New Blank Skill</button>
+  </div>
+</div>
+
+<div class="lib-grid">
+  <!-- ── Left: the lineage forest ─────────────────────────────────────── -->
+  <div class="card lib-card">
+    <div class="card-header lib-card-header">
+      <span><i class="fas fa-code-branch"></i> Lineage</span>
+      <span class="lib-legend">
+        <span class="lib-dot origin-shared"></span>shared
+        <span class="lib-dot origin-contribution"></span>contribution
+        <span class="lib-dot origin-local"></span>local
+      </span>
+    </div>
+    <div class="card-body lib-tree" id="lib-tree">
+      <div class="text-muted small">Loading…</div>
+    </div>
+  </div>
+
+  <!-- ── Right: detail + version timeline ─────────────────────────────── -->
+  <div class="card lib-card">
+    <div class="card-header lib-card-header">
+      <span><i class="fas fa-clock-rotate-left"></i> <span id="lib-detail-title">Detail</span></span>
+      <span class="lib-detail-actions" id="lib-detail-actions" style="display:none;">
+        <button class="btn btn-sm btn-outline-primary" id="lib-load-btn"><i class="fas fa-upload"></i> Load as baseline</button>
+        <button class="btn btn-sm btn-outline-secondary" id="lib-edit-btn"><i class="fas fa-pen"></i> Edit</button>
+      </span>
+    </div>
+    <div class="card-body lib-detail" id="lib-detail">
+      <div class="text-muted small">Select a skill on the left.</div>
+    </div>
   </div>
 </div>
 {% endblock %}
 
 {% block scripts %}
 <script>
-function loadForEdit(key) {
-    fetch(`/skills/get/${key}`).then(r => r.json()).then(d => {
-        if (!d.success) { alert(d.message); return; }
-        const sk = d.skill;
-        sk.skill_key = key;
-        SkillEditor.open(sk, {
-            title: 'Edit Skill',
-            subtitle: sk.name || key,
-            saveUrl: "{{ url_for('skills.save_skill_route') }}",
-            deleteUrl: `/skills/delete/${key}?domain=${sk.domain || 'wifi'}`,
-            extraPayload: {tat_path: sk.tat_path || null, domain: sk.domain || 'wifi'},
-            onSaved: function () { location.reload(); },
-        });
+/*
+ * Skill Library — the read/organise counterpart to the Log Viewer's teaching
+ * loop. Three things it exists to answer, none of which the old flat list
+ * could: where did this skill come from, what did it look like before, and
+ * which one is the workbench currently standing on.
+ */
+let libDomain = "wifi";
+let libNodes = [];            // flat node list from /skills/graph
+let libByKey = {};
+let libActiveKey = "";        // the LOADED skill (session baseline)
+let libSelected = null;       // key currently open in the detail pane
+let libVersions = [];         // /skills/versions payload for libSelected
+let libVersionIdx = 0;        // which entry of libVersions is on screen
+
+function esc(s) {
+  const d = document.createElement("div");
+  d.textContent = s == null ? "" : String(s);
+  return d.innerHTML;
+}
+
+// ── Left pane ───────────────────────────────────────────────────────────
+
+function loadGraph(keepSelection) {
+  fetch(`/skills/graph?domain=${libDomain}`)
+    .then(r => r.json())
+    .then(d => {
+      if (!d.success) return;
+      libNodes = d.nodes;
+      libActiveKey = d.active_key || "";
+      libByKey = {};
+      libNodes.forEach(n => { libByKey[n.key] = n; });
+      renderTree();
+      if (keepSelection && libByKey[libSelected]) selectSkill(libSelected);
+      else if (!libByKey[libSelected]) clearDetail();
     });
 }
 
-function newSkill() {
-    SkillEditor.open({}, {
-        title: 'New Blank Skill',
-        saveUrl: "{{ url_for('skills.save_skill_route') }}",
-        extraPayload: {tat_path: null, domain: 'wifi'},
-        onSaved: function () { location.reload(); },
+function renderTree() {
+  const box = document.getElementById("lib-tree");
+  if (!libNodes.length) {
+    box.innerHTML = '<div class="text-muted small">No skills in this domain yet.</div>';
+    return;
+  }
+  // parent -> [children]. A node whose parent isn't in this pool is drawn as a
+  // root (see /skills/graph's orphan_parent) rather than vanishing.
+  const kids = {};
+  const roots = [];
+  libNodes.forEach(n => {
+    if (n.parent) (kids[n.parent] = kids[n.parent] || []).push(n);
+    else roots.push(n);
+  });
+
+  function renderNode(n, depth) {
+    const children = kids[n.key] || [];
+    const isSel = n.key === libSelected;
+    const isActive = n.key === libActiveKey;
+    const badges = [];
+    if (isActive) badges.push('<span class="lib-badge lib-badge-loaded"><i class="fas fa-bullseye"></i> LOADED</span>');
+    if (n.parent || n.orphan_parent) badges.push(`<span class="lib-badge lib-badge-inherit"><i class="fas fa-code-branch"></i> gen ${n.lineage.length}</span>`);
+    if (n.history_count) badges.push(`<span class="lib-badge lib-badge-hist">${n.history_count + 1} versions</span>`);
+    const orphan = n.orphan_parent
+      ? `<div class="lib-orphan">parent <code>${esc(n.orphan_parent)}</code> not in this pool</div>` : "";
+    return `
+      <div class="lib-node-wrap" style="--depth:${depth}">
+        <div class="lib-node${isSel ? " selected" : ""}${isActive ? " active" : ""}" data-key="${esc(n.key)}">
+          <span class="lib-dot origin-${esc(n.origin)}" title="${esc(n.origin)}"></span>
+          <div class="lib-node-body">
+            <div class="lib-node-title">${esc(n.name)} ${badges.join(" ")}</div>
+            <div class="lib-node-meta">
+              <code>${esc(n.key)}</code> · v${esc(n.version)} ·
+              ${n.keyword_count} kw · ${n.exclusive_count} noise · ${n.rule_count} rules
+            </div>
+            ${orphan}
+          </div>
+        </div>
+        ${children.map(c => renderNode(c, depth + 1)).join("")}
+      </div>`;
+  }
+
+  box.innerHTML = roots.map(r => renderNode(r, 0)).join("");
+  highlightAncestry();
+}
+
+// Selecting a descendant lights up the whole chain it stands on, so the
+// inherited content in the detail pane has a visible source.
+function highlightAncestry() {
+  document.querySelectorAll(".lib-node").forEach(el => el.classList.remove("ancestor"));
+  const sel = libByKey[libSelected];
+  if (!sel) return;
+  (sel.lineage || []).forEach(anc => {
+    const el = document.querySelector(`.lib-node[data-key="${CSS.escape(anc)}"]`);
+    if (el) el.classList.add("ancestor");
+  });
+}
+
+// ── Right pane ──────────────────────────────────────────────────────────
+
+function clearDetail() {
+  libSelected = null;
+  document.getElementById("lib-detail-title").textContent = "Detail";
+  document.getElementById("lib-detail-actions").style.display = "none";
+  document.getElementById("lib-detail").innerHTML =
+    '<div class="text-muted small">Select a skill on the left.</div>';
+}
+
+function selectSkill(key) {
+  libSelected = key;
+  renderTree();
+  fetch(`/skills/versions/${encodeURIComponent(key)}`)
+    .then(r => r.json())
+    .then(d => {
+      if (!d.success) { alert(d.message); return; }
+      libVersions = d.versions;
+      libVersionIdx = 0;
+      renderDetail(d);
     });
 }
+
+function renderDetail(d) {
+  const node = libByKey[d.skill_key] || {};
+  document.getElementById("lib-detail-title").textContent = node.name || d.skill_key;
+  const actions = document.getElementById("lib-detail-actions");
+  actions.style.display = "inline-flex";
+  document.getElementById("lib-load-btn").innerHTML = d.skill_key === libActiveKey
+    ? '<i class="fas fa-check"></i> Loaded'
+    : '<i class="fas fa-upload"></i> Load as baseline';
+  document.getElementById("lib-load-btn").disabled = d.skill_key === libActiveKey;
+
+  // Ancestry ribbon — root → … → this. Clicking a link jumps to that ancestor.
+  const chain = (d.lineage || []).concat([d.skill_key]);
+  const ribbon = chain.length > 1
+    ? `<div class="lib-chain">${chain.map((k, i) => {
+        const nm = (libByKey[k] || {}).name || k;
+        const last = i === chain.length - 1;
+        return `<span class="lib-chain-node${last ? " current" : ""}"
+                      ${last ? "" : `data-jump="${esc(k)}"`}>${esc(nm)}</span>`;
+      }).join('<i class="fas fa-angle-right lib-chain-arrow"></i>')}</div>`
+    : `<div class="lib-chain lib-chain-root"><span class="lib-chain-node current">${esc(node.name || d.skill_key)}</span>
+       <span class="text-muted small ms-2">standalone — no parent skill</span></div>`;
+
+  const originNote = {
+    shared: "From the shared corp library — read-only here. Saving an edit creates a new local skill instead of changing the shared one.",
+    contribution: "From your own shared contribution file — read-only here. Saving an edit creates a new local skill.",
+    local: "Saved locally by this workbench. Editable, and the only kind that can be rolled back.",
+  }[d.origin] || "";
+
+  document.getElementById("lib-detail").innerHTML = `
+    ${ribbon}
+    <div class="lib-origin origin-note-${esc(d.origin)}">
+      <span class="lib-dot origin-${esc(d.origin)}"></span> ${esc(originNote)}
+    </div>
+    <div class="lib-section-label">Version trail</div>
+    <div class="lib-timeline" id="lib-timeline"></div>
+    <div id="lib-version-body"></div>`;
+
+  document.querySelectorAll(".lib-chain-node[data-jump]").forEach(el =>
+    el.addEventListener("click", () => selectSkill(el.dataset.jump)));
+
+  renderTimeline();
+  renderVersionBody();
+}
+
+function renderTimeline() {
+  document.getElementById("lib-timeline").innerHTML = libVersions.map((v, i) => `
+    <button type="button" class="lib-tl-item${i === libVersionIdx ? " selected" : ""}${v.is_current ? " current" : ""}"
+            data-idx="${i}">
+      <span class="lib-tl-dot"></span>
+      <span class="lib-tl-ver">v${esc(v.version)}</span>
+      <span class="lib-tl-when">${v.is_current ? "current" : esc((v.saved_at || "").replace("T", " "))}</span>
+    </button>`).join('<span class="lib-tl-rail"></span>');
+
+  document.querySelectorAll(".lib-tl-item").forEach(el =>
+    el.addEventListener("click", () => {
+      libVersionIdx = Number(el.dataset.idx);
+      renderTimeline();
+      renderVersionBody();
+    }));
+}
+
+// Rendering a PAST version is only useful next to what restoring it would do,
+// so everything is diffed against the live entry (index 0) rather than shown
+// as a standalone snapshot: "would come back" vs "would be lost".
+function renderVersionBody() {
+  const v = libVersions[libVersionIdx];
+  const cur = libVersions[0];
+  if (!v) return;
+  const isCur = v.is_current;
+  const curKw = new Set(cur.keywords), curEx = new Set(cur.exclusive);
+  const vKw = new Set(v.keywords), vEx = new Set(v.exclusive);
+
+  const chips = (list, curSet, otherSet) => list.map(k => {
+    let cls = "";
+    if (!isCur && !curSet.has(k)) cls = " chip-restore";
+    return `<span class="chip${cls}">${esc(k)}</span>`;
+  }).join("") || '<span class="text-muted small">none</span>';
+
+  const lostKw = isCur ? [] : cur.keywords.filter(k => !vKw.has(k));
+  const lostEx = isCur ? [] : cur.exclusive.filter(k => !vEx.has(k));
+
+  const diffBar = isCur ? "" : `
+    <div class="lib-diffbar">
+      <i class="fas fa-clock-rotate-left"></i>
+      <div>
+        <b>Viewing v${esc(v.version)}</b> — restoring it would bring back
+        ${v.keywords.filter(k => !curKw.has(k)).length + v.exclusive.filter(k => !curEx.has(k)).length}
+        item(s) <span class="lib-swatch chip-restore-swatch"></span>
+        and drop ${lostKw.length + lostEx.length} item(s) currently present
+        <span class="lib-swatch chip-lost-swatch"></span>.
+        The current v${esc(cur.version)} stays recoverable — a restore moves the
+        version forward, it never rewinds the trail.
+      </div>
+    </div>`;
+
+  const lostBlock = (label, items) => items.length ? `
+    <div class="lib-lost"><span class="lib-lost-label">${label} that would be lost:</span>
+      ${items.map(k => `<span class="chip chip-lost">${esc(k)}</span>`).join("")}</div>` : "";
+
+  const restoreBtn = (!isCur && v.restorable)
+    ? `<button class="btn btn-sm btn-warning lib-restore-btn"><i class="fas fa-rotate-left"></i> Restore v${esc(v.version)}</button>`
+    : (!isCur ? '<span class="text-muted small">Read-only source — cannot be restored from here.</span>' : "");
+
+  document.getElementById("lib-version-body").innerHTML = `
+    ${diffBar}
+    <div class="lib-field"><div class="lib-section-label">Description</div>
+      <div class="lib-desc">${esc(v.description) || '<span class="text-muted">none</span>'}</div></div>
+    <div class="lib-field"><div class="lib-section-label">Keywords (${v.keywords.length})</div>
+      <div class="chip-box">${chips(v.keywords, curKw)}</div>${lostBlock("Keywords", lostKw)}</div>
+    <div class="lib-field"><div class="lib-section-label">Exclusive / noise (${v.exclusive.length})</div>
+      <div class="chip-box">${chips(v.exclusive, curEx)}</div>${lostBlock("Noise terms", lostEx)}</div>
+    <div class="lib-field"><div class="lib-section-label">Expert rules</div>
+      <pre class="lib-rules">${esc(v.expert_rules) || "(none)"}</pre></div>
+    <div class="lib-version-actions">${restoreBtn}</div>`;
+
+  const btn = document.querySelector(".lib-restore-btn");
+  if (btn) btn.addEventListener("click", () => doRestore(v.version));
+}
+
+// ── Actions ─────────────────────────────────────────────────────────────
+
+function doRestore(version) {
+  if (!confirm(`Restore v${version}? This is saved as a NEW version on top — nothing in the trail is erased.`)) return;
+  fetch(`/skills/restore/${encodeURIComponent(libSelected)}`, {
+    method: "POST", headers: {"Content-Type": "application/json"},
+    body: JSON.stringify({version: version, domain: libDomain}),
+  }).then(r => r.json()).then(d => {
+    if (!d.success) { alert(d.message || "Restore failed"); return; }
+    loadGraph(true);
+  });
+}
+
+function doActivate() {
+  fetch(`/skills/activate/${encodeURIComponent(libSelected)}`, {method: "POST"})
+    .then(r => r.json()).then(d => {
+      if (!d.success) { alert(d.message || "Could not load"); return; }
+      libActiveKey = d.active_key;
+      loadGraph(true);
+    });
+}
+
+function editSelected() {
+  fetch(`/skills/get/${encodeURIComponent(libSelected)}`).then(r => r.json()).then(d => {
+    if (!d.success) { alert(d.message); return; }
+    const sk = d.skill;
+    sk.skill_key = libSelected;
+    SkillEditor.open(sk, {
+      title: "Edit Skill",
+      subtitle: sk.name || libSelected,
+      saveUrl: "{{ url_for('skills.save_skill_route') }}",
+      deleteUrl: `/skills/delete/${libSelected}?domain=${sk.domain || libDomain}`,
+      extraPayload: {tat_path: sk.tat_path || null, domain: sk.domain || libDomain},
+      onSaved: function () { loadGraph(true); },
+    });
+  });
+}
+
+function newSkill() {
+  SkillEditor.open({}, {
+    title: "New Blank Skill",
+    saveUrl: "{{ url_for('skills.save_skill_route') }}",
+    extraPayload: {tat_path: null, domain: libDomain},
+    onSaved: function () { loadGraph(false); },
+  });
+}
+
+document.addEventListener("DOMContentLoaded", function () {
+  document.getElementById("lib-tree").addEventListener("click", function (e) {
+    const node = e.target.closest(".lib-node");
+    if (node) selectSkill(node.dataset.key);
+  });
+  document.querySelectorAll("#lib-domain button").forEach(btn =>
+    btn.addEventListener("click", function () {
+      document.querySelectorAll("#lib-domain button").forEach(b => b.classList.remove("active"));
+      this.classList.add("active");
+      libDomain = this.dataset.domain;
+      libSelected = null;
+      clearDetail();
+      loadGraph(false);
+    }));
+  document.getElementById("lib-load-btn").addEventListener("click", doActivate);
+  document.getElementById("lib-edit-btn").addEventListener("click", editSelected);
+  loadGraph(false);
+});
 </script>
 {% endblock %}

@@ -10,6 +10,10 @@ data/cache/
 # refresh_shared_cache) regenerated on every app startup and may contain
 # another engineer's contribution-file content.
 data/skills/
+# One-generation backup written beside the local skills file on every save
+# (services.skill_service._write_skills_yaml) — a manual recovery aid, not a
+# project file.
+*.yaml.bak
 # Reference papers dropped into data/ for local reading — not project
 # deliverables, never checked in.
 data/*.pdf

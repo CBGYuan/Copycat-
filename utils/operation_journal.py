@@ -149,7 +149,23 @@ def annotate_effects(state, stats: Dict) -> None:
     load we just record the resulting survivor count."""
     survivors = stats.get("surviving_count")
     prev = state.prev_survivors
-    survivor_delta = (survivors - prev) if (isinstance(survivors, int) and isinstance(prev, int)) else None
+
+    # An issue-time focus window (log_viewer /set_focus) changes WHICH SLICE of
+    # the file the filter ran over, so a survivor count from a focused run and
+    # one from an unfocused (or differently-focused) run are not measuring the
+    # same population. Diffing them would hand the entire narrowing to whatever
+    # edit happened to be pending — e.g. an edit that added 3 lines looks like
+    # it removed 40,000 — and that number then drives materiality, red flags,
+    # and the divergence check downstream. When the window moved, report NO
+    # delta rather than a wrong one; the per-keyword hits/unique/dropped
+    # figures below stay valid either way since they're measured within the
+    # same run.
+    focus_sig = f"{state.focus_center_iso}|{state.focus_window_min}"
+    comparable = (focus_sig == state.prev_focus_sig)
+    state.prev_focus_sig = focus_sig
+
+    survivor_delta = (survivors - prev) if (
+        comparable and isinstance(survivors, int) and isinstance(prev, int)) else None
 
     per_filter = {pf["text"]: pf for pf in stats.get("per_filter", [])}
     # Best co-fire partner for each keyword (highest-count pair touching it).
@@ -222,7 +238,20 @@ def unreasoned_material_ops(state) -> List[Dict]:
         if op["action"] in ("load_skill", "load_tat"):
             continue
         eff = op.get("effect") or {}
-        material = bool(eff.get("unique_hits") or eff.get("dropped") or op["action"] == "remove")
+        # A DISABLED filter has no unique_hits — compute_filter_stats only
+        # computes those for enabled ones — so a toggle_off would otherwise
+        # look immaterial no matter how load-bearing the keyword was. Judge it
+        # by the hits the keyword still carries instead: switching off
+        # something that matches nothing is genuinely trivial, switching off
+        # something that matches hundreds of lines is one of the most
+        # significant judgments an engineer makes (and, when it contradicts
+        # the baseline read, the highest-value thing to ask about).
+        material = bool(
+            eff.get("unique_hits")
+            or eff.get("dropped")
+            or op["action"] == "remove"
+            or (op["action"] == "toggle_off" and eff.get("hits"))
+        )
         if material:
             out.append(op)
     return out

@@ -38,6 +38,9 @@ import glob
 import json
 import os
 import re
+import shutil
+import tempfile
+import threading
 from datetime import datetime
 from typing import Dict, List, Optional
 
@@ -51,6 +54,26 @@ from configs import path_configs
 # unbounded log, so a skill edited hundreds of times doesn't bloat the YAML.
 # (Same rolling-window idea as AutoSkill's maintenance version history.)
 _HISTORY_LIMIT = 30
+
+# Serializes the whole read-modify-write cycle of save_skill/delete_skill.
+# Flask runs threaded, so two requests saving different skills at the same
+# time would otherwise each read the file, each apply their own edit to their
+# own copy, and the second write would drop the first one's skill entirely.
+# An RLock (not Lock) because restore_version calls save_skill while holding it.
+_WRITE_LOCK = threading.RLock()
+
+# Suffix of the one-generation backup kept beside the local skills file. It is
+# NOT read automatically — see _write_skills_yaml for why — it exists so a bad
+# hand-edit or an unwanted bulk change is recoverable by hand.
+BACKUP_SUFFIX = ".bak"
+
+
+class SkillStoreError(RuntimeError):
+    """The local skills file exists but could not be understood. Raised
+    instead of degrading to "no skills", because every write path starts by
+    reading this file: silently treating an unreadable file as empty would
+    make the very next save persist that emptiness and destroy the real
+    content for good."""
 
 
 class Skill(BaseModel):
@@ -67,6 +90,23 @@ class Skill(BaseModel):
     # overwriting. A brand-new skill starts at "0.1.0" with an empty history.
     version: str = "0.1.0"
     version_history: List[dict] = Field(default_factory=list)
+    # Lineage — set when this skill was exported as an EXTENSION of another
+    # one (see utils.skill_dedup.build_extension_skill). `parent` is the key
+    # it was derived from; `lineage` is the full root→…→parent chain, so a
+    # skill several generations deep still knows its whole ancestry without
+    # having to walk and re-resolve every link.
+    #
+    # These are documentation/organisation only — the keywords, exclusive and
+    # expert_rules written to YAML are always FULLY RESOLVED (parent content
+    # merged in), never delta-only. That is not a stylistic choice: Avatar's
+    # loader (wireless_ce_avatar/services/log_chatbot_service.
+    # load_skills_from_yaml) reads exactly name/description/keywords/
+    # exclusive/expert_rules and silently ignores every other key, so a
+    # delta-only child would load there with a fraction of its keywords and
+    # produce quietly wrong analysis. Flat-and-complete is what keeps the
+    # exported file correct in the system that actually runs it.
+    parent: Optional[str] = None
+    lineage: List[str] = Field(default_factory=list)
 
 
 def _now_iso() -> str:
@@ -119,6 +159,8 @@ def _parse_skills_yaml(raw: dict) -> Dict[str, Skill]:
                 expert_rules=val.get("expert_rules", ""),
                 version=str(val.get("version") or "0.1.0"),
                 version_history=_coerce_history(val.get("version_history")),
+                parent=val.get("parent") or None,
+                lineage=[str(x) for x in (val.get("lineage") or []) if str(x).strip()],
             )
         except Exception as e:
             print(f"⚠️  Skipping invalid skill '{key}': {e}")
@@ -255,6 +297,35 @@ def load_shared_skills() -> Dict[str, Dict]:
     }
 
 
+def skill_origins(domain: str = "wifi") -> Dict[str, str]:
+    """Which FILE each visible skill key actually resolves from:
+    "local" | "contribution" | "shared".
+
+    Same precedence as load_shared_skills' merge (local beats contribution
+    beats shared), so the answer is always the source whose content is the one
+    in play. The Skills page needs this to be honest about what can be edited:
+    only "local" entries are writable — everything else is a read-only mirror
+    of the corp drive, and Save on one of those mints a NEW local skill rather
+    than modifying the shared original (see save_skill).
+    """
+    domain = "bt" if domain == "bt" else "wifi"
+    origins: Dict[str, str] = {}
+    if domain == "wifi":
+        for key in _load_yaml_skills_from_path(path_configs.SKILLS_CACHE_WIFI_PATH):
+            origins[key] = "shared"
+        contrib_path = _find_user_contribution_path(
+            _current_username(), path_configs.SKILLS_CACHE_USER_CONTRIB_DIR)
+        if contrib_path:
+            for key in _load_yaml_skills_from_path(contrib_path):
+                origins[key] = "contribution"
+    else:
+        for key in _load_yaml_skills_from_path(path_configs.SKILLS_CACHE_BT_PATH):
+            origins[key] = "shared"
+    for key in _load_yaml_skills_from_path(_local_path(domain)):
+        origins[key] = "local"
+    return origins
+
+
 def ensure_skills_file(domain: str = "wifi") -> None:
     os.makedirs(path_configs.SKILLS_LOCAL_DIR, exist_ok=True)
     path = _local_path(domain)
@@ -264,10 +335,37 @@ def ensure_skills_file(domain: str = "wifi") -> None:
 
 
 def load_all_skills(domain: str = "wifi") -> Dict[str, Skill]:
-    """Local-only load — kept for the save/delete round-trip below, which
-    must only ever see what THIS app owns, not the shared/merged view."""
+    """Local-only load — the read half of the save/delete round-trip below,
+    which must only ever see what THIS app owns, not the shared/merged view.
+
+    STRICT on purpose, unlike every other load in this module. The rest of
+    the app reads skills to DISPLAY them, so a broken file degrading to "no
+    skills" keeps the app usable. This one is read to be written straight
+    back: if a corrupted (or hand-mangled) local file quietly parsed as
+    empty, the next save would write that emptiness over the real content
+    and the loss would become permanent. Refusing loudly leaves the file
+    untouched and recoverable — including from the .bak beside it.
+    """
     ensure_skills_file(domain)
-    return _load_yaml_skills_from_path(_local_path(domain))
+    path = _local_path(domain)
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            text = f.read()
+        raw = yaml.safe_load(text) or {}
+    except OSError as e:
+        raise SkillStoreError(f"Could not read the local skills file {path}: {e}") from e
+    except yaml.YAMLError as e:
+        raise SkillStoreError(
+            f"The local skills file {path} is not valid YAML, so it cannot be safely "
+            f"rewritten: {e}. The previous version may be recoverable from "
+            f"{path}{BACKUP_SUFFIX}."
+        ) from e
+    if not isinstance(raw, dict):
+        raise SkillStoreError(
+            f"The local skills file {path} does not contain a mapping of skills; "
+            f"refusing to overwrite it."
+        )
+    return _parse_skills_yaml(raw)
 
 
 def _slugify(name: str) -> str:
@@ -288,6 +386,15 @@ def _skill_to_raw(skill: Skill) -> dict:
         entry["exclusive"] = skill.exclusive
     if skill.tat_path:
         entry["tat_path"] = skill.tat_path
+    # Lineage travels with the skill through every save/load round-trip. Without
+    # this the chain recorded by utils.skill_dedup.build_extension_skill would be
+    # dropped the moment the draft went through the Edit-Skill modal, and the
+    # exported file would look like an unrelated standalone skill that merely
+    # happens to repeat its parent's keywords.
+    if skill.parent:
+        entry["parent"] = skill.parent
+    if skill.lineage:
+        entry["lineage"] = list(skill.lineage)
     entry["version"] = skill.version or "0.1.0"
     if skill.version_history:
         entry["version_history"] = skill.version_history
@@ -360,6 +467,17 @@ def _dump_skills_yaml(skills_raw: dict) -> str:
         # single-line JSON inside a `|` block: it round-trips cleanly through
         # yaml.safe_load + json.loads (see _coerce_history) without the
         # hand-rolled writer needing to emit nested list-of-dict YAML.
+        # Lineage before the version block. Avatar's loader ignores both (it
+        # only reads name/description/keywords/exclusive/expert_rules), which
+        # is exactly why carrying the chain here is safe: it documents the
+        # ancestry for Copycat and for a human reading the file, without
+        # changing a single thing about how the skill actually runs.
+        if entry.get("parent"):
+            out.append(f"  parent: {_yaml_dq(entry['parent'])}")
+        lineage = entry.get("lineage") or []
+        if lineage:
+            out.append("  lineage:")
+            out.extend(f"    - {_yaml_dq(a)}" for a in lineage)
         out.append(f"  version: {_yaml_dq(entry.get('version') or '0.1.0')}")
         history = entry.get("version_history") or []
         if history:
@@ -370,8 +488,58 @@ def _dump_skills_yaml(skills_raw: dict) -> str:
 
 
 def _write_skills_yaml(raw: dict, domain: str = "wifi") -> None:
-    with open(_local_path(domain), "w", encoding="utf-8") as f:
-        f.write(_dump_skills_yaml(raw))
+    """Persist the local skills file so it is never left half-written.
+
+    The previous implementation was `open(path, "w")` followed by
+    `f.write(_dump_skills_yaml(raw))`. Python truncates the file the moment
+    it is opened and only THEN evaluates the argument, so any failure while
+    serializing — one odd field on one skill was enough — left every local
+    skill, and every `version_history` trail with it, permanently gone. The
+    Skill Library's whole version-rollback promise sits on this file, so it
+    must not be destroyable by a bad value.
+
+    Three properties, in the order they matter:
+
+    1. Serialize BEFORE opening anything. If _dump_skills_yaml raises, the
+       existing file has not been touched at all.
+    2. Write to a temp file in the same directory, fsync it, then
+       os.replace() onto the target. os.replace is atomic on both POSIX and
+       Windows, so a reader sees either the whole old file or the whole new
+       one — never a partial write, even if the process dies mid-save.
+    3. Keep one generation of backup (BACKUP_SUFFIX) taken from the last
+       known-good file. Deliberately NOT restored automatically: an empty
+       skills file is a perfectly legitimate state (fresh install, or the
+       last skill was deleted on purpose), and nothing in the content can
+       distinguish that from an accident. Auto-restoring would resurrect
+       skills the engineer meant to delete. It is a manual recovery path.
+    """
+    content = _dump_skills_yaml(raw)   # (1) may raise; file still intact
+
+    path = _local_path(domain)
+    directory = os.path.dirname(path) or "."
+    os.makedirs(directory, exist_ok=True)
+
+    if os.path.exists(path):
+        try:
+            shutil.copy2(path, path + BACKUP_SUFFIX)   # (3)
+        except OSError as e:
+            # A missing backup is not worth failing the save over — the
+            # atomic replace below is what actually protects the data.
+            print(f"⚠️  Could not refresh skills backup {path}{BACKUP_SUFFIX}: {e}")
+
+    fd, tmp_path = tempfile.mkstemp(dir=directory, prefix=".skills-", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(content)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp_path, path)                     # (2)
+    except BaseException:
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+        raise
 
 
 def save_skill(skill_key: Optional[str], skill: Skill, domain: str = "wifi",
@@ -403,7 +571,18 @@ def save_skill(skill_key: Optional[str], skill: Skill, domain: str = "wifi",
     of the Bluetooth one. If `base` is omitted, falls back to a fresh
     load_shared_skills() read (keeps this usable standalone/without an
     app_config wired up).
+
+    The whole read-modify-write runs under _WRITE_LOCK. Flask serves requests
+    on threads, so two concurrent saves would otherwise each read the file,
+    each apply their own edit to their own in-memory copy, and the later
+    write would silently drop the earlier one's skill.
     """
+    with _WRITE_LOCK:
+        return _save_skill_locked(skill_key, skill, domain, base)
+
+
+def _save_skill_locked(skill_key: Optional[str], skill: Skill, domain: str,
+                       base: Optional[Dict[str, Skill]]) -> str:
     ensure_skills_file(domain)
     if base is None:
         base = load_shared_skills()["bt" if domain == "bt" else "wifi"]
@@ -458,16 +637,69 @@ def save_skill(skill_key: Optional[str], skill: Skill, domain: str = "wifi",
     return key
 
 
+def restore_version(skill_key: str, version: str, domain: str = "wifi",
+                    base: Optional[Dict[str, Skill]] = None) -> Optional[str]:
+    """Roll a LOCAL skill back to one of its recorded `version_history`
+    snapshots. Returns the key written, or None if the skill isn't local or
+    that version isn't in its trail.
+
+    Deliberately NOT destructive and NOT a branch: the restore is applied as a
+    normal forward save, so the state being rolled back FROM is itself pushed
+    onto the history first and the version number goes UP, not back. Restoring
+    v0.1.1 while at v0.1.4 lands you at v0.1.5 carrying v0.1.1's content, with
+    v0.1.4 still recoverable. A rollback that rewound the version counter, or
+    truncated the trail, would make "restore" the one operation in the app
+    capable of losing work — which is exactly what an audit trail exists to
+    prevent.
+
+    Only lineage-independent fields are restored (name/description/keywords/
+    exclusive/expert_rules): `parent`/`lineage` describe where the skill came
+    from, which no past revision of its own body can change.
+    """
+    with _WRITE_LOCK:
+        return _restore_version_locked(skill_key, version, domain, base)
+
+
+def _restore_version_locked(skill_key: str, version: str, domain: str,
+                            base: Optional[Dict[str, Skill]]) -> Optional[str]:
+    ensure_skills_file(domain)
+    local = load_all_skills(domain)
+    current = local.get(skill_key)
+    if not current:
+        return None
+    snapshot = next(
+        (h for h in current.version_history if str(h.get("version")) == str(version)), None)
+    if not snapshot:
+        return None
+    restored = Skill(
+        name=snapshot.get("name") or current.name,
+        description=snapshot.get("description", ""),
+        keywords=list(snapshot.get("keywords") or []),
+        exclusive=list(snapshot.get("exclusive") or []),
+        tat_path=current.tat_path,
+        expert_rules=snapshot.get("expert_rules", ""),
+        parent=current.parent,
+        lineage=list(current.lineage),
+    )
+    return save_skill(skill_key, restored, domain=domain, base=base)
+
+
 def delete_skill(skill_key: str, domain: str = "wifi") -> bool:
     """Deletes from the LOCAL file for the given domain only. If `skill_key`
     actually came from the shared baseline/contribution (not present
     locally), there is nothing to delete — this app never touches the
-    shared drive."""
-    ensure_skills_file(domain)
-    with open(_local_path(domain), "r", encoding="utf-8") as f:
-        raw = yaml.safe_load(f) or {}
-    if skill_key not in raw:
-        return False
-    del raw[skill_key]
-    _write_skills_yaml(raw, domain)
-    return True
+    shared drive.
+
+    Under _WRITE_LOCK for the same reason as save_skill: it is a
+    read-modify-write of the same file."""
+    with _WRITE_LOCK:
+        ensure_skills_file(domain)
+        # Goes through the strict local loader rather than a bare
+        # yaml.safe_load: a delete rewrites the WHOLE file, so it has to
+        # refuse on an unparseable one exactly like a save does.
+        local_raw = {k: _skill_to_raw(v) for k, v in load_all_skills(domain).items()}
+        if skill_key not in local_raw:
+            return False
+        del local_raw[skill_key]
+        _write_skills_yaml(local_raw, domain)
+        return True

@@ -58,6 +58,14 @@ precisely (not overclaimed) in [Paper grounding](#paper-grounding) below.
   filter set is auto-assigned a color palette, alternating full-block and
   text-only treatments so a long filter list doesn't read as a wall of
   saturated color.
+- **Focus a time window** — type a timestamp and narrow every filter to
+  ±N minutes around it, so a 200k-line capture collapses to the moments that
+  matter. The window is sliced by binary search over a lazily-built timestamp
+  index (most sessions never focus, so nobody pays for the index up front),
+  and line numbers stay **real file line numbers**, not window-relative ones,
+  so evidence annotations survive focusing and clearing. The header reports
+  "scanned N of M lines" whenever a window is active, because a hit count
+  that silently means something different is worse than no hit count.
 - A collapsible **System Event Log** panel (BT captures) auto-discovers the
   matching Windows System event export next to the driver log; rows
   click-sync to the nearest driver-log line by timestamp, and vice versa. The
@@ -86,22 +94,29 @@ precisely (not overclaimed) in [Paper grounding](#paper-grounding) below.
 ### 2. Skill-Building Chat
 - Claude-style layout: your messages sit in a right-aligned bubble; the
   assistant's replies flow as plain full-width Markdown text.
-- **Log Round & Analyze**, with an **Ambiguity Gate** — one LLM call analyzes
-  the current filter state and self-scores readiness (0–100), per-goal
-  coverage (knowledge / scope / minimal-keywords / evidence), and a
-  claim-by-claim verified-vs-asserted validation. It only asks a follow-up
-  question when it can show the ambiguity is real: it first drafts 2–3
-  concrete interpretations of the most important unexplained edit, each with
-  its own predicted observable behavior; if every interpretation lands on the
-  same behavior, it asks nothing. Only on genuine divergence does it ask the
-  ONE question that would discriminate between those behaviors — never a
-  generic "is this temporary or permanent?" template. (See
-  [Paper grounding](#paper-grounding) — ClarifyGPT's consistency check +
-  GATE's discriminating-question framing.) A nudge card appears in-chat when
-  there are unlogged filter changes worth a round — gated on whether an edit
-  actually moved something measurable (a load-bearing keyword, dropped noise,
-  a meaningful survivor swing), not on raw edit count, so exploring a long
-  filter list checkbox-by-checkbox doesn't spam it.
+- **Baseline first, then divergence** — there is no "analyze now" button. The
+  moment a `.tat` file or a skill produces a filtered view, one LLM call
+  commits a **structured baseline read**: what scenario this looks like,
+  which keywords it expects to be load-bearing, which it expects to be noise,
+  and what it doesn't know yet. That prediction is recorded *before* you
+  teach anything, which is what makes the rest of the loop possible.
+- **You then teach by filtering.** Every edit is measured, and a
+  deterministic (zero-LLM-cost) pass compares what you did against what the
+  baseline committed to:
+  - **Contradiction** — the baseline called a keyword load-bearing and you
+    cut it, or called it noise and you promoted it. Materiality is checked
+    *before* opinion: an edit only counts if it actually moved something
+    measurable (unique hits, survivor delta), so exploring a filter list
+    checkbox-by-checkbox never triggers anything.
+  - **Omission** — you added something the baseline never mentioned. This is
+    a provenance gap, not an ambiguity, so it is **never** turned into a
+    question; it lights up the 🎓 hint in the Steps panel instead.
+- **Only a contradiction becomes a question**, and only once per edit. The
+  question must discriminate between two concrete readings that predict
+  different observable behavior — never a generic "is this temporary or
+  permanent?" template. (See [Paper grounding](#paper-grounding) —
+  ClarifyGPT's consistency check, GATE's discriminating-question framing, and
+  AutoManual's provenance-vs-ambiguity distinction.)
 - **Per-step teaching** — click 🎓 on any filter edit in the Steps panel to
   explain, in your own words, why you made it; the LLM condenses it into a
   confirmable knowledge-core statement, adds its own expert second opinion,
@@ -158,10 +173,91 @@ Edit-Skill modal.
   skill, or a merge into a named existing one (with new keywords/rules
   highlighted green) — before anything touches disk.
 
+#### One Export button, two behaviours
+Export always writes to `data/skills/local/` only, and what it produces
+depends on a single fact: **whether a skill was loaded this session.**
+
+- **No skill loaded** → the drafts are written exactly as synthesized. No
+  de-duplication, no cloud content, no lineage. The local file contains only
+  what you taught.
+- **Skill loaded** → that skill becomes the **parent**. Its content is
+  carried over in full and this session's additions are kept visibly
+  separate:
+  - **De-duplication** (`utils/skill_dedup.py`, ported from ACE's Curator)
+    drops what merely repeats the parent. Two deliberate divergences from
+    ACE: near-duplicates are *flagged for review, never auto-dropped* (a
+    false positive there would silently delete a keyword you taught), and
+    **substring containment beats similarity ratio** — TAT keywords are
+    substring matchers, so a parent's `"DeAuth"` provably covers a child's
+    `"DeAuth detected"` at any ratio, while the reverse direction *widens*
+    coverage and must be kept. Those two are reported separately, never
+    merged into one "similar" bucket.
+  - **Flat, never delta-only.** `wireless_ce_avatar`'s loader reads exactly
+    name/description/keywords/exclusive/expert_rules and silently ignores
+    every other key — so a child storing only its delta and pointing at a
+    `parent` key would load there with a fraction of its keywords and
+    analyse logs quietly wrongly. Inheritance is expressed as *structure*
+    (parent content first, then a `# ── Extension:` marker, then the new
+    material) plus a recorded `parent`/`lineage` chain, not as a reference to
+    resolve at load time.
+  - The modal colours every item: **blue `INH`** = inherited from the parent,
+    **green `NEW`** = taught this session. Same colour language as the Skill
+    Library's origin dots (blue = from the shared side, green = originated
+    locally).
+
+Two guards on that path, both derived from how Avatar actually consumes a
+skill rather than from taste:
+
+- **Inheritance depth is capped at 2 generations.** Because exports are flat,
+  each generation's keyword list is a superset of its parent's; by the third,
+  the filter matches most of the log, Avatar's per-skill evidence payload
+  overruns its line budget and gets head+tail truncated with the middle
+  dropped — a skill that returns "almost everything, minus the middle" has
+  stopped focusing anything. Over-deep exports are **not refused**: the draft
+  is filed as a fresh standalone skill and the UI explains why. Your
+  knowledge is never what gets discarded.
+- **The child's description must be distinguishable from its parent's.**
+  Avatar's agent picks a skill from the `name: description` lines alone and
+  passes a key from an enum — it never sees keywords at selection time. Since
+  a child inherits every parent keyword, that one sentence is the *entire*
+  basis for telling them apart. Guarded twice: the synthesis prompt is handed
+  the baseline skill and told what it is inheriting (only when inheritance
+  will genuinely happen), and a deterministic similarity check catches it
+  when the model ignores that — surfaced as an amber note under the
+  description field that clears live as you rewrite it. Advisory; Save is
+  never blocked on it.
+
 ### 4. Skill Library
-A standalone page listing every learned skill (WiFi ∪ BT) with the same
-Edit-Skill modal — inspect, hand-edit keywords/exclusive/expert_rules, or
-delete.
+A two-pane page (`/skills/`) for everything the workbench can see.
+
+- **Left — lineage forest.** Skills drawn by ancestry: indent is generation,
+  with connector elbows. Each row carries an origin dot (blue `shared`,
+  purple `contribution`, green `local`), a `LOADED` badge for the session's
+  current baseline, its generation depth, and its version count. Selecting a
+  node lights its whole ancestor chain in a dimmer style — context for the
+  selection, not a second selection. A skill whose parent isn't in the pool
+  is still drawn (as a root, with the dangling reference shown) rather than
+  disappearing.
+- **Right — version trail.** A clickable timeline of every recorded revision,
+  live entry first. Selecting a past revision doesn't show a bare snapshot —
+  it shows **what restoring it would do**: green for what would come back,
+  red strikethrough for what would be dropped.
+- **Load as baseline** sets which skill the next Export inherits from. It
+  deliberately does *not* replace the filters on screen — the Log Viewer's own
+  skill dropdown owns that.
+
+Three rules the restore path holds to:
+
+1. **Restore moves the version forward, never backward.** Restoring v0.1.1
+   while at v0.1.4 lands you at v0.1.5 carrying v0.1.1's content, with v0.1.4
+   pushed onto the trail. Rewinding the counter or truncating the trail would
+   make restore the one operation in the app capable of losing work.
+2. **Restore never touches `parent`/`lineage`.** No past revision of a
+   skill's own body can change where it came from.
+3. **Only `local` skills are editable or restorable.** Shared and
+   contribution entries are a read-only mirror of the corp drive: their
+   history is viewable, and saving an edit to one mints a *new* local skill
+   rather than shadowing the original.
 
 ## Architecture
 
@@ -180,7 +276,8 @@ blueprints/
   learning/                   Log Round (Ambiguity Gate), per-step teach/ask,
                                readiness, converge/save, teaching-evidence
                                assessment
-  skills/                     Skill library CRUD
+  skills/                     Skill library — lineage graph, version trail,
+                                restore, set-as-baseline, CRUD
 services/
   llm_service.py               LLM_helper — Anthropic/OpenAI-compatible client,
                                  token usage tracking, prompt caching
@@ -189,7 +286,8 @@ services/
   event_log_service.py         Windows System Event Log (.evt/.evtx) reader +
                                  capture-machine UTC-offset detection
                                  (systeminfo.txt) for click-sync
-  skill_service.py             Skill model + YAML read/write, versioning
+  skill_service.py             Skill model + YAML read/write, versioning,
+                                 lineage, crash-safe atomic writes
   skill_retrieval.py           Agent C — keyword-set similarity retrieval
   learning_service.py          Interview prompts (Ambiguity Gate), readiness
                                  assessment, skill synthesis, judge (Agent B),
@@ -203,6 +301,12 @@ utils/
                                  matched_keywords_for_line (E/X attribution
                                  by filter identity)
   operation_journal.py          Per-edit journal with measured effect + red flags
+  divergence.py                 Deterministic baseline-vs-action comparison —
+                                  contradiction / omission split, materiality
+                                  checked before opinion (zero LLM cost)
+  skill_dedup.py                ACE-Curator-derived de-duplication, extension
+                                  builder, lineage-depth + description-conflict
+                                  guards (zero LLM cost)
   file_picker.py, browser_utils.py, helpers.py, json_utils.py
 templates/, static/           log_viewer.html (main workbench), skills.html,
                                 shared skill_editor.js modal, style.css
@@ -267,11 +371,32 @@ as a future direction, so this list doesn't overclaim:
 python -m unittest discover -s tests -v
 ```
 
-Covers the Ambiguity Gate (only asks on genuine behavioral divergence),
-`assess_teaching_evidence` (reports counterexamples without scoring
-correctness), deterministic (non-LLM) evidence-coverage computation,
-filter-identity-based E/X attribution, and that a session reset clears
-case-specific teaching state.
+71 tests, no LLM or network access required. They cover:
+
+- **Baseline + divergence** — contradictions vs omissions, materiality
+  checked before opinion, pre-baseline edits excluded, an omission alone
+  never producing a question, a contradiction asked once then suppressed, and
+  effect attribution withheld across a focus-window change (a focused run and
+  an unfocused one count different populations).
+- **De-duplication** — substring containment beating similarity ratio in both
+  directions (`covered` vs `widens`), near-matches routed to review rather
+  than auto-dropped, and rules itemised before comparison so a reworded
+  duplicate is caught.
+- **Inheritance** — the parent's content fully resolved into the child, the
+  `parent`/`lineage` chain surviving the YAML round-trip *and* later edits,
+  the loaded cloud skill never copied into the local file, the depth cap
+  refusing a third generation without discarding the draft, and a
+  description that merely rewords the parent's being flagged.
+- **Version trail** — restore moving the version forward rather than
+  rewinding, leaving lineage alone, and refusing on non-local skills.
+- **Durable writes** — a failure while serializing or while replacing leaves
+  the previous file byte-for-byte intact, no temp files are left behind, the
+  backup holds the prior version, and an unparseable local file makes every
+  write path refuse instead of erasing it.
+- **Teaching evidence** — `assess_teaching_evidence` reports counterexamples
+  without scoring correctness, deterministic (non-LLM) evidence-coverage
+  computation, filter-identity-based E/X attribution, and that a session
+  reset clears case-specific teaching state.
 
 ## Setup
 
@@ -305,6 +430,24 @@ python app.py
 Opens automatically in Chrome on a freshly-picked free port (never a fixed
 `:5000`, so a leftover process from an earlier run can't collide with it).
 
+Startup does the minimum synchronously and pushes the slow parts onto daemon
+threads, so the server is listening and the UI is usable immediately:
+
+- Skills load from the **local cache** first; the shared corp-drive refresh
+  runs in the background and updates the pool when it lands. The app already
+  had "if the sync fails, use the last cache" as a fallback — this just makes
+  that the normal startup path rather than only a network-outage path.
+- LLM key resolution reads from a UNC corp share and can take several
+  seconds, so it also runs in the background. Until it finishes, LLM-backed
+  routes return a clear "not configured yet" instead of hanging, and a
+  self-removing banner polls `/llm_status` so you can see when it's ready.
+
+**Teaching state lives in memory for the session only.** Closing the browser
+or restarting the app starts a fresh teaching session by design — chat
+history, the operation journal, and the committed baseline are all
+case-specific and deliberately not carried across. Saved skills are on disk
+and unaffected.
+
 ## Skill data model
 
 Each entry in `data/skills/local/{skills,bt_skills}.yaml`:
@@ -319,10 +462,30 @@ Each entry in `data/skills/local/{skills,bt_skills}.yaml`:
     - "..."
   expert_rules: |               # numbered domain knowledge / hard rules
     1. ...
+  parent: "connection_flow"     # only on an inherited skill — the key it was
+  lineage:                        #   built on, and the full root→…→parent chain
+    - "connection_flow"
   version: "0.1.3"
   version_history: |            # rolling JSON audit trail (pre-edit snapshots)
     [...]
 ```
+
+`parent` / `lineage` are documentation and organisation only — Avatar's
+loader ignores them, which is exactly why they are safe to carry. The
+keywords, exclusive and expert_rules written here are always **fully
+resolved** (the parent's content merged in), never delta-only. A loaded
+"cloud" skill is never copied into this file: only the child lives here, with
+its own `version` line starting at `0.1.0`.
+
+**Writes are crash-safe.** The YAML is serialized *before* any file is
+opened, written to a temp file, fsynced, then `os.replace()`d onto the target
+— atomic on both Windows and POSIX, so a reader sees either the whole old
+file or the whole new one, never a partial write. One generation of backup is
+kept beside it as `skills.yaml.bak`. If the local file is ever unreadable,
+every write path (save / delete / restore) **refuses loudly and leaves it
+untouched** rather than treating it as "no skills" and persisting that
+emptiness over the real content — the display side still degrades gracefully,
+so a broken local file never stops the app from starting.
 
 ### Two clearly separate skill folders
 
