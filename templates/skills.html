@@ -252,6 +252,8 @@ function renderDetail(d) {
     <div class="lib-origin origin-note-${esc(d.origin)}">
       <span class="lib-dot origin-${esc(d.origin)}"></span> ${esc(originNote)}
     </div>
+    ${renderTriggers(d.triggers)}
+    ${renderMemory(d.memory)}
     <div class="lib-section-label">Version trail</div>
     <div class="lib-timeline" id="lib-timeline"></div>
     <div id="lib-version-body"></div>`;
@@ -261,6 +263,46 @@ function renderDetail(d) {
 
   renderTimeline();
   renderVersionBody();
+}
+
+// The conditions that bound this skill. They are compiled into the saved
+// description, so they are also what a downstream agent uses to tell this
+// skill apart from a sibling filtering on the same lines.
+function renderTriggers(triggers) {
+  if (!triggers || !triggers.length) return "";
+  return `<div class="lib-field">
+    <div class="lib-section-label">Applies when</div>
+    <div class="chip-box">${triggers.map(t => `<span class="chip">${esc(t)}</span>`).join("")}</div>
+  </div>`;
+}
+
+// What happened when this skill was actually used, measured rather than
+// asserted (services/skill_memory.py). The coverage gaps are the valuable
+// part: a keyword the engineer adds nearly every time they load this skill is
+// a hole in it, stated by their hands.
+function renderMemory(mem) {
+  if (!mem) return "";
+  if (!mem.uses) {
+    return `<div class="lib-memory lib-memory-idle">
+      <i class="fas fa-moon"></i> Never loaded on this machine. That says nothing about
+      whether teammates use it — it just means there is no local evidence either way.
+    </div>`;
+  }
+  const bits = [`loaded <b>${mem.uses}×</b>`];
+  if (mem.last_matched_lines != null) bits.push(`last run matched <b>${mem.last_matched_lines}</b> lines`);
+  if (mem.last_used) bits.push(`last used ${esc(mem.last_used.replace("T", " "))}`);
+
+  const gaps = (mem.coverage_gaps || []).length ? `
+    <div class="lib-memory-gaps">
+      <b>Added almost every time this skill is loaded</b> — consider absorbing:
+      ${mem.coverage_gaps.map(g =>
+        `<span class="chip chip-gap">${esc(g.text)} <em>${g.times}/${g.of_uses}</em></span>`).join("")}
+    </div>` : "";
+
+  return `<div class="lib-memory">
+    <i class="fas fa-chart-simple"></i>
+    <div><div>${bits.join(" · ")}</div>${gaps}</div>
+  </div>`;
 }
 
 function renderTimeline() {

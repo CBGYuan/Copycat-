@@ -1699,6 +1699,42 @@ a.btn-primary {
 }
 .lib-origin .lib-dot { margin-top: 3px; }
 
+/* Select a token in a log line -> turn it straight into a filter. Floating
+   and fixed-position so it tracks the selection rather than the scroll box. */
+.token-picker {
+  display: none; position: fixed; z-index: 1200;
+  align-items: center; gap: 6px;
+  padding: 4px 6px; border-radius: 8px;
+  background: #fff; border: 1px solid var(--primary-light);
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.18);
+  font-size: 0.72rem;
+}
+.token-picker-text {
+  font-family: Consolas, "Courier New", monospace;
+  color: var(--text-muted); max-width: 24ch; overflow: hidden;
+  text-overflow: ellipsis; white-space: nowrap;
+}
+.token-picker button {
+  border: 1px solid var(--border); border-radius: 6px; background: var(--bg-soft);
+  font-size: 0.7rem; font-weight: 600; padding: 2px 8px; white-space: nowrap;
+}
+.token-picker button[data-kind="include"] { color: var(--primary-dark); border-color: var(--primary-light); }
+.token-picker button[data-kind="exclude"] { color: var(--bad); border-color: #f0c0c0; }
+.token-picker button:hover { filter: brightness(0.96); }
+
+/* Skill-level memory — measured usage, kept visually distinct from the
+   skill's own content so it never reads as part of the skill. */
+.lib-memory {
+  display: flex; align-items: flex-start; gap: 8px;
+  padding: 7px 10px; margin-bottom: 12px;
+  border: 1px solid var(--border); border-radius: 8px; background: var(--bg-soft);
+  font-size: 0.73rem; color: var(--text-main);
+}
+.lib-memory-idle { color: var(--text-muted); font-style: italic; }
+.lib-memory-gaps { margin-top: 6px; display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+.chip.chip-gap { border-color: var(--warn); background: #fffdf3; color: #6b5300; }
+.chip.chip-gap em { font-style: normal; opacity: 0.65; font-size: 0.68rem; }
+
 .lib-section-label {
   font-size: 0.68rem; font-weight: 700; text-transform: uppercase;
   letter-spacing: 0.04em; color: var(--text-muted); margin-bottom: 5px;

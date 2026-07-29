@@ -185,6 +185,7 @@ def _context_from_state(state, exclude_skill_key: str = "", include_existing: bo
             "key": state.active_skill_key,
             "name": baseline_skill.name,
             "description": baseline_skill.description,
+            "triggers": list(baseline_skill.triggers or []),
         } if baseline_skill else None,
         "sample_lines": _sample_lines(state.filtered_preview, limit=40),
         "log_annotations": state.log_annotations,
@@ -874,7 +875,8 @@ def converge():
                 # didn't, while the engineer still has the field in front of
                 # them and can just rewrite it.
                 "description_conflict": skill_dedup.description_conflict(
-                    d.get("description", ""), parent),
+                    d.get("description", ""), parent, d.get("triggers")),
+                "parent_triggers": list(getattr(parent, "triggers", []) or []),
             }
             rebuilt.append(ext)
         drafts = rebuilt
@@ -910,6 +912,13 @@ def save():
             exclusive=data.get("exclusive") or [],
             tat_path=data.get("tat_path") or state.tat_path or None,
             expert_rules=data.get("expert_rules", ""),
+            # Carried through from the Edit-Skill modal. This is the route the
+            # EXPORT path actually saves through, so omitting these here meant
+            # an inherited draft lost its whole ancestry on the way to disk
+            # even though /skills/save handled it correctly.
+            parent=data.get("parent") or None,
+            lineage=[str(a) for a in (data.get("lineage") or []) if str(a).strip()],
+            triggers=[str(t) for t in (data.get("triggers") or []) if str(t).strip()],
         )
     except Exception as e:
         return jsonify({"success": False, "message": f"Invalid skill data: {e}"}), 400

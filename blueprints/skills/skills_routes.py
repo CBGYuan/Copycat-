@@ -2,7 +2,7 @@ from flask import Blueprint, render_template, request, jsonify
 
 from configs import set_up_app
 from configs.global_configs import app_config
-from services import session_store, skill_service
+from services import session_store, skill_memory, skill_service
 from utils import skill_dedup
 
 skills_bp = Blueprint("skills", __name__, url_prefix="/skills")
@@ -121,6 +121,10 @@ def graph():
             # inherited" in an export summary always count the same things.
             "rule_count": len(skill_dedup.split_rules(sk.expert_rules)),
             "is_active": key == active_key,
+            # What actually happened when this skill was used here — see
+            # services.skill_memory. `uses == 0` means never opened on THIS
+            # machine, which is a prompt to review, never grounds to delete.
+            "memory": skill_memory.stats_for(key),
         })
     nodes.sort(key=lambda n: n["name"].lower())
     return jsonify({"success": True, "domain": domain, "active_key": active_key, "nodes": nodes})
@@ -167,6 +171,8 @@ def versions(skill_key):
         })
     return jsonify({"success": True, "skill_key": skill_key, "domain": domain,
                     "origin": origins.get(skill_key, "local"),
+                    "memory": skill_memory.stats_for(skill_key),
+                    "triggers": list(skill.triggers or []),
                     "parent": skill.parent, "lineage": list(skill.lineage),
                     "versions": entries})
 
@@ -259,6 +265,7 @@ def save_skill_route():
             # parent would come out looking like an unrelated standalone one.
             parent=data.get("parent") or None,
             lineage=[str(a) for a in (data.get("lineage") or []) if str(a).strip()],
+            triggers=[str(t) for t in (data.get("triggers") or []) if str(t).strip()],
         )
     except Exception as e:
         return jsonify({"success": False, "message": f"Invalid skill: {e}"}), 400
@@ -288,5 +295,6 @@ def delete_skill_route(skill_key):
     except skill_service.SkillStoreError as e:
         return _store_error(e)
     if ok:
+        skill_memory.forget(skill_key)
         set_up_app.reload_pools()
     return jsonify({"success": ok})

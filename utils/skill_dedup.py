@@ -346,7 +346,7 @@ def lineage_depth_check(parent) -> Dict:
             "child_depth": depth, "max_depth": MAX_LINEAGE_DEPTH}
 
 
-def description_conflict(child_description: str, parent) -> Dict:
+def description_conflict(child_description: str, parent, child_triggers=None) -> Dict:
     """Is the child's one-line description too close to its parent's to pick
     between? Returns {too_similar, score, parent_description}.
 
@@ -368,11 +368,22 @@ def description_conflict(child_description: str, parent) -> Dict:
     """
     parent_desc = (getattr(parent, "description", "") or "").strip()
     child_desc = (child_description or "").strip()
+    parent_trg = {t.strip().casefold() for t in (getattr(parent, "triggers", []) or []) if t.strip()}
+    child_trg = {t.strip().casefold() for t in (child_triggers or []) if t and t.strip()}
+    # A trigger the parent does not have IS the discriminator, and a structural
+    # one — it ends up in the saved description, so the downstream agent sees
+    # it. Two similarly-worded descriptions that apply under provably
+    # different conditions are not the failure this check exists to catch, and
+    # warning about them would train the engineer to ignore the warning.
+    distinguishing = sorted(child_trg - parent_trg)
+
     if not parent_desc or not child_desc:
-        return {"too_similar": False, "score": 0.0, "parent_description": parent_desc}
+        return {"too_similar": False, "score": 0.0, "parent_description": parent_desc,
+                "distinguishing_triggers": distinguishing}
     score = ratio(child_desc, parent_desc)
-    return {"too_similar": score >= DESC_CONFLICT_RATIO,
-            "score": round(score, 3), "parent_description": parent_desc}
+    return {"too_similar": score >= DESC_CONFLICT_RATIO and not distinguishing,
+            "score": round(score, 3), "parent_description": parent_desc,
+            "distinguishing_triggers": distinguishing}
 
 
 def diff_against_parent(draft: Dict, parent) -> Dict:

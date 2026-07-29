@@ -16,6 +16,9 @@
   let state = {
     keywords: [],
     exclusive: [],
+    // Boundary conditions under which this skill applies. Edited as chips
+    // here, compiled onto the description server-side on save.
+    triggers: [],
     rules: [],       // array of raw rule-block strings (each may be multi-line)
     preamble: "",
     diff: null,      // {new_keywords, new_exclusive, rules_added_text} from an extend-draft, or null
@@ -251,6 +254,17 @@
     el.style.display = "flex";
   }
 
+  // Show the sentence the downstream agent will actually select on, since
+  // that is the description PLUS the compiled trigger clause — not what the
+  // description field alone displays.
+  function renderTriggerPreview() {
+    const el = document.getElementById("skm-trg-preview");
+    if (!el) return;
+    if (!state.triggers.length) { el.textContent = ""; return; }
+    const desc = (document.getElementById("skm-desc").value || "").trim();
+    el.textContent = "Saved as: " + desc + " Applies when: " + state.triggers.join("; ") + ".";
+  }
+
   function renderDescMeter() {
     const desc = document.getElementById("skm-desc").value;
     const s = descStrength(desc);
@@ -259,6 +273,7 @@
     bar.className = "desc-strength-bar " + s.cls;
     document.getElementById("skm-desc-label").textContent = s.label;
     renderDescWarning(desc);
+    renderTriggerPreview();
   }
 
   // A child inherits every keyword its parent has, so downstream (Avatar's
@@ -274,11 +289,21 @@
       el.style.display = "none";
       return;
     }
-    if (similarEnough(desc, conflict.parent_description)) {
+    // A trigger the parent does not declare IS the discriminator, and it ends
+    // up inside the saved description — so adding one resolves this live.
+    // Warning anyway would train the engineer to ignore the warning.
+    const parentTriggers = new Set((state.lineageInfo.parent_triggers || [])
+      .map((t) => String(t).trim().toLowerCase()));
+    const distinguishing = state.triggers
+      .map((t) => String(t).trim())
+      .filter((t) => t && !parentTriggers.has(t.toLowerCase()));
+
+    if (similarEnough(desc, conflict.parent_description) && !distinguishing.length) {
       el.innerHTML =
         '<i class="fas fa-triangle-exclamation"></i> <b>Too close to the parent\'s description.</b> ' +
         "This skill inherits all of the parent's keywords, so this sentence is the only thing " +
-        "that distinguishes them — as written, whoever picks between them is guessing.<br>" +
+        "that distinguishes them — as written, whoever picks between them is guessing. " +
+        "Either rewrite it, or add a trigger condition above that the parent does not have.<br>" +
         `<span class="skm-desc-warn-parent">Parent: &ldquo;${escapeHtml(conflict.parent_description)}&rdquo;</span>`;
       el.style.display = "block";
     } else {
@@ -310,6 +335,7 @@
     options = options || {};
     state.keywords = (data.keywords || []).slice();
     state.exclusive = (data.exclusive || []).slice();
+    state.triggers = (data.triggers || []).slice();
     const split = splitExpertRules(data.expert_rules || "");
     state.preamble = split.preamble;
     state.rules = split.rules;
@@ -350,6 +376,8 @@
     renderVerificationBanner();
     renderChips("skm-keywords", state.keywords, newKwSet(), inhKwSet());
     renderChips("skm-exclusive", state.exclusive, newExSet(), inhExSet());
+    renderChips("skm-triggers", state.triggers, null, null);
+    renderTriggerPreview();
     renderRules();
     renderDescMeter();
 
@@ -389,6 +417,7 @@
         description: document.getElementById("skm-desc").value.trim(),
         keywords: state.keywords,
         exclusive: state.exclusive,
+        triggers: state.triggers,
         expert_rules: joinExpertRules(),
         parent: state.parent,
         lineage: state.lineage,
@@ -452,6 +481,23 @@
     document.getElementById("skm-delete-btn").addEventListener("click", del);
 
     document.getElementById("skm-desc").addEventListener("input", renderDescMeter);
+
+    document.getElementById("skm-trg-input").addEventListener("keydown", function (e) {
+      if (e.key === "Enter" && this.value.trim()) {
+        e.preventDefault();
+        state.triggers.push(this.value.trim());
+        this.value = "";
+        renderChips("skm-triggers", state.triggers, null, null);
+        renderTriggerPreview();
+      }
+    });
+    document.getElementById("skm-triggers").addEventListener("click", function (e) {
+      const btn = e.target.closest(".chip-x");
+      if (!btn) return;
+      state.triggers.splice(Number(btn.dataset.idx), 1);
+      renderChips("skm-triggers", state.triggers, null, null);
+      renderTriggerPreview();
+    });
 
     document.getElementById("skm-kw-input").addEventListener("keydown", function (e) {
       if (e.key === "Enter" && this.value.trim()) {

@@ -377,6 +377,102 @@ class DurableWriteTests(_LocalFileCase):
         self.assertIn(skill_service.BACKUP_SUFFIX, body["message"])
 
 
+class TriggerSetTests(_LocalFileCase):
+    """Trigger conditions are edited as a structured list but have to end up
+    INSIDE the description, because that is the only field Avatar's agent
+    reads when choosing between skills. Structured in, compiled out."""
+
+    DESC = "Roam decisions driven by candidate grade delta."
+    TRG = ["platform is LNL", "resume from S4"]
+
+    def test_compiling_is_idempotent(self):
+        # Without stripping first, every re-export would stack another
+        # "Applies when:" clause onto the one line the agent selects on.
+        once = skill_service.compiled_description(self.DESC, self.TRG)
+        self.assertEqual(skill_service.compiled_description(once, self.TRG), once)
+        self.assertEqual(skill_service.base_description(once), self.DESC)
+
+    def test_triggers_reach_the_field_avatar_actually_reads(self):
+        import yaml
+        key = skill_service.save_skill(
+            None, Skill(name="Roam Grade", description=self.DESC,
+                        keywords=["candidate grade"], triggers=self.TRG),
+            domain="wifi", base={})
+        entry = yaml.safe_load(self.local_text())[key]
+        self.assertIn("Applies when: platform is LNL; resume from S4.", entry["description"])
+        self.assertEqual(entry["triggers"], self.TRG)
+
+    def test_the_in_memory_description_stays_what_the_engineer_wrote(self):
+        # Otherwise the editor would show generated text as if it were typed,
+        # and the next save would compile it a second time.
+        key = skill_service.save_skill(
+            None, Skill(name="Roam Grade", description=self.DESC, triggers=self.TRG),
+            domain="wifi", base={})
+        back = skill_service.load_all_skills("wifi")[key]
+        self.assertEqual(back.description, self.DESC)
+        self.assertEqual(back.triggers, self.TRG)
+
+    def test_resaving_does_not_stack_the_clause(self):
+        import yaml
+        key = skill_service.save_skill(
+            None, Skill(name="Roam Grade", description=self.DESC, triggers=self.TRG),
+            domain="wifi", base={})
+        back = skill_service.load_all_skills("wifi")[key]
+        skill_service.save_skill(key, back, domain="wifi", base={})
+        desc = yaml.safe_load(self.local_text())[key]["description"]
+        self.assertEqual(desc.count("Applies when:"), 1)
+
+    def test_a_restored_revision_brings_its_own_triggers_back(self):
+        key = skill_service.save_skill(
+            None, Skill(name="Roam Grade", description=self.DESC, triggers=self.TRG),
+            domain="wifi", base={})
+        first = skill_service.load_all_skills("wifi")[key]
+        skill_service.save_skill(
+            key, Skill(**{**first.model_dump(), "triggers": ["something else"]}),
+            domain="wifi", base={})
+        skill_service.restore_version(key, "0.1.0", domain="wifi", base={})
+        self.assertEqual(skill_service.load_all_skills("wifi")[key].triggers, self.TRG)
+
+    def test_a_pre_trigger_snapshot_does_not_silently_empty_them(self):
+        # History written before triggers existed has no `triggers` key at
+        # all; restoring one must keep the current set rather than wiping it.
+        key = skill_service.save_skill(
+            None, Skill(name="Roam Grade", description=self.DESC, triggers=self.TRG),
+            domain="wifi", base={})
+        current = skill_service.load_all_skills("wifi")[key]
+        legacy = {"version": "0.0.9", "name": "Roam Grade", "description": self.DESC,
+                  "keywords": [], "exclusive": [], "expert_rules": "",
+                  "saved_at": "2026-01-01T00:00:00"}
+        skill_service.save_skill(
+            key, Skill(**{**current.model_dump(), "version_history": [legacy]}),
+            domain="wifi", base={})
+        skill_service.restore_version(key, "0.0.9", domain="wifi", base={})
+        self.assertEqual(skill_service.load_all_skills("wifi")[key].triggers, self.TRG)
+
+
+class DescriptionConflictWithTriggersTests(unittest.TestCase):
+    PARENT = Skill(name="Connection Flow",
+                   description="Generic Wi-Fi association, authentication and roam baseline.",
+                   triggers=["any platform"])
+    NEAR_COPY = "Generic Wi-Fi association, authentication and roam baselines."
+
+    def test_without_triggers_a_reworded_copy_is_still_flagged(self):
+        out = skill_dedup.description_conflict(self.NEAR_COPY, self.PARENT, [])
+        self.assertTrue(out["too_similar"])
+
+    def test_a_trigger_the_parent_lacks_resolves_the_conflict(self):
+        # It ends up in the saved description, so it genuinely distinguishes
+        # them downstream — warning anyway trains the engineer to ignore it.
+        out = skill_dedup.description_conflict(self.NEAR_COPY, self.PARENT, ["resume from S4"])
+        self.assertFalse(out["too_similar"])
+        self.assertEqual(out["distinguishing_triggers"], ["resume from s4"])
+
+    def test_repeating_the_parents_own_trigger_distinguishes_nothing(self):
+        out = skill_dedup.description_conflict(self.NEAR_COPY, self.PARENT, ["any platform"])
+        self.assertTrue(out["too_similar"])
+        self.assertEqual(out["distinguishing_triggers"], [])
+
+
 class BaselineSourceTests(_LocalFileCase):
     """Which YAML a domain's pool is read from is now an explicit choice.
 

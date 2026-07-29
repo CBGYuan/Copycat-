@@ -107,6 +107,58 @@ class Skill(BaseModel):
     # exported file correct in the system that actually runs it.
     parent: Optional[str] = None
     lineage: List[str] = Field(default_factory=list)
+    # Trigger set (AutoSkill's tau) — the boundary conditions under which this
+    # skill applies: platform, phase, environment, whatever actually separates
+    # it from a sibling that filters on the same lines. Short declarative
+    # phrases, one condition each.
+    #
+    # This exists because of a specific, verified failure mode. Avatar's agent
+    # chooses a skill from the `name: description` lines alone and passes a key
+    # from an enum (log_chatbot_service._build_analyze_system_prompt /
+    # _build_tools) — it never sees keywords at selection time. An inherited
+    # skill carries EVERY keyword of its parent, so the description is the only
+    # thing left that can tell the two apart. Asking an LLM to "write a
+    # distinguishing description" is a style request that can only be checked
+    # after the fact with a similarity score; asking it to declare the
+    # conditions under which the skill applies is a structural one that can be
+    # checked directly.
+    #
+    # Kept structured HERE for editing and diffing, but compiled INTO the
+    # description on the way out (see compiled_description) — same
+    # structured-in/flat-out shape as lineage, and for the same reason: a key
+    # Avatar's loader ignores can document intent but cannot change behaviour.
+    triggers: List[str] = Field(default_factory=list)
+
+
+# Separates a skill's own description from the trigger conditions compiled
+# onto the end of it. Matched (not just appended) so recompiling is idempotent:
+# without this, every re-export would stack another "Applies when:" clause onto
+# the description until the one line Avatar selects on became unreadable.
+_TRIGGER_MARKER = "Applies when:"
+_TRIGGER_RE = re.compile(r"\s*" + re.escape(_TRIGGER_MARKER) + r".*$", re.S)
+
+
+def base_description(description: str) -> str:
+    """The description with any previously-compiled trigger clause stripped —
+    i.e. what the engineer actually wrote."""
+    return _TRIGGER_RE.sub("", description or "").strip()
+
+
+def compiled_description(description: str, triggers: List[str]) -> str:
+    """The description as Avatar will see it: the engineer's own sentence plus
+    the trigger conditions appended in a fixed, parseable clause.
+
+    Triggers have to end up in `description` because that is the ONLY field
+    Avatar's agent reads when choosing between skills — a separate `triggers:`
+    key would be silently ignored by its loader, so it could document the
+    boundary without ever enforcing it. Compiling keeps the structured form
+    editable here and still makes it count there.
+    """
+    base = base_description(description)
+    clean = [t.strip().rstrip(".;") for t in (triggers or []) if t and t.strip()]
+    if not clean:
+        return base
+    return f"{base} {_TRIGGER_MARKER} " + "; ".join(clean) + "."
 
 
 def _now_iso() -> str:
@@ -152,7 +204,12 @@ def _parse_skills_yaml(raw: dict) -> Dict[str, Skill]:
         try:
             skills[key] = Skill(
                 name=val.get("name", key),
-                description=val.get("description", ""),
+                # In memory the description is always the engineer's own
+                # sentence; the compiled "Applies when: ..." clause is a
+                # write-time concern only (see _skill_to_raw). Stripping it on
+                # the way in is what keeps the round-trip idempotent and stops
+                # the editor from showing generated text as if it were typed.
+                description=base_description(val.get("description", "")),
                 keywords=val.get("keywords") or [],
                 exclusive=val.get("exclusive") or [],
                 tat_path=val.get("tat_path"),
@@ -161,6 +218,7 @@ def _parse_skills_yaml(raw: dict) -> Dict[str, Skill]:
                 version_history=_coerce_history(val.get("version_history")),
                 parent=val.get("parent") or None,
                 lineage=[str(x) for x in (val.get("lineage") or []) if str(x).strip()],
+                triggers=[str(x) for x in (val.get("triggers") or []) if str(x).strip()],
             )
         except Exception as e:
             print(f"⚠️  Skipping invalid skill '{key}': {e}")
@@ -455,7 +513,11 @@ def _skill_to_raw(skill: Skill) -> dict:
     expect (same shape as one entry read back by _parse_skills_yaml)."""
     entry = {
         "name": skill.name,
-        "description": skill.description,
+        # Compiled, not raw: `description` is the one field Avatar selects on,
+        # so the trigger conditions have to be inside it to have any effect
+        # (see compiled_description). The structured `triggers` list is written
+        # alongside it purely so this app can keep editing them.
+        "description": compiled_description(skill.description, skill.triggers),
         "keywords": skill.keywords,
         "expert_rules": skill.expert_rules,
     }
@@ -472,6 +534,8 @@ def _skill_to_raw(skill: Skill) -> dict:
         entry["parent"] = skill.parent
     if skill.lineage:
         entry["lineage"] = list(skill.lineage)
+    if skill.triggers:
+        entry["triggers"] = list(skill.triggers)
     entry["version"] = skill.version or "0.1.0"
     if skill.version_history:
         entry["version_history"] = skill.version_history
@@ -549,6 +613,10 @@ def _dump_skills_yaml(skills_raw: dict) -> str:
         # is exactly why carrying the chain here is safe: it documents the
         # ancestry for Copycat and for a human reading the file, without
         # changing a single thing about how the skill actually runs.
+        triggers = entry.get("triggers") or []
+        if triggers:
+            out.append("  triggers:")
+            out.extend(f"    - {_yaml_dq(t)}" for t in triggers)
         if entry.get("parent"):
             out.append(f"  parent: {_yaml_dq(entry['parent'])}")
         lineage = entry.get("lineage") or []
@@ -700,7 +768,13 @@ def _save_skill_locked(skill_key: Optional[str], skill: Skill, domain: str,
         history.append({
             "version": old_version,
             "name": old_entry.get("name", ""),
-            "description": old_entry.get("description", ""),
+            # Stored WITHOUT the compiled trigger clause, alongside the
+            # triggers themselves: a snapshot has to be restorable, and
+            # restoring a description that already had the previous triggers
+            # baked in would carry them back even when the trigger list moved
+            # on (see restore_version).
+            "description": base_description(old_entry.get("description", "")),
+            "triggers": list(old_entry.get("triggers") or []),
             "keywords": list(old_entry.get("keywords") or []),
             "exclusive": list(old_entry.get("exclusive") or []),
             "expert_rules": old_entry.get("expert_rules", ""),
@@ -755,6 +829,11 @@ def _restore_version_locked(skill_key: str, version: str, domain: str,
         exclusive=list(snapshot.get("exclusive") or []),
         tat_path=current.tat_path,
         expert_rules=snapshot.get("expert_rules", ""),
+        # Triggers describe when the skill applies, so they are part of the
+        # revision being restored. Snapshots taken before triggers existed
+        # have none recorded — those keep the current set rather than being
+        # silently emptied.
+        triggers=list(snapshot["triggers"]) if "triggers" in snapshot else list(current.triggers),
         parent=current.parent,
         lineage=list(current.lineage),
     )

@@ -58,6 +58,12 @@ precisely (not overclaimed) in [Paper grounding](#paper-grounding) below.
   filter set is auto-assigned a color palette, alternating full-block and
   text-only treatments so a long filter list doesn't read as a wall of
   saturated color.
+- **Select a token in a log line, make it a filter.** Highlight any substring
+  in the log pane and a small picker offers `+ Keyword` (keep lines containing
+  it) or `− Noise` (drop them). Two actions rather than one because those mean
+  opposite things — picking for you would be a guess about intent. The point
+  isn't saved typing: the selected text is verbatim, and retyped keywords are
+  where `TASK_DISCONNECT` quietly becomes `TASK_DISCONECT` and matches nothing.
 - **Focus a time window** — type a timestamp and narrow every filter to
   ±N minutes around it, so a 200k-line capture collapses to the moments that
   matter. The window is sliced by binary search over a lazily-built timestamp
@@ -227,6 +233,35 @@ skill rather than from taste:
   description field that clears live as you rewrite it. Advisory; Save is
   never blocked on it.
 
+#### Trigger conditions (`triggers`)
+Every skill can declare the conditions under which it applies — platform,
+phase, environment, whatever actually bounds it:
+
+```yaml
+triggers:
+  - "platform is LNL"
+  - "resume from S4"
+```
+
+This is the structural answer to the problem above. "Write a distinguishing
+description" is a style request that can only be checked after the fact with a
+similarity score; "declare when this applies" is a claim that can be checked
+directly, and a condition the parent doesn't have provably separates the two —
+so declaring one clears the description warning.
+
+They are edited as chips but **compiled into the description on save**:
+
+```
+description: "Roam decisions driven by candidate grade delta. Applies when: platform is LNL; resume from S4."
+```
+
+Same structured-in / flat-out shape as lineage, for the same reason: Avatar's
+loader ignores a `triggers:` key, so a boundary that lived only there would
+document intent without ever enforcing it. Compiling is idempotent (the clause
+is stripped before being rebuilt), and version snapshots store the base
+sentence plus the trigger list separately so a restore brings back the
+revision's own conditions rather than a stale baked-in clause.
+
 ### 4. Skill Library
 A two-pane page (`/skills/`) for everything the workbench can see.
 
@@ -273,6 +308,17 @@ The badge appears only when the two differ — which is exactly the state that
 used to be invisible and made the dropdown look like it was lying. Its `×`
 drops the inheritance without touching the filters.
 
+- **Applies when** — the skill's trigger conditions (see the Export section),
+  shown as chips.
+- **Measured usage** — how many times this workbench loaded the skill, how many
+  lines its filters last matched, and the keywords the engineer had to add
+  *almost every time* they loaded it. That last one is a coverage gap stated by
+  their hands rather than their words, and it is measured rather than inferred:
+  a keyword added in 4 of 4 sessions is a concrete "this skill should probably
+  own it". A skill never loaded here is flagged as such — which means *no local
+  evidence either way*, never grounds to delete something a teammate may rely
+  on. Stored in a sidecar `skill_memory.json`, never in the YAML Avatar reads.
+
 Three rules the restore path holds to:
 
 1. **Restore moves the version forward, never backward.** Restoring v0.1.1
@@ -315,7 +361,11 @@ services/
                                  (systeminfo.txt) for click-sync
   skill_service.py             Skill model + YAML read/write, versioning,
                                  lineage, crash-safe atomic writes
-  skill_retrieval.py           Agent C — keyword-set similarity retrieval
+  skill_retrieval.py           Agent C — IDF-weighted token retrieval (the
+                                 cheap half of AutoSkill's dense+BM25 hybrid;
+                                 no model, no network)
+  skill_memory.py              Per-skill measured usage + coverage gaps,
+                                 sidecar json, never in the skills YAML
   learning_service.py          Interview prompts (Ambiguity Gate), readiness
                                  assessment, skill synthesis, judge (Agent B),
                                  stat-validated merge (Agent D), teaching-
@@ -498,6 +548,8 @@ Each entry in `data/skills/local/{skills,bt_skills}.yaml`:
     - "..."
   expert_rules: |               # numbered domain knowledge / hard rules
     1. ...
+  triggers:                     # conditions this skill applies under; ALSO
+    - "resume from S4"            #   compiled into `description` above
   parent: "connection_flow"     # only on an inherited skill — the key it was
   lineage:                        #   built on, and the full root→…→parent chain
     - "connection_flow"
@@ -506,7 +558,7 @@ Each entry in `data/skills/local/{skills,bt_skills}.yaml`:
     [...]
 ```
 
-`parent` / `lineage` are documentation and organisation only — Avatar's
+`parent` / `lineage` / `triggers` are documentation and organisation only — Avatar's
 loader ignores them, which is exactly why they are safe to carry. The
 keywords, exclusive and expert_rules written here are always **fully
 resolved** (the parent's content merged in), never delta-only. A loaded

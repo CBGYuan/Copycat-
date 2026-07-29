@@ -515,6 +515,72 @@ function renderLogRows(preview, emptyMessage) {
         : `<div class="tat-log-empty">${emptyMessage || 'Empty file'}</div>`;
 }
 
+// ---- Select-a-token-in-a-line -> make it a filter -------------------------
+// The lightest gesture in the interactive-log-parsing literature: instead of
+// reading a token off a line and retyping it into the filter box, select it
+// and click. Two actions rather than one, because Copycat's two filter kinds
+// mean opposite things and the paper's single "dummy token" idea maps onto
+// neither cleanly: an include keyword KEEPS lines, an exclude term DROPS them,
+// so silently picking one for the engineer would be a guess about intent.
+//
+// The pay-off is not saved typing, it is that the selected text is verbatim —
+// retyped keywords are where "TASK_DISCONNECT" quietly becomes
+// "TASK_DISCONECT" and matches nothing.
+let tokenPickSelection = '';
+
+function hideTokenPicker() {
+    const el = document.getElementById('tokenPicker');
+    if (el) el.style.display = 'none';
+    tokenPickSelection = '';
+}
+
+function showTokenPicker(text, x, y) {
+    let el = document.getElementById('tokenPicker');
+    if (!el) {
+        el = document.createElement('div');
+        el.id = 'tokenPicker';
+        el.className = 'token-picker';
+        el.innerHTML =
+            '<span class="token-picker-text"></span>' +
+            '<button type="button" data-kind="include" title="Filter the log down to lines containing this">+ Keyword</button>' +
+            '<button type="button" data-kind="exclude" title="Drop lines containing this as noise">&minus; Noise</button>';
+        document.body.appendChild(el);
+        el.addEventListener('mousedown', (e) => e.preventDefault()); // keep the selection alive
+        el.addEventListener('click', function (e) {
+            const btn = e.target.closest('button[data-kind]');
+            if (!btn || !tokenPickSelection) return;
+            addFilterText(tokenPickSelection, btn.dataset.kind === 'exclude');
+            hideTokenPicker();
+        });
+    }
+    tokenPickSelection = text;
+    el.querySelector('.token-picker-text').textContent =
+        text.length > 32 ? text.slice(0, 32) + '…' : text;
+    el.style.display = 'flex';
+    // Clamp into the viewport — a selection near the right edge would
+    // otherwise push the picker off screen.
+    const w = el.offsetWidth || 220;
+    el.style.left = Math.max(4, Math.min(x, window.innerWidth - w - 8)) + 'px';
+    el.style.top = Math.max(4, y - el.offsetHeight - 8) + 'px';
+}
+
+document.addEventListener('mouseup', function (e) {
+    if (e.target.closest && e.target.closest('#tokenPicker')) return;
+    const sel = window.getSelection();
+    const text = sel ? String(sel).trim() : '';
+    // Only inside the log pane, and only a token-sized selection — a stray
+    // drag across half the log is not someone naming a keyword.
+    const inLog = sel && sel.anchorNode && sel.anchorNode.parentElement
+        && sel.anchorNode.parentElement.closest('.tat-log-text');
+    if (!text || !inLog || text.length > 120 || text.includes('\n')) {
+        hideTokenPicker();
+        return;
+    }
+    const rect = sel.getRangeAt(0).getBoundingClientRect();
+    showTokenPicker(text, rect.left, rect.top);
+});
+document.addEventListener('scroll', hideTokenPicker, true);
+
 function annotateLogLine(event, lineNo, label, matchedFilters) {
     event.stopPropagation();
     const row = event.target.closest('.tat-log-row');
@@ -1049,13 +1115,22 @@ function addFilter(excluding) {
     const input = document.getElementById('newFilterText');
     const text = input.value.trim();
     if (!text) return;
+    addFilterText(text, excluding, () => { input.value = ''; });
+}
+
+// The shared body of "add a filter", so the typed box and the select-in-the-log
+// picker go through exactly one path — same journal entry, same skill-memory
+// record, same auto-rerun.
+function addFilterText(text, excluding, onAdded) {
+    text = (text || '').trim();
+    if (!text) return;
     fetch(LV.url.log_viewer_add_filter, {
         method: 'POST', headers: {'Content-Type': 'application/json'},
         body: JSON.stringify({text: text, excluding: excluding})
     }).then(r => r.json()).then(d => {
         if (!d.success) { alert(d.message); return; }
         filterData = d.filters;
-        input.value = '';
+        if (onAdded) onAdded();
         renderFilters();
         syncOps(d);
         if (document.getElementById('logPathInput').value.trim()) applyFilter();

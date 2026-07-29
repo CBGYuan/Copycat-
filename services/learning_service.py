@@ -346,6 +346,7 @@ Produce one or more BRAND-NEW skill entries matching this exact JSON schema
     {
       "name": "<short skill/category name>",
       "description": "<ONE sentence, scoped so it does NOT overlap any OTHER entry in this same skills array>",
+      "triggers": ["<a condition that must hold for this skill to apply>", "..."],
       "keywords": ["<minimal essential include-keyword>", "..."],
       "exclusive": ["<noise term to exclude>", "..."],
       "expert_rules": "<numbered, actionable diagnostic rules as one string, using \\n between rules>",
@@ -356,7 +357,22 @@ Produce one or more BRAND-NEW skill entries matching this exact JSON schema
 
 Every entry is a NEW, standalone skill. Do NOT try to edit, merge into, or
 add rules onto any pre-existing skill — this flow only ever creates fresh
-skills."""
+skills.
+
+`triggers` is the set of conditions that must hold for this skill to be the
+right one to reach for — platform, firmware/driver branch, power state or
+phase, test environment, whatever actually bounds it. Write 0-4 short
+declarative conditions, each one checkable by someone looking at the capture
+("resume from S4", "dual-band AP", "manufacturing line build"). They are
+appended to the description in the saved skill, so they are what a downstream
+agent uses to tell this skill apart from a sibling that filters on similar
+lines. Rules:
+ - State only conditions the session gives you EVIDENCE for. A guessed
+   boundary is worse than none: it silently narrows when the skill applies.
+ - Do not restate the description, the keywords, or the symptom. "DeAuth
+   appears in the log" is a keyword, not a trigger.
+ - Emit an empty array when the scenario genuinely has no boundary beyond its
+   own keywords."""
 
 _SYNTHESIS_SPLIT_AND_FIELDS = """\
 Rules:
@@ -701,16 +717,20 @@ def _build_context_block(context: Dict) -> str:
     # line of prompt, in exchange for the failure it prevents.
     baseline = context.get("baseline_skill")
     if baseline:
+        trg = baseline.get("triggers") or []
+        trg_line = ("\n  Baseline applies when: " + "; ".join(trg)) if trg else \
+                   "\n  The baseline declares no trigger conditions."
         lines.append(
             f"BASELINE SKILL (currently loaded): {baseline['name']} "
-            f"(key: {baseline['key']}) — {baseline['description']}\n"
+            f"(key: {baseline['key']}) — {baseline['description']}" + trg_line + "\n"
             "  The skill you emit will INHERIT every keyword of this baseline, so a "
             "downstream agent choosing between them sees two entries with the same "
             "filters and can only go by the description. Write this skill's "
             "`description` so it names the narrower situation THIS session is about, "
-            "and so a reader could decide which of the two to reach for without "
-            "looking at anything else. Never restate or lightly reword the baseline's "
-            "description."
+            "and never restate or lightly reword the baseline's description. Its "
+            "`triggers` are the strongest tool you have here: a condition the "
+            "baseline does NOT declare is what actually separates the two. Only "
+            "state conditions this session gives evidence for."
         )
 
     sample = context.get("sample_lines") or []
@@ -1653,10 +1673,14 @@ def route_draft(llm_helper, draft: Dict, pool: Dict[str, Skill],
     gracefully to Phase 2's plain-union behavior."""
     quality = keyword_quality_map(filter_stats)
     ruled_out: set = set()
+    # Same token weighting the Tier 1 retrieval below uses. Scoring continuity
+    # on a different scale than retrieval would mean _CONTINUITY_MIN_SCORE and
+    # the retrieval ranking no longer mean comparable things.
+    idf = skill_retrieval.build_idf(pool)
 
     if continuity_skill_key and continuity_skill_key in pool:
         continuity_skill = pool[continuity_skill_key]
-        score = skill_retrieval.score_against(draft, continuity_skill)
+        score = skill_retrieval.score_against(draft, continuity_skill, idf)
         if score >= _CONTINUITY_MIN_SCORE:
             if score >= _CONTINUITY_FORCE_SCORE:
                 decision = {

@@ -70,6 +70,18 @@
              the fix is to rewrite that field right here. -->
         <div class="skm-desc-warn" id="skm-desc-warn" style="display:none;"></div>
       </div>
+      <!-- Trigger set: the conditions under which this skill applies. These
+           get compiled onto the end of the description on save, because the
+           description is the only field the downstream agent selects on — a
+           `triggers:` key on its own would document the boundary without ever
+           enforcing it (see skill_service.compiled_description). -->
+      <div class="mb-3">
+        <label class="form-label small fw-bold">Applies when — trigger conditions</label>
+        <div class="chip-box" id="skm-triggers"></div>
+        <input class="form-control form-control-sm mt-1" id="skm-trg-input"
+               placeholder="e.g. platform is LNL / resume from S4 / not on a manufacturing line — Enter to add">
+        <div class="small text-muted mt-1" id="skm-trg-preview"></div>
+      </div>
       <div class="mb-3">
         <label class="form-label small fw-bold">Keywords</label>
         <div class="chip-box" id="skm-keywords"></div>

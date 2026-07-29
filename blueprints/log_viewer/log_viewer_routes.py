@@ -4,7 +4,7 @@ from datetime import date, datetime
 from flask import Blueprint, render_template, request, jsonify
 
 from configs.global_configs import app_config
-from services import session_store, event_log_service
+from services import session_store, skill_memory, event_log_service
 from utils import file_picker, tat_parser, helpers, operation_journal, divergence
 
 log_viewer_bp = Blueprint("log_viewer", __name__, url_prefix="/log_viewer")
@@ -448,6 +448,7 @@ def load_skill():
         state.filters = _filters_from_skill(skill)
 
     operation_journal.record(state, "load_skill", text=skill_key, label=skill.name)
+    skill_memory.record_load(skill_key)
 
     # Loading a named skill as the starting point means the engineer now has a
     # concrete baseline in mind — switch the conversation into PRIOR-knowledge
@@ -499,6 +500,13 @@ def add_filter():
     })
     operation_journal.record(state, "add_exclude" if excluding else "add_include",
                              text=text, excluding=excluding)
+    # An INCLUDE keyword added while a skill is the baseline is that skill
+    # failing to cover something, stated by the engineer's hands. Counted
+    # across sessions so a keyword added every single time becomes a concrete
+    # "this skill should own it" suggestion (services.skill_memory). Excludes
+    # are left out: dropping noise is tuning for one capture, not a gap.
+    if state.filter_skill_key and not excluding:
+        skill_memory.record_added_keyword(state.filter_skill_key, text)
     return jsonify({"success": True, "filters": state.filters,
                     "operations": operation_journal.payload(state)})
 
@@ -568,6 +576,12 @@ def apply_filter():
     processed = tat_parser.preprocess_log_for_llm(preview_texts)
     state.filtered_preview = tat_parser.group_similar_logs(processed)
     state.filter_stats = stats
+    # How much of the log this skill's filter set actually reaches, kept per
+    # skill across sessions (services.skill_memory). Recorded on every run, so
+    # the stored figure is the most recent one rather than whatever the very
+    # first unedited load happened to match.
+    if state.filter_skill_key:
+        skill_memory.record_matched(state.filter_skill_key, stats["surviving_count"])
 
     # Now that we have fresh per-keyword marginal stats, attach the measured
     # effect (unique hits contributed / noise dropped / survivor delta) to any
