@@ -71,6 +71,13 @@ def pick_tat_file() -> str:
     )
 
 
+def pick_skills_yaml_file() -> str:
+    return pick_file(
+        "Select a skills YAML to use as the baseline",
+        [("Skill YAML", "*.yaml *.yml"), ("All files", "*.*")],
+    )
+
+
 def pick_event_log_file() -> str:
     return pick_file(
         "Select System Event Log (.evtx / .evt)",

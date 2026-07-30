@@ -64,22 +64,44 @@ precisely (not overclaimed) in [Paper grounding](#paper-grounding) below.
   opposite things — picking for you would be a guess about intent. The point
   isn't saved typing: the selected text is verbatim, and retyped keywords are
   where `TASK_DISCONNECT` quietly becomes `TASK_DISCONECT` and matches nothing.
-- **Focus a time window** — type a timestamp and narrow every filter to
-  ±N minutes around it, so a 200k-line capture collapses to the moments that
+- **Focus a time window** — one crosshair button in the log header opens a
+  popover with a native `<input type="time">` (seconds included) and a ±minutes
+  field; it seeds itself from the first visible log line. The field only exists
+  while the popover is open, rather than a text box and two buttons permanently
+  occupying the widest part of the toolbar for a control most sessions never
+  touch. While a window is applied the button stays marked and a badge shows it
+  — clicking the badge clears it. It narrows every filter to
+  ±N minutes around the chosen time, so a 200k-line capture collapses to the moments that
   matter. The window is sliced by binary search over a lazily-built timestamp
   index (most sessions never focus, so nobody pays for the index up front),
   and line numbers stay **real file line numbers**, not window-relative ones,
   so evidence annotations survive focusing and clearing. The header reports
   "scanned N of M lines" whenever a window is active, because a hit count
   that silently means something different is worse than no hit count.
-- A collapsible **System Event Log** panel (BT captures) auto-discovers the
-  matching Windows System event export next to the driver log; rows
-  click-sync to the nearest driver-log line by timestamp, and vice versa. The
-  driver log is customer-local time while the event log is UTC — Copycat
-  reads the capture machine's fixed UTC offset from a `systeminfo.txt`/
-  `system_info.txt` sitting near the log (same field IntelAvatar's own
-  timezone resolver reads) and corrects for it, rather than comparing the two
-  raw and landing on a plausible-looking but wrong line.
+- A collapsible **System Event Log** panel auto-discovers the matching Windows
+  System event export next to the driver log; rows click-sync to the nearest
+  driver-log line by timestamp, and vice versa. Shown for **WiFi and BT alike**
+  — what decides whether it is useful is whether a capture actually shipped one,
+  which has nothing to do with the domain.
+
+  **Timezone alignment.** Windows stores `TimeCreated/@SystemTime` in **UTC**
+  (Event Viewer only *displays* local time), while the driver log carries the
+  capture machine's local time. Copycat reads that machine's fixed offset from a
+  `systeminfo.txt`/`system_info.txt` beside the log — the same field
+  IntelAvatar's own timezone resolver reads — and shifts the event times by it,
+  so both sources are compared in one frame:
+
+  ```
+  event 00:00:00 UTC  +  UTC+08:00 capture  =  08:00 local  ->  matches the log line at 08:00
+  without the shift:                                            8 hours off, silently
+  ```
+
+  Fixed offset only, no DST resolution. When no `systeminfo.txt` is found the
+  badge says so rather than pretending the jump is trustworthy. The badge also
+  states the standing **assumption**: the driver log carries *capture-machine*
+  local time — established for BT, currently assumed for WiFi. If a WiFi log
+  turns out to be in the analysing engineer's timezone instead, the jump is off
+  by the difference between the two machines.
 - A deterministic (zero-LLM-cost) **red-flag detector** notices a redundant
   keyword, a no-op exclude, a suspiciously large expansion/drop, or removing
   something load-bearing — and surfaces it as an inline question the instant
@@ -268,8 +290,14 @@ A two-pane page (`/skills/`) for everything the workbench can see.
 - **Base YAML picker** (top of the page) — which file this domain's skills are
   read from. The list is the local mirror of the corp share: the team baseline
   (`skills.yaml` / `bt_skills.yaml`) plus, for WiFi, each engineer contribution
-  file found there. WiFi and Bluetooth each keep their own choice, and the
-  choice survives page reloads and switching between the Log Viewer and here.
+  file found there — and a 📁 button for **any skills YAML anywhere on disk**
+  (a colleague's export, a snapshot kept beside a case, an older copy), since
+  the mirror only ever contains what the corp share ships. A browsed-in file is
+  checked for parseability before it is adopted and gets its own entry in the
+  dropdown, so the control can never show the team baseline while the pool
+  actually came from elsewhere. WiFi and Bluetooth each keep their own choice,
+  and the choice survives page reloads and switching between the Log Viewer
+  and here.
 
   **The chosen file is the WHOLE baseline**, not a layer on top of the team
   file. Before this, the pool was an implicit three-way merge — team baseline

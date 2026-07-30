@@ -84,19 +84,41 @@
           <!-- Issue-time focus (±5 min) — narrows the working log to a slice
                around a typed issue time so filter checkbox toggles stay fast
                on multi-million-line captures (see /log_viewer/set_focus). -->
-          <span class="focus-input-group">
-            <input id="focusTimeInput" type="text" class="form-control form-control-sm focus-time-input"
-                   placeholder="issue time HH:MM:SS"
-                   title="Issue time to focus on (±5 min) — narrows the log so filter toggles stay fast on huge captures"
-                   onkeydown="if (event.key === 'Enter') focusLogTime();">
-            <button type="button" class="btn btn-outline-secondary tat-mini-btn" onclick="focusLogTime()" title="Narrow the log to ±5 minutes around this time">
-              <i class="fas fa-crosshairs"></i> Focus
+          <!-- One crosshair button; the time entry lives in a popover it
+               opens. The field is only needed at the moment you focus, and
+               keeping a text box plus two buttons permanently in the header
+               spent the widest part of the toolbar on a control most sessions
+               never touch. -->
+          <span class="focus-wrap">
+            <button type="button" id="focusBtn" class="btn btn-outline-secondary tat-mini-btn"
+                    onclick="toggleFocusPopover()"
+                    title="Focus a time window — narrows the log so filter toggles stay fast on huge captures">
+              <i class="fas fa-crosshairs"></i>
             </button>
-            <button type="button" id="clearFocusBtn" class="btn btn-outline-secondary tat-mini-btn" onclick="clearFocus()" style="display:none;" title="Clear focus window — work the whole file again">
-              <i class="fas fa-times"></i>
-            </button>
+            <div id="focusPopover" class="focus-popover" style="display:none;">
+              <label for="focusTimeInput">Issue time</label>
+              <!-- type="time" so the browser supplies its own spinner/clock
+                   and the engineer's locale formatting, rather than this app
+                   validating a free-text field. step=1 exposes seconds, which
+                   driver logs always carry. -->
+              <input id="focusTimeInput" type="time" step="1" class="form-control form-control-sm"
+                     onkeydown="if (event.key === 'Enter') focusLogTime();">
+              <div class="focus-popover-row">
+                <label for="focusWindowInput">±</label>
+                <input id="focusWindowInput" type="number" min="1" max="120" value="5"
+                       class="form-control form-control-sm focus-window-input">
+                <span>min</span>
+              </div>
+              <div class="focus-popover-actions">
+                <button type="button" id="clearFocusBtn" class="btn btn-sm btn-outline-secondary"
+                        onclick="clearFocus()" style="display:none;">Clear</button>
+                <button type="button" class="btn btn-sm btn-primary" onclick="focusLogTime()">Focus</button>
+              </div>
+            </div>
           </span>
-          <span id="focusBadge" class="focus-badge" style="display:none;"></span>
+          <!-- Clickable: the badge is the thing you look at when you want the
+               window gone, so it is also the thing that removes it. -->
+          <span id="focusBadge" class="focus-badge" style="display:none;" onclick="clearFocus()"></span>
           <button type="button" class="btn btn-outline-secondary tat-mini-btn" onclick="showAllLog()" title="Back to the full unfiltered log">
             <i class="fas fa-list"></i> Show all
           </button>

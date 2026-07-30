@@ -217,20 +217,22 @@ def pick_log():
         state.filters = []
         state.filter_stats = {}
 
-    # For a BT capture, auto-discover the System Event Log sitting next to the
-    # driver log so the collapsible event panel can light up without a manual
-    # pick (the engineer can still override via /pick_event_log). WiFi logs
-    # don't ship one, so only look when BT was detected.
-    state.event_log_path = (
-        event_log_service.find_event_log_near(path) if state.log_domain == "bt" else ""
-    )
-    # Same relative-search idea for the capture machine's UTC offset (see
-    # find_capture_utc_offset_minutes) — needed to make the event<->log
-    # click-sync land on the right line instead of just comparing raw UTC
-    # against raw customer-local time with zero correction.
-    state.capture_utc_offset_min = (
-        event_log_service.find_capture_utc_offset_minutes(path) if state.log_domain == "bt" else None
-    )
+    # Auto-discover the System Event Log sitting next to the driver log so the
+    # collapsible event panel can light up without a manual pick (the engineer
+    # can still override via /pick_event_log). Looked for on BOTH domains:
+    # the discovery is purely "is there a System event export beside this
+    # capture", which has nothing to do with WiFi vs BT — gating it on BT was
+    # an assumption about which captures ship one, and a WiFi capture that
+    # does ship one had no way to use it. A capture without one simply gets
+    # "" here and the panel stays hidden exactly as before.
+    state.event_log_path = event_log_service.find_event_log_near(path)
+    # Same relative search for the CAPTURE MACHINE's fixed UTC offset (see
+    # find_capture_utc_offset_minutes). This is what puts the two timestamp
+    # sources in one frame: Windows stores TimeCreated/@SystemTime in UTC, the
+    # driver log carries capture-machine-local time, so event + offset =
+    # driver-log frame. Without it the click-sync compares two genuinely
+    # different moments as raw numbers and lands on a plausible wrong line.
+    state.capture_utc_offset_min = event_log_service.find_capture_utc_offset_minutes(path)
 
     # Some BT/WiFi driver-log exports carry only a time-of-day, no date at all
     # (BT's dateless HCI export, WiFi's DDD-player export) — a date must be

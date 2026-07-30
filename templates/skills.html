@@ -11,6 +11,8 @@
       <div class="lib-source">
         <label for="lib-source-select">Base YAML</label>
         <select id="lib-source-select" class="form-select form-select-sm"></select>
+        <button type="button" class="btn-browse" id="lib-source-browse"
+                title="Use a skills YAML from anywhere on disk">📁</button>
         <span id="lib-source-meta" class="lib-source-meta"></span>
       </div>
     </div>
@@ -94,19 +96,45 @@ function loadSources() {
     .then(d => {
       if (!d.success) return;
       const sel = document.getElementById("lib-source-select");
-      sel.innerHTML = d.sources
-        .map(s => `<option value="${esc(s.path)}"${s.path === d.active ? " selected" : ""}>${esc(s.label)}</option>`)
+      let opts = d.sources.slice();
+      // A browsed-in file is not one of the mirror's own sources, so it has
+      // no entry to select — add one for it, otherwise the dropdown would
+      // silently fall back to showing the team baseline while the pool
+      // actually came from somewhere else.
+      if (d.active && !opts.some(s => s.path === d.active)) {
+        opts.push({path: d.active, label: "📁 " + d.active.split(/[\\/]/).pop(),
+                   skill_count: null, updated: null, external: true});
+      }
+      sel.innerHTML = opts
+        .map(s => `<option value="${esc(s.path)}"${s.path === d.active ? " selected" : ""} title="${esc(s.path)}">${esc(s.label)}</option>`)
         .join("");
-      sel.disabled = d.sources.length < 2;
-      renderSourceMeta(d.sources.find(s => s.path === d.active));
+      sel.disabled = opts.length < 2;
+      renderSourceMeta(opts.find(s => s.path === d.active));
     });
 }
 
 function renderSourceMeta(src) {
   const el = document.getElementById("lib-source-meta");
   if (!src) { el.textContent = ""; return; }
+  if (src.external) { el.textContent = "from disk — not part of the synced mirror"; return; }
   const when = (src.updated || "").replace("T", " ");
   el.textContent = `${src.skill_count} skills` + (when ? ` · synced ${when}` : "");
+}
+
+// Pick a skills YAML from anywhere — a colleague's export, a snapshot kept
+// beside a case, an older copy. The mirror only ever contains what the corp
+// share ships, which is not the only place a valid baseline can live.
+function browseSource() {
+  fetch("/skills/sources/browse", {method: "POST"})
+    .then(r => r.json())
+    .then(d => {
+      if (!d.success) {
+        if (d.message && d.message !== "No file selected") alert(d.message);
+        return;
+      }
+      selectSource(d.path);
+    })
+    .catch(e => alert("Could not open the file picker: " + e));
 }
 
 function selectSource(path) {
@@ -445,6 +473,7 @@ document.addEventListener("DOMContentLoaded", function () {
   document.getElementById("lib-source-select").addEventListener("change", function () {
     selectSource(this.value);
   });
+  document.getElementById("lib-source-browse").addEventListener("click", browseSource);
   document.getElementById("lib-load-btn").addEventListener("click", doActivate);
   document.getElementById("lib-edit-btn").addEventListener("click", editSelected);
   loadSources();

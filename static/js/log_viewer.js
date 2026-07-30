@@ -715,17 +715,50 @@ function showAllLog() {
 // narrower view by itself — it's that a checkbox toggle on a multi-million-
 // line capture then only rescans that slice instead of the whole file.
 // Persists server-side until cleared or a different log is picked.
+// ── Focus window popover ──────────────────────────────────────────────────
+// The crosshair button opens it; the time field only exists while it is open.
+// Keeping a text box and two buttons permanently in the log header spent the
+// widest part of the toolbar on a control most sessions never touch.
+function toggleFocusPopover(force) {
+    const pop = document.getElementById('focusPopover');
+    if (!pop) return;
+    const open = force !== undefined ? force : pop.style.display === 'none';
+    pop.style.display = open ? 'flex' : 'none';
+    document.getElementById('focusBtn').classList.toggle('is-open', open);
+    if (open) {
+        const input = document.getElementById('focusTimeInput');
+        input.focus();
+        // Seed from the first visible log line's own time — the engineer is
+        // almost always focusing somewhere inside what they can see, and an
+        // empty <input type=time> is fiddly to fill from scratch.
+        if (!input.value) {
+            const first = document.querySelector('#previewBox .tat-log-text');
+            const m = first && first.textContent.match(/(\d{2}):(\d{2}):(\d{2})/);
+            if (m) input.value = `${m[1]}:${m[2]}:${m[3]}`;
+        }
+    }
+}
+
+document.addEventListener('click', function (e) {
+    if (e.target.closest && !e.target.closest('.focus-wrap')) toggleFocusPopover(false);
+});
+document.addEventListener('keydown', function (e) {
+    if (e.key === 'Escape') toggleFocusPopover(false);
+});
+
 function focusLogTime() {
     const raw = document.getElementById('focusTimeInput').value.trim();
     if (!raw) return;
+    const win = parseInt(document.getElementById('focusWindowInput').value, 10);
     fetch(LV.url.log_viewer_set_focus, {
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({time: raw}),
+        body: JSON.stringify({time: raw, window_min: (win > 0 ? win : 5)}),
     })
         .then(r => r.json())
         .then(d => {
             if (!d.success) { alert(d.message); return; }
+            toggleFocusPopover(false);
             setFocusUiState({center: d.focus_center, window_min: d.focus_window_min});
             // Re-run whatever view is currently active so the narrowing takes
             // effect immediately instead of waiting for the next edit.
@@ -760,17 +793,22 @@ function setFocusUiState(focus) {
         badge.style.display = 'none';
         badge.textContent = '';
         clearBtn.style.display = 'none';
+        document.getElementById('focusBtn').classList.remove('is-active');
         return;
     }
     const timePart = focus.center.split('-').pop(); // HH:MM:SS(.mmm) portion
-    badge.textContent = `🎯 focused ±${focus.window_min || 5}m around ${timePart}`;
+    badge.textContent = `🎯 ±${focus.window_min || 5}m around ${timePart}`;
+    badge.title = 'Only this window is being scanned. Click to clear.';
     badge.style.display = '';
     clearBtn.style.display = '';
+    document.getElementById('focusBtn').classList.add('is-active');
 }
 
 // ── System Event Log panel (collapsible, above the log rows) ──────────────
-// Shown only for BT captures. Auto-discovered next to the log or picked
-// manually; rows click-sync to the nearest driver-log line by timestamp.
+// Shown for any capture that HAS one beside it (WiFi or BT — see
+// updateEvtSection). Auto-discovered next to the log or picked manually; rows
+// click-sync to the nearest driver-log line by timestamp, with the capture
+// machine's UTC offset applied so the two are compared in one frame.
 let _evtLoaded = false, _evtOpen = false, _evtData = [], _evtLoading = false;
 let _evtOffset = 0, _evtHasMore = false, _evtTotal = 0;
 const _EVT_PAGE = 300;
@@ -778,11 +816,17 @@ const _EVT_PAGE = 300;
 // Show/hide + enable the event section based on domain + availability.
 // `path` (optional) syncs the evtPathInput readout — omitted on calls that
 // don't have a fresh path to report (the badge/enable-state still updates).
+// Shown for BOTH domains now. What decides whether the panel is useful is
+// whether a System event export was actually found beside the capture, not
+// whether the capture is WiFi or BT — a WiFi capture that ships one used to
+// have no way to open it. `available` is that answer; when a log is loaded and
+// nothing was found the section still shows, so the manual pick button is
+// reachable, and the toggle stays disabled until there is something to open.
 function updateEvtSection(domain, available, path) {
     const section = document.getElementById('evtSection');
-    const isBt = (domain === 'bt');
-    section.style.display = isBt ? 'block' : 'none';
-    if (!isBt) { _closeEvtPanel(); return; }
+    const hasLog = !!document.getElementById('logPathInput').value.trim();
+    section.style.display = hasLog ? 'block' : 'none';
+    if (!hasLog) { _closeEvtPanel(); return; }
     const btn = document.getElementById('evtToggleBtn');
     btn.disabled = !available;
     if (path !== undefined) document.getElementById('evtPathInput').value = path || '';
@@ -804,7 +848,17 @@ function updateEvtTzBadge() {
         const abs = Math.abs(captureUtcOffsetMin);
         const hhmm = `${String(Math.floor(abs / 60)).padStart(2, '0')}:${String(abs % 60).padStart(2, '0')}`;
         badge.textContent = `🌐 synced UTC${sign}${hhmm}`;
-        badge.title = `Event times are UTC; corrected by the capture's detected offset (UTC${sign}${hhmm}, from systeminfo.txt near the log) to line up with the driver log's customer-local time.`;
+        badge.title =
+            `Event times are UTC (Windows stores TimeCreated/@SystemTime in UTC regardless of `
+            + `what Event Viewer displays). They are shifted by the capture machine's own fixed `
+            + `offset UTC${sign}${hhmm}, read from systeminfo.txt beside the log, which puts them `
+            + `in the same frame as the driver log's timestamps.
+
+`
+            + `Assumption: the driver log carries CAPTURE-MACHINE local time. That is established `
+            + `for BT captures. For WiFi it is currently assumed, not verified — if a WiFi log `
+            + `turns out to be in the analysing engineer's timezone instead, the jump will be off `
+            + `by the difference between the two machines.`;
         badge.classList.add('evt-tz-ok');
         badge.classList.remove('evt-tz');
     } else {

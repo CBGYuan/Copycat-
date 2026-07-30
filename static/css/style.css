@@ -522,19 +522,32 @@ a.btn-primary {
 /* Issue-time focus (±5 min) — sits left of "Show all" in the Filtered Log
    header. Narrow input + mini buttons, matching .tat-mini-btn's footprint so
    it doesn't crowd that already-tight header row. */
-.focus-input-group {
-  display: flex;
-  align-items: center;
-  gap: 4px;
+/* Focus window: one crosshair button in the toolbar, everything else in a
+   popover it opens. `is-active` marks that a window is currently applied, so
+   the collapsed control still says the log is narrowed. */
+.focus-wrap { position: relative; display: inline-flex; }
+#focusBtn.is-open { background: var(--bg-soft); border-color: var(--primary-light); }
+#focusBtn.is-active { color: var(--primary-dark); border-color: var(--primary); }
+
+.focus-popover {
+  position: absolute; top: calc(100% + 6px); right: 0; z-index: 900;
+  display: flex; flex-direction: column; gap: 7px;
+  min-width: 190px; padding: 10px;
+  background: #fff; border: 1px solid var(--border); border-radius: 10px;
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.15);
+  font-size: 0.72rem;
 }
-.focus-time-input {
-  width: 108px;
-  font-size: 0.68rem;
-  padding: 1px 6px;
-  height: auto;
-  line-height: 1.6;
+.focus-popover label {
+  font-size: 0.66rem; font-weight: 700; text-transform: uppercase;
+  letter-spacing: 0.04em; color: var(--text-muted); margin: 0;
 }
+.focus-popover-row { display: flex; align-items: center; gap: 6px; }
+.focus-popover-row label { text-transform: none; letter-spacing: 0; font-size: 0.8rem; }
+.focus-window-input { width: 62px; }
+.focus-popover-actions { display: flex; justify-content: flex-end; gap: 6px; margin-top: 2px; }
+
 .focus-badge {
+  cursor: pointer;
   font-size: 0.65rem;
   font-weight: 600;
   color: var(--primary-dark);

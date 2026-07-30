@@ -353,6 +353,28 @@ def list_skill_sources(domain: str = "wifi") -> List[Dict]:
     return out
 
 
+def peek_source(path: str) -> Optional[Dict[str, Skill]]:
+    """Parse a candidate baseline file without adopting it.
+
+    Returns the skills it contains, or None if it is not valid YAML. An empty
+    dict is a real answer (valid YAML, no skills) and the caller decides what
+    to do with it — that distinction is the whole point, since "unparseable"
+    and "parsed fine but has nothing in it" need different messages.
+    """
+    if not path or not os.path.isfile(path):
+        return None
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            raw = yaml.safe_load(f)
+    except (OSError, yaml.YAMLError):
+        return None
+    if raw is None:
+        return {}
+    if not isinstance(raw, dict):
+        return None
+    return _parse_skills_yaml(raw)
+
+
 def default_source_path(domain: str = "wifi") -> str:
     """The baseline used when nothing has been chosen: the team's own file for
     this domain, which is what the app has always started on."""

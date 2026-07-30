@@ -1,9 +1,11 @@
+import os
+
 from flask import Blueprint, render_template, request, jsonify
 
 from configs import set_up_app
 from configs.global_configs import app_config
 from services import session_store, skill_memory, skill_service
-from utils import skill_dedup
+from utils import file_picker, skill_dedup
 
 skills_bp = Blueprint("skills", __name__, url_prefix="/skills")
 
@@ -53,6 +55,27 @@ def sources():
     return jsonify({"success": True, "domain": domain, "active": active, "sources": items})
 
 
+@skills_bp.route("/sources/browse", methods=["POST"])
+def browse_source():
+    """Native file dialog for a skills YAML anywhere on disk.
+
+    The listed sources only cover the local mirror of the corp share. An
+    engineer working from a colleague's export, a snapshot pulled off a case
+    folder, or an older copy kept aside has a perfectly good baseline that the
+    mirror will never contain — this is how they point at it. Only returns the
+    chosen path; select_source is what validates and applies it."""
+    path = file_picker.pick_skills_yaml_file()
+    if not path:
+        return jsonify({"success": False, "message": "No file selected"}), 400
+    if not os.path.isfile(path):
+        return jsonify({"success": False, "message": "File not found"}), 400
+    parsed = skill_service.peek_source(path)
+    if parsed is None:
+        return jsonify({"success": False, "message": "That file is not valid YAML."}), 400
+    return jsonify({"success": True, "path": path, "skill_count": len(parsed),
+                    "label": os.path.basename(path)})
+
+
 @skills_bp.route("/sources/select", methods=["POST"])
 def select_source():
     """Switch this domain's baseline file and rebuild its pool.
@@ -69,11 +92,23 @@ def select_source():
     domain = "bt" if domain == "bt" else "wifi"
     path = (data.get("path") or "").strip()
 
-    # Only ever a file this domain actually offers — never an arbitrary path
-    # off the request, which would let any file on disk be read as skills.
+    # A path from the listed sources needs no further checking. Anything else
+    # came from the engineer's own file dialog (see browse_source) — that is a
+    # deliberate choice, not untrusted input, but it still has to be a file
+    # that actually parses as skills: pointing the baseline at an unrelated
+    # YAML would empty the pool with no explanation of why.
     allowed = {s["path"] for s in skill_service.list_skill_sources(domain)}
     if path and path not in allowed:
-        return jsonify({"success": False, "message": "Unknown skill source for this domain."}), 400
+        if not os.path.isfile(path):
+            return jsonify({"success": False, "message": f"No such file: {path}"}), 400
+        parsed = skill_service.peek_source(path)
+        if parsed is None:
+            return jsonify({"success": False,
+                            "message": "That file is not valid YAML."}), 400
+        if not parsed:
+            return jsonify({"success": False,
+                            "message": "That YAML contains no skills — the baseline "
+                                       "was left unchanged."}), 400
 
     app_config.set_source(domain, path)
     set_up_app.reload_pools()
