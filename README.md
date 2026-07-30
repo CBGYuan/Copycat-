@@ -178,22 +178,25 @@ precisely (not overclaimed) in [Paper grounding](#paper-grounding) below.
   **delta from the previous read** — what newly counts as load-bearing or
   noise — so re-baselining after a big filter change is legible rather than a
   silent swap of one opinion for another.
-- **Interview mode** — a Quiet / Smart / Grill selector next to the chat
-  toggle. *Smart* is the behavior described above (a question only on
-  measurable divergence). *Quiet* never interrupts automatically — useful
-  when you'd rather filter uninterrupted and answer everything at the end.
-  *Grill* marks every open question **blocking** and walks them one at a
+- **Interview mode** — a Quiet / Smart / Grill selector, tucked behind a
+  collapsible **Refinement** row under the chat header (a sliders icon showing
+  a live summary, e.g. "Smart · 2/5") rather than sitting permanently in the
+  primary toolbar — this is a strategy setting changed rarely, not a
+  per-message control. *Smart* is the behavior described above (a question
+  only on measurable divergence). *Quiet* never interrupts automatically —
+  useful when you'd rather filter uninterrupted and answer everything at the
+  end. *Grill* marks every open question **blocking** and walks them one at a
   time, for a final pass before Export where nothing gets skipped by
   accident.
 - **Decision ledger** — every question the interview asks (baseline
   contradiction, per-step follow-up, clarification) is logged as one entry —
   open / resolved / deferred — in a session-only ledger, reachable from a
-  badge next to the mode selector ("N decisions"). It is *never* written into
-  the exported skill YAML; at Export time it is folded into a **review-only
-  spec** (scope, triggers, required evidence, exclusions, resolved vs.
-  still-open decisions) shown alongside the draft, so what you decided and
-  what you skipped is visible before you save, without changing Avatar's
-  established file shape.
+  badge inside that same Refinement row ("resolved/total decisions"). It is
+  *never* written into the exported skill YAML; at Export time it is folded
+  into a **review-only spec** (scope, triggers, required evidence, exclusions,
+  resolved vs. still-open decisions) shown alongside the draft, so what you
+  decided and what you skipped is visible before you save, without changing
+  Avatar's established file shape.
 - Sending a chat message before a baseline exists no longer requires one —
   it shows a **"Send without a baseline?"** confirmation instead of a hard
   block, since chatting freely is low-stakes compared to teaching a step or

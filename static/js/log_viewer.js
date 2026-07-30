@@ -734,13 +734,30 @@ function showAllLog() {
 // The crosshair button opens it; the time field only exists while it is open.
 // Keeping a text box and two buttons permanently in the log header spent the
 // widest part of the toolbar on a control most sessions never touch.
+let focusDraftSnapshot = null;
+
+function toggleFocusSelection() {
+    const pop = document.getElementById('focusPopover');
+    if (!pop || pop.style.display === 'none') {
+        toggleFocusPopover(true);
+    } else {
+        cancelFocusSelection();
+    }
+}
+
 function toggleFocusPopover(force) {
     const pop = document.getElementById('focusPopover');
     if (!pop) return;
     const open = force !== undefined ? force : pop.style.display === 'none';
     pop.style.display = open ? 'flex' : 'none';
-    document.getElementById('focusBtn').classList.toggle('is-open', open);
+    const focusBtn = document.getElementById('focusBtn');
+    focusBtn.classList.toggle('is-open', open);
+    focusBtn.setAttribute('aria-expanded', String(open));
     if (open) {
+        focusDraftSnapshot = {
+            time: document.getElementById('focusTimeInput').value,
+            windowMin: document.getElementById('focusWindowInput').value,
+        };
         // Seed from the first visible log line's own time — the engineer is
         // almost always focusing somewhere inside what they can see, and an
         // empty picker is fiddly to fill from scratch.
@@ -756,8 +773,17 @@ function toggleFocusPopover(force) {
     }
 }
 
+function cancelFocusSelection() {
+    if (focusDraftSnapshot) {
+        initTimeWheel(focusDraftSnapshot.time || '');
+        document.getElementById('focusWindowInput').value = focusDraftSnapshot.windowMin || 5;
+    }
+    focusDraftSnapshot = null;
+    toggleFocusPopover(false);
+}
+
 document.addEventListener('click', function (e) {
-    if (e.target.closest && !e.target.closest('.focus-wrap')) toggleFocusPopover(false);
+    if (e.target.closest && !e.target.closest('.focus-wrap')) cancelFocusSelection();
 });
 
 // ---- Custom 24-hour time picker -------------------------------------------
@@ -856,7 +882,7 @@ document.addEventListener('keydown', function (e) {
         closeBaselineGuard();
         return;
     }
-    toggleFocusPopover(false);
+    cancelFocusSelection();
 });
 
 function focusLogTime() {
@@ -871,6 +897,7 @@ function focusLogTime() {
         .then(r => r.json())
         .then(d => {
             if (!d.success) { alert(d.message); return; }
+            focusDraftSnapshot = null;
             toggleFocusPopover(false);
             setFocusUiState({center: d.focus_center, window_min: d.focus_window_min});
             // Re-run whatever view is currently active so the narrowing takes
@@ -1999,6 +2026,7 @@ function onPriorToggle() {
 function onInterviewModeChange() {
     const select = document.getElementById('interviewMode');
     interviewMode = select ? select.value : 'smart';
+    updateChatRefinementSummary();
     fetch(LV.url.learning_set_mode, {
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
@@ -2013,6 +2041,8 @@ function updateDecisionLedger(data) {
     if (!data) return;
     decisionLedger = data;
     interviewMode = data.mode || interviewMode;
+    const select = document.getElementById('interviewMode');
+    if (select) select.value = interviewMode;
     const badge = document.getElementById('decisionBadgeText');
     if (badge) {
         const total = (data.items || []).length;
@@ -2020,6 +2050,30 @@ function updateDecisionLedger(data) {
     }
     const button = document.getElementById('decisionBadge');
     if (button) button.classList.toggle('has-open', !!data.open);
+    updateChatRefinementSummary();
+}
+
+function updateChatRefinementSummary() {
+    const summary = document.getElementById('chatRefinementSummary');
+    if (!summary) return;
+    const total = (decisionLedger.items || []).length;
+    const modeLabel = interviewMode.charAt(0).toUpperCase() + interviewMode.slice(1);
+    summary.textContent = `${modeLabel} · ${decisionLedger.resolved || 0}/${total}`;
+}
+
+function toggleChatRefinement(force) {
+    const row = document.getElementById('chatRefinementRow');
+    const toggle = document.getElementById('chatRefinementToggle');
+    const chevron = document.getElementById('chatRefinementChevron');
+    if (!row || !toggle) return;
+    const open = force !== undefined ? force : row.hidden;
+    row.hidden = !open;
+    toggle.setAttribute('aria-expanded', String(open));
+    toggle.classList.toggle('is-open', open);
+    if (chevron) {
+        chevron.classList.toggle('fa-chevron-down', !open);
+        chevron.classList.toggle('fa-chevron-up', open);
+    }
 }
 
 function openDecisionLedger() {

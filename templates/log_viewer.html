@@ -107,7 +107,8 @@
                shows faster and reads better than the OS-default title box. -->
           <span class="focus-wrap">
             <button type="button" id="focusBtn" class="btn btn-outline-secondary tat-mini-btn has-tip"
-                    onclick="toggleFocusPopover()"
+                    onclick="toggleFocusSelection()"
+                    aria-expanded="false" aria-controls="focusPopover"
                     data-tip="Narrow the log to a time window so filtering stays fast on huge captures">
               <i class="fas fa-crosshairs"></i> Focus
             </button>
@@ -142,6 +143,9 @@
                   <button type="button" class="ctp-seed-btn" onclick="seedTimeWheelFromLog()">
                     <i class="fas fa-location-crosshairs"></i> Use visible log time
                   </button>
+                  <div class="ctp-panel-actions">
+                    <button type="button" class="btn btn-sm btn-primary" onclick="closeTimeWheel()">Done</button>
+                  </div>
                 </div>
               </div>
               <div class="focus-popover-row">
@@ -150,10 +154,17 @@
                        class="form-control form-control-sm focus-window-input">
                 <span>min</span>
               </div>
+              <div class="focus-popover-hint">
+                <i class="fas fa-filter"></i>
+                Apply limits the working log to this range.
+              </div>
               <div class="focus-popover-actions">
                 <button type="button" id="clearFocusBtn" class="btn btn-sm btn-outline-secondary"
                         onclick="clearFocus()" style="display:none;">Clear</button>
-                <button type="button" class="btn btn-sm btn-primary" onclick="focusLogTime()">Focus</button>
+                <span class="focus-action-spacer"></span>
+                <button type="button" class="btn btn-sm btn-outline-secondary"
+                        onclick="cancelFocusSelection()">Cancel</button>
+                <button type="button" class="btn btn-sm btn-primary" onclick="focusLogTime()">Apply range</button>
               </div>
             </div>
           </span>
@@ -305,8 +316,9 @@
        visible gap between two separate cards. -->
   <div class="col-lg-6 chat-panel-joined">
     <div class="card" style="height:74vh; display:flex; flex-direction:column; overflow:hidden;">
-      <div class="card-header py-1 d-flex align-items-center gap-2">
-        <span title="Skill-building chat"><i class="fas fa-comments"></i> Chat</span>
+      <div class="card-header py-1 chat-header">
+        <div class="chat-header-primary">
+          <span title="Skill-building chat"><i class="fas fa-comments"></i> Chat</span>
         <!-- Conversation-mode toggle sits right next to the title now — ON =
              load the existing WiFi/BT skills as prior knowledge, so the
              interview + export only cover what's NEW beyond them (no
@@ -317,16 +329,12 @@
           <input class="form-check-input" type="checkbox" role="switch" id="priorToggle" onchange="onPriorToggle()">
           <label class="form-check-label small text-muted" for="priorToggle" id="priorToggleLabel">Load skills</label>
         </span>
-        <select id="interviewMode" class="form-select form-select-sm interview-mode-select"
-                onchange="onInterviewModeChange()"
-                title="Quiet: no automatic questions. Smart: ask only on meaningful divergence. Grill: resolve skill-affecting decision branches one at a time.">
-          <option value="quiet">Quiet</option>
-          <option value="smart">Smart</option>
-          <option value="grill">Grill</option>
-        </select>
-        <button type="button" id="decisionBadge" class="btn btn-sm decision-ledger-btn"
-                onclick="openDecisionLedger()" title="Review specification decisions">
-          <i class="fas fa-code-branch"></i> <span id="decisionBadgeText">0 decisions</span>
+        <button type="button" id="chatRefinementToggle" class="btn btn-sm chat-refinement-toggle"
+                onclick="toggleChatRefinement()" aria-expanded="false"
+                aria-controls="chatRefinementRow" title="Show interview and specification controls">
+          <i class="fas fa-sliders-h"></i>
+          <span id="chatRefinementSummary">Smart · 0/0</span>
+          <i id="chatRefinementChevron" class="fas fa-chevron-down chat-refinement-chevron"></i>
         </button>
         <!-- The one deliberate start of the teaching loop. The LLM's first
              read has to happen against a filter set that ACTUALLY SURVIVES
@@ -350,6 +358,29 @@
                visually shouting as loud as a page-wide button on every scroll. -->
           <button id="exportSkillBtn" type="button" class="btn btn-sm export-skill-compact" data-busy-lock onclick="exportSkill()" title="Turn the rounds + chat so far into reusable skill(s) — follows the prior-knowledge toggle. Splits into multiple skills if the chat spans different knowledge domains; always creates brand-new skills.">
             <i class="fas fa-file-export"></i> Export skill
+          </button>
+        </div>
+        </div>
+        <div id="chatRefinementRow" class="chat-refinement-row" hidden>
+          <span class="chat-refinement-kicker">
+            <i class="fas fa-magic"></i> Refinement
+          </span>
+          <label for="interviewMode" class="chat-refinement-label">Question style</label>
+          <select id="interviewMode" class="form-select form-select-sm interview-mode-select"
+                  onchange="onInterviewModeChange()"
+                  title="Quiet: no automatic questions. Smart: ask only on meaningful divergence. Grill: resolve skill-affecting decision branches one at a time.">
+            <option value="quiet">Quiet</option>
+            <option value="smart">Smart</option>
+            <option value="grill">Grill</option>
+          </select>
+          <button type="button" id="decisionBadge" class="btn btn-sm decision-ledger-btn"
+                  onclick="openDecisionLedger()" title="Review specification decisions">
+            <i class="fas fa-code-branch"></i> <span id="decisionBadgeText">0/0 decisions</span>
+          </button>
+          <span class="chat-refinement-help">Controls how strongly Chat follows up on skill-changing differences.</span>
+          <button type="button" class="btn btn-sm chat-refinement-collapse"
+                  onclick="toggleChatRefinement(false)" aria-label="Collapse refinement controls">
+            <i class="fas fa-chevron-up"></i>
           </button>
         </div>
       </div>
