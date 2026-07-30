@@ -576,6 +576,96 @@ a.btn-primary {
 .focus-window-input { width: 62px; }
 .focus-popover-actions { display: flex; justify-content: flex-end; gap: 6px; margin-top: 2px; }
 
+/* Custom tooltip (data-tip="...") — a native `title` box is slow to appear,
+   plain, and inconsistent across browsers. This one matches the app's own
+   card styling and shows almost immediately, so a button with only an icon
+   (like the Focus crosshair) reads as discoverable rather than decorative. */
+.has-tip { position: relative; }
+.has-tip::after {
+  content: attr(data-tip);
+  position: absolute; top: calc(100% + 7px); left: 50%; transform: translateX(-50%);
+  width: max-content; max-width: 220px;
+  padding: 6px 9px; border-radius: 7px;
+  background: #24292f; color: #fff; font-size: 0.68rem; font-weight: 500;
+  line-height: 1.35; text-align: center;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.22);
+  opacity: 0; visibility: hidden; pointer-events: none;
+  transition: opacity 0.12s ease 0.15s, visibility 0.12s ease 0.15s;
+  z-index: 950;
+}
+.has-tip::before {
+  content: ""; position: absolute; top: 100%; left: 50%; transform: translateX(-50%);
+  border: 5px solid transparent; border-bottom-color: #24292f;
+  opacity: 0; visibility: hidden; pointer-events: none;
+  transition: opacity 0.12s ease 0.15s, visibility 0.12s ease 0.15s;
+  z-index: 950;
+}
+.has-tip:hover::after, .has-tip:hover::before,
+.has-tip:focus-visible::after, .has-tip:focus-visible::before {
+  opacity: 1; visibility: visible;
+}
+
+/* ---- Custom 24-hour time picker (replaces <input type="time">) ----------
+   The native control renders as an unstyleable OS grid and silently displays
+   in the browser locale's 12-hour AM/PM format — wrong for driver-log
+   timestamps, which are always 24-hour. Three independently-scrollable
+   HH / MM / SS columns instead, styled to match the rest of the app. */
+.ctp-wrap { position: relative; }
+.ctp-trigger {
+  display: flex; align-items: center; gap: 7px; width: 100%;
+  padding: 5px 10px; border: 1px solid var(--border); border-radius: 8px;
+  background: var(--bg-soft); color: var(--text-main);
+  font-size: 0.86rem; font-weight: 600; font-variant-numeric: tabular-nums;
+  text-align: left; letter-spacing: 0.02em;
+}
+.ctp-trigger i { color: var(--primary); font-size: 0.78rem; }
+.ctp-trigger:hover { border-color: var(--primary-light); }
+.ctp-trigger.is-open { border-color: var(--primary); box-shadow: 0 0 0 2px rgba(0, 113, 197, 0.15); }
+
+.ctp-panel {
+  position: absolute; top: calc(100% + 6px); left: 0; right: 0; z-index: 960;
+  padding: 8px 8px 6px;
+  background: #fff; border: 1px solid var(--border); border-radius: 10px;
+  box-shadow: 0 8px 22px rgba(0, 0, 0, 0.18);
+}
+.ctp-cols {
+  display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 6px;
+  position: relative;
+}
+/* The colon separators between columns, drawn once as a shared overlay rather
+   than three real characters — keeps each column's own width/scroll math
+   simple and the punctuation always lines up on the row of selected values. */
+.ctp-cols::before, .ctp-cols::after {
+  content: ":"; position: absolute; top: 50%; transform: translateY(-50%);
+  font-weight: 700; color: var(--text-muted); font-size: 0.9rem; pointer-events: none;
+}
+.ctp-cols::before { left: calc(33.333% - 4px); }
+.ctp-cols::after { left: calc(66.666% - 4px); }
+.ctp-col {
+  height: 148px; overflow-y: auto; scroll-behavior: smooth;
+  border: 1px solid var(--border); border-radius: 7px; background: var(--bg-soft);
+  /* Padding top/bottom lets the FIRST and LAST options still reach the
+     vertically-centered position scrollIntoView({block:'center'}) targets —
+     without it they'd stop short against the column's own edge. */
+  padding: 66px 0;
+  scrollbar-width: thin;
+}
+.ctp-opt {
+  padding: 6px 0; text-align: center; cursor: pointer;
+  font-size: 0.82rem; font-variant-numeric: tabular-nums; color: var(--text-main);
+  border-radius: 6px; margin: 0 4px;
+}
+.ctp-opt:hover { background: rgba(0, 113, 197, 0.08); }
+.ctp-opt.is-selected {
+  background: var(--primary); color: #fff; font-weight: 700;
+}
+.ctp-seed-btn {
+  width: 100%; margin-top: 7px; padding: 5px 0;
+  border: 1px dashed var(--border); border-radius: 7px; background: transparent;
+  color: var(--primary-dark); font-size: 0.68rem; font-weight: 600;
+}
+.ctp-seed-btn:hover { background: rgba(0, 113, 197, 0.06); border-color: var(--primary-light); }
+
 .focus-badge {
   cursor: pointer;
   font-size: 0.65rem;

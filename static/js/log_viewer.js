@@ -732,22 +732,114 @@ function toggleFocusPopover(force) {
     pop.style.display = open ? 'flex' : 'none';
     document.getElementById('focusBtn').classList.toggle('is-open', open);
     if (open) {
-        const input = document.getElementById('focusTimeInput');
-        input.focus();
         // Seed from the first visible log line's own time — the engineer is
         // almost always focusing somewhere inside what they can see, and an
-        // empty <input type=time> is fiddly to fill from scratch.
-        if (!input.value) {
+        // empty picker is fiddly to fill from scratch.
+        let seed = document.getElementById('focusTimeInput').value;
+        if (!seed) {
             const first = document.querySelector('#previewBox .tat-log-text');
             const m = first && first.textContent.match(/(\d{2}):(\d{2}):(\d{2})/);
-            if (m) input.value = `${m[1]}:${m[2]}:${m[3]}`;
+            if (m) seed = `${m[1]}:${m[2]}:${m[3]}`;
         }
+        initTimeWheel(seed);
+    } else {
+        closeTimeWheel();
     }
 }
 
 document.addEventListener('click', function (e) {
     if (e.target.closest && !e.target.closest('.focus-wrap')) toggleFocusPopover(false);
 });
+
+// ---- Custom 24-hour time picker -------------------------------------------
+// Replaces <input type="time">. Two reasons: the native control's dropdown is
+// an unstyleable OS-rendered grid (see the screenshot that prompted this),
+// and it silently displays in the browser locale's 12-hour AM/PM format —
+// driver-log timestamps are always 24-hour, so a picker showing "01:44:37 PM"
+// invites exactly the off-by-12-hours mistake this feature exists to prevent.
+// Three scrollable columns instead; #focusTimeInput stays as the single
+// source of truth (a hidden "HH:MM:SS" string) so focusLogTime() and the
+// seed-from-log-line logic above don't need to know a custom widget exists.
+const CTP_COLS = { h: { id: 'ctpHour', max: 24 }, m: { id: 'ctpMinute', max: 60 }, s: { id: 'ctpSecond', max: 60 } };
+let ctpBuilt = false;
+
+function buildTimeWheelColumns() {
+    if (ctpBuilt) return;
+    Object.keys(CTP_COLS).forEach((unit) => {
+        const col = document.getElementById(CTP_COLS[unit].id);
+        if (!col) return;
+        let html = '';
+        for (let i = 0; i < CTP_COLS[unit].max; i++) {
+            const v = String(i).padStart(2, '0');
+            html += `<div class="ctp-opt" data-val="${v}">${v}</div>`;
+        }
+        col.innerHTML = html;
+        col.dataset.unit = unit;
+    });
+    document.getElementById('timeWheelPanel').addEventListener('click', function (e) {
+        const opt = e.target.closest('.ctp-opt');
+        if (!opt) return;
+        selectWheelValue(opt.parentElement.dataset.unit, opt.dataset.val);
+    });
+    ctpBuilt = true;
+}
+
+function selectWheelValue(unit, val) {
+    const col = document.getElementById(CTP_COLS[unit].id);
+    col.querySelectorAll('.ctp-opt').forEach((o) => o.classList.toggle('is-selected', o.dataset.val === val));
+    const parts = (document.getElementById('focusTimeInput').value || '00:00:00').split(':');
+    parts[unit === 'h' ? 0 : unit === 'm' ? 1 : 2] = val;
+    const full = parts.join(':');
+    document.getElementById('focusTimeInput').value = full;
+    document.getElementById('focusTimeText').textContent = full;
+}
+
+function scrollWheelToSelected(instant) {
+    Object.keys(CTP_COLS).forEach((unit) => {
+        const col = document.getElementById(CTP_COLS[unit].id);
+        const sel = col.querySelector('.is-selected');
+        if (sel) sel.scrollIntoView({ block: 'center', behavior: instant ? 'auto' : 'smooth' });
+    });
+}
+
+// `value` is "HH:MM:SS" or "" — populates the display + hidden field + column
+// highlighting. Does not open the dropdown; that's toggleTimeWheel's job.
+function initTimeWheel(value) {
+    buildTimeWheelColumns();
+    document.getElementById('focusTimeInput').value = value || '';
+    document.getElementById('focusTimeText').textContent = value || '--:--:--';
+    if (value) {
+        const [h, m, s] = value.split(':');
+        selectWheelValue('h', h); selectWheelValue('m', m); selectWheelValue('s', s);
+    }
+}
+
+function toggleTimeWheel(e) {
+    if (e) e.stopPropagation();
+    buildTimeWheelColumns();
+    const panel = document.getElementById('timeWheelPanel');
+    const open = panel.style.display === 'none';
+    panel.style.display = open ? 'block' : 'none';
+    document.getElementById('ctpTrigger').classList.toggle('is-open', open);
+    if (open) requestAnimationFrame(() => scrollWheelToSelected(true));
+}
+
+function closeTimeWheel() {
+    const panel = document.getElementById('timeWheelPanel');
+    if (panel) panel.style.display = 'none';
+    const trigger = document.getElementById('ctpTrigger');
+    if (trigger) trigger.classList.remove('is-open');
+}
+
+// The "Use visible line's time" shortcut inside the picker — re-seeds without
+// closing the popover, for re-centering after scrolling the log.
+function seedTimeWheelFromLog() {
+    const first = document.querySelector('#previewBox .tat-log-text');
+    const m = first && first.textContent.match(/(\d{2}):(\d{2}):(\d{2})/);
+    if (!m) return;
+    initTimeWheel(`${m[1]}:${m[2]}:${m[3]}`);
+    scrollWheelToSelected(false);
+}
 document.addEventListener('keydown', function (e) {
     if (e.key === 'Escape') toggleFocusPopover(false);
 });
@@ -1814,19 +1906,19 @@ function setBaselineGate() {
                   + 'compared against it — that comparison is what turns your filtering into '
                   + 'taught knowledge.';
     } else if (!hasLog) {
-        label.textContent = 'Set comparison baseline';
+        label.textContent = 'Set baseline';
         btn.title = 'Load a log first.';
     } else if (!filterData.length) {
-        label.textContent = 'Set comparison baseline';
+        label.textContent = 'Set baseline';
         btn.title = 'Load a .tat file or a skill so there is a filter to read.';
     } else if (!lastMatchCount) {
-        label.textContent = 'Set comparison baseline';
+        label.textContent = 'Set baseline';
         btn.title = 'The filter currently matches 0 lines. A first read of a filter that '
                   + 'survives nothing would describe nothing, and everything you teach '
                   + 'afterwards is compared against it — adjust the filter until it hits '
                   + 'something.';
     } else {
-        label.textContent = 'Set comparison baseline';
+        label.textContent = 'Set baseline';
         btn.title = "Record the LLM's first read of this filter. Teaching steps and Export "
                   + 'unlock once it has run.';
     }

@@ -64,16 +64,22 @@ precisely (not overclaimed) in [Paper grounding](#paper-grounding) below.
   opposite things — picking for you would be a guess about intent. The point
   isn't saved typing: the selected text is verbatim, and retyped keywords are
   where `TASK_DISCONNECT` quietly becomes `TASK_DISCONECT` and matches nothing.
-- **Focus a time window** — one crosshair button in the log header opens a
-  popover with a native `<input type="time">` (seconds included) and a ±minutes
-  field; it seeds itself from the first visible log line. The field only exists
-  while the popover is open, rather than a text box and two buttons permanently
-  occupying the widest part of the toolbar for a control most sessions never
-  touch. While a window is applied the button stays marked and a badge shows it
-  — clicking the badge clears it. It narrows every filter to
-  ±N minutes around the chosen time, so a 200k-line capture collapses to the moments that
-  matter. The window is sliced by binary search over a lazily-built timestamp
-  index (most sessions never focus, so nobody pays for the index up front),
+- **Focus a time window** — a labeled "Focus" button (with a custom tooltip
+  that shows immediately on hover, not the slow native one) opens a popover
+  with a custom 24-hour time picker and a ±minutes field; it seeds itself from
+  the first visible log line, with a shortcut to re-seed from whatever line is
+  currently on screen. The picker is three independently-scrollable HH/MM/SS
+  columns, not `<input type="time">` — the native control renders as an
+  unstyleable OS grid and, worse, silently displays in the browser locale's
+  12-hour AM/PM format, which invites misreading a 24-hour driver-log
+  timestamp by exactly 12 hours. The field only exists while the popover is
+  open, rather than occupying the widest part of the toolbar permanently for a
+  control most sessions never touch. While a window is applied the button
+  stays marked and a badge shows it — clicking the badge clears it. It narrows
+  every filter to ±N minutes around the chosen time, so a 200k-line capture
+  collapses to the moments that matter. The window is sliced by binary search
+  over a lazily-built timestamp index (most sessions never focus, so nobody
+  pays for the index up front),
   and line numbers stay **real file line numbers**, not window-relative ones,
   so evidence annotations survive focusing and clearing. The header reports
   "scanned N of M lines" whenever a window is active, because a hit count

@@ -84,25 +84,43 @@
           <!-- Issue-time focus (±5 min) — narrows the working log to a slice
                around a typed issue time so filter checkbox toggles stay fast
                on multi-million-line captures (see /log_viewer/set_focus). -->
-          <!-- One crosshair button; the time entry lives in a popover it
-               opens. The field is only needed at the moment you focus, and
-               keeping a text box plus two buttons permanently in the header
-               spent the widest part of the toolbar on a control most sessions
-               never touch. -->
+          <!-- One button with a visible label (an icon alone wasn't
+               self-explanatory — a crosshair with only a hover-only native
+               title reads as decoration until you've already discovered what
+               it does). data-tip is a custom tooltip (see .has-tip in CSS):
+               shows faster and reads better than the OS-default title box. -->
           <span class="focus-wrap">
-            <button type="button" id="focusBtn" class="btn btn-outline-secondary tat-mini-btn"
+            <button type="button" id="focusBtn" class="btn btn-outline-secondary tat-mini-btn has-tip"
                     onclick="toggleFocusPopover()"
-                    title="Focus a time window — narrows the log so filter toggles stay fast on huge captures">
-              <i class="fas fa-crosshairs"></i>
+                    data-tip="Narrow the log to a time window so filtering stays fast on huge captures">
+              <i class="fas fa-crosshairs"></i> Focus
             </button>
             <div id="focusPopover" class="focus-popover" style="display:none;">
-              <label for="focusTimeInput">Issue time</label>
-              <!-- type="time" so the browser supplies its own spinner/clock
-                   and the engineer's locale formatting, rather than this app
-                   validating a free-text field. step=1 exposes seconds, which
-                   driver logs always carry. -->
-              <input id="focusTimeInput" type="time" step="1" class="form-control form-control-sm"
-                     onkeydown="if (event.key === 'Enter') focusLogTime();">
+              <label>Issue time</label>
+              <!-- Custom 24-hour picker, not <input type="time">. Two reasons:
+                   the native control's dropdown renders as a plain OS grid
+                   with no styling hook (see the screenshot that prompted
+                   this), and worse, it silently switches to the browser
+                   locale's 12-hour AM/PM display — a driver log timestamp is
+                   always 24-hour, so a picker that shows "01:44:37 PM" is
+                   inviting the exact off-by-12-hours mistake this feature
+                   exists to avoid. -->
+              <div class="ctp-wrap">
+                <button type="button" id="ctpTrigger" class="ctp-trigger" onclick="toggleTimeWheel(event)">
+                  <i class="fas fa-clock"></i> <span id="focusTimeText">--:--:--</span>
+                </button>
+                <input type="hidden" id="focusTimeInput">
+                <div id="timeWheelPanel" class="ctp-panel" style="display:none;">
+                  <div class="ctp-cols">
+                    <div class="ctp-col" id="ctpHour"></div>
+                    <div class="ctp-col" id="ctpMinute"></div>
+                    <div class="ctp-col" id="ctpSecond"></div>
+                  </div>
+                  <button type="button" class="ctp-seed-btn" onclick="seedTimeWheelFromLog()">
+                    <i class="fas fa-location-crosshairs"></i> Use visible line's time
+                  </button>
+                </div>
+              </div>
               <div class="focus-popover-row">
                 <label for="focusWindowInput">±</label>
                 <input id="focusWindowInput" type="number" min="1" max="120" value="5"
@@ -265,7 +283,7 @@
   <div class="col-lg-6 chat-panel-joined">
     <div class="card" style="height:74vh; display:flex; flex-direction:column; overflow:hidden;">
       <div class="card-header py-1 d-flex align-items-center gap-2">
-        <span><i class="fas fa-comments"></i> Skill-building chat</span>
+        <span title="Skill-building chat"><i class="fas fa-comments"></i> Chat</span>
         <!-- Conversation-mode toggle sits right next to the title now — ON =
              load the existing WiFi/BT skills as prior knowledge, so the
              interview + export only cover what's NEW beyond them (no
@@ -286,7 +304,7 @@
              step, exporting) waits behind it. -->
         <button type="button" id="baselineBtn" class="btn btn-sm baseline-btn" disabled
                 onclick="requestBaseline()">
-          <i class="fas fa-flag-checkered"></i> <span id="baselineBtnLabel">Set comparison baseline</span>
+          <i class="fas fa-flag-checkered"></i> <span id="baselineBtnLabel">Set baseline</span>
         </button>
         <div class="d-flex align-items-center gap-2 ms-auto">
           <button type="button" class="icon-btn" onclick="resetChat()" title="Clear the conversation">
