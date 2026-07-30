@@ -16,7 +16,7 @@ from flask import Flask
 from configs.set_up_app import set_up
 from blueprints import main_bp, log_viewer_bp, chatbot_bp, learning_bp, skills_bp
 from utils import helpers
-from utils.browser_utils import open_in_chrome
+from utils.browser_utils import ManagedChromeWindow
 
 HOST = "127.0.0.1"
 
@@ -48,9 +48,20 @@ if __name__ == "__main__":
     port = helpers.get_available_port()
     print(f"🌐 Starting on port {port}")
     # Pop the UI open in Chrome shortly after the server starts (mirrors
-    # IntelAvatar's own auto-launch-Chrome-on-startup behavior).
-    threading.Timer(1.2, open_in_chrome, args=(f"http://{HOST}:{port}/",)).start()
+    # IntelAvatar's own auto-launch-Chrome-on-startup behavior). This managed
+    # window uses its own temporary Chrome process, allowing Ctrl+C to close
+    # exactly this page without touching any pre-existing Chrome windows.
+    browser_window = ManagedChromeWindow()
+    launch_timer = threading.Timer(
+        1.2, browser_window.open, args=(f"http://{HOST}:{port}/",)
+    )
+    launch_timer.daemon = True
+    launch_timer.start()
     # use_reloader=False: avoids double-initialising set_up() (and re-opening
     # the browser tab) and keeps the native tkinter file-picker threads
     # (used for log/.tat selection) stable.
-    app.run(host=HOST, port=port, debug=True, use_reloader=False, threaded=True)
+    try:
+        app.run(host=HOST, port=port, debug=True, use_reloader=False, threaded=True)
+    finally:
+        launch_timer.cancel()
+        browser_window.close()

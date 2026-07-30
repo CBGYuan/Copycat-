@@ -12,8 +12,30 @@ want — so we invoke chrome.exe with --new-window via subprocess directly,
 which forces a separate top-level window even if Chrome is already open.
 """
 import os
+import shutil
 import subprocess
+import sys
+import tempfile
+import threading
 import webbrowser
+
+
+def _safe_print(message: str) -> None:
+    """print() that never raises on a legacy Windows console codepage (e.g.
+    cp1252) that can't encode the emoji in these status lines.
+
+    app.py reconfigures stdout/stderr to UTF-8 once, at the top, before any
+    other import runs -- but only for the app's own `python app.py` entry
+    point. This module is also imported directly (unit tests import
+    ManagedChromeWindow without ever importing app.py, and so would any other
+    script that reuses it), where that reconfiguration never happens. A
+    status print should not depend on which entry point got there first.
+    """
+    try:
+        print(message)
+    except UnicodeEncodeError:
+        enc = getattr(sys.stdout, "encoding", None) or "ascii"
+        print(message.encode(enc, errors="replace").decode(enc, errors="replace"))
 
 
 def get_chrome_binary_path():
@@ -49,15 +71,86 @@ def get_chrome_binary_path():
     return None
 
 
-def open_in_chrome(url: str) -> None:
-    """Open `url` in its own independent Chrome window (not a new tab tacked
-    onto whatever Chrome window the user already has focused), falling back
-    to the OS default browser if Chrome isn't installed."""
-    chrome_path = get_chrome_binary_path()
-    if chrome_path:
-        try:
-            subprocess.Popen([chrome_path, "--new-window", url])
-            return
-        except Exception as e:
-            print(f"⚠️  Could not launch Chrome directly ({e}); falling back to default browser.")
-    webbrowser.open(url)
+class ManagedChromeWindow:
+    """Own the Chrome window opened for one local Flask server run.
+
+    Chrome normally forwards ``--new-window`` to an already-running browser
+    process. That makes the new window look independent, but leaves us without
+    a process handle that can close it when Flask stops. A temporary user-data
+    directory forces a genuinely separate Chrome instance, so Ctrl+C can close
+    only this app window without touching the engineer's normal Chrome session.
+    """
+
+    def __init__(self):
+        self._lock = threading.Lock()
+        self._process = None
+        self._profile_dir = None
+        self._closed = False
+
+    def open(self, url: str) -> bool:
+        """Open the app window. Returns whether a managed Chrome was started."""
+        with self._lock:
+            if self._closed or self._process is not None:
+                return False
+
+            chrome_path = get_chrome_binary_path()
+            if chrome_path:
+                profile_dir = tempfile.mkdtemp(prefix="log-triage-chrome-")
+                try:
+                    self._process = subprocess.Popen([
+                        chrome_path,
+                        f"--user-data-dir={profile_dir}",
+                        "--new-window",
+                        "--no-first-run",
+                        "--no-default-browser-check",
+                        "--disable-sync",
+                        "--disable-background-mode",
+                        url,
+                    ])
+                    self._profile_dir = profile_dir
+                    return True
+                except Exception as e:
+                    shutil.rmtree(profile_dir, ignore_errors=True)
+                    _safe_print(
+                        f"⚠️  Could not launch a managed Chrome window ({e}); "
+                        "falling back to the default browser."
+                    )
+
+            # There is no portable way to close a tab handed to an arbitrary
+            # default browser, so this fallback remains intentionally unmanaged.
+            webbrowser.open(url)
+            _safe_print("⚠️  This fallback browser tab must be closed manually.")
+            return False
+
+    def close(self) -> None:
+        """Close only this app's Chrome instance and remove its temp profile."""
+        with self._lock:
+            if self._closed:
+                return
+            self._closed = True
+            process = self._process
+            profile_dir = self._profile_dir
+            self._process = None
+            self._profile_dir = None
+
+        if process is not None and process.poll() is None:
+            try:
+                process.terminate()
+                process.wait(timeout=5)
+                _safe_print("🛑 App browser window closed.")
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait(timeout=2)
+                _safe_print("🛑 App browser window closed.")
+            except Exception as e:
+                _safe_print(f"⚠️  Could not close the app Chrome window cleanly ({e}).")
+
+        if profile_dir:
+            shutil.rmtree(profile_dir, ignore_errors=True)
+
+
+def open_in_chrome(url: str) -> ManagedChromeWindow:
+    """Compatibility helper for callers that do not need lifecycle control."""
+    window = ManagedChromeWindow()
+    window.open(url)
+    return window
