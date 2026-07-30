@@ -1,13 +1,5 @@
 {% extends "base.html" %}
 {% block content %}
-{% if not llm_ready %}
-<div id="llmBanner" class="alert alert-warning py-2 mb-3">
-  <i class="fas fa-exclamation-triangle"></i> LLM is still connecting (checking the corporate key share) — Chat and
-  Teach This Scenario will be unavailable until it's reachable, or you create
-  <code>configs/keys_local.py</code> (same schema as your key.py). This banner clears itself once ready — no need to
-  reload.
-</div>
-{% endif %}
 <div class="row g-2">
   <!-- Row 1: compact Log File bar, full width -->
   <div class="col-12">
@@ -23,6 +15,23 @@
           <button type="button" class="btn-browse" onclick="pickLog()" title="Browse for file">📁</button>
         </div>
         <span id="logStatus" class="path-status path-status-inline"></span>
+        {% if not llm_ready %}
+        <!-- A temporary connection state, not a page-level warning. Keep it
+             compact beside the Log controls; the explanation is available on
+             demand and the whole control disappears when /llm_status is ready. -->
+        <details id="llmBanner" class="llm-status">
+          <summary aria-label="AI features are connecting">
+            <span class="llm-status-dot" aria-hidden="true"></span>
+            <span>AI connecting</span>
+            <i class="fas fa-chevron-down llm-status-chevron" aria-hidden="true"></i>
+          </summary>
+          <div class="llm-status-detail">
+            <strong>AI features are starting</strong>
+            <span>Chat and Teach are temporarily unavailable. Log viewing and filtering still work normally.</span>
+            <small>This status disappears automatically when the connection is ready.</small>
+          </div>
+        </details>
+        {% endif %}
       </div>
     </div>
   </div>
@@ -81,6 +90,13 @@
           <span id="dateSynthWarn" class="date-synth-warn" style="display:none;" title="This log's own lines carry a time-of-day but no date (BT's dateless HCI export / WiFi's DDD export) — the date shown was estimated from the loaded System Event Log's earliest event, or the file's own save time if no event log is loaded. Only the DATE is a guess; the time-of-day is exact.">⚠ date estimated</span>
         </span>
         <span class="d-flex align-items-center gap-2">
+          <span class="annotation-legend" aria-label="Log observation labels"
+                title="E = supporting evidence. X = a counterexample or exception that prevents a skill from over-generalizing.">
+            <span class="annotation-key is-evidence">E</span>
+            <span>Evidence</span>
+            <span class="annotation-key is-counterexample">X</span>
+            <span>Counterexample</span>
+          </span>
           <!-- Issue-time focus (±5 min) — narrows the working log to a slice
                around a typed issue time so filter checkbox toggles stay fast
                on multi-million-line captures (see /log_viewer/set_focus). -->
@@ -111,13 +127,20 @@
                 </button>
                 <input type="hidden" id="focusTimeInput">
                 <div id="timeWheelPanel" class="ctp-panel" style="display:none;">
+                  <div class="ctp-panel-head">
+                    <span>Select time</span>
+                    <small>24-hour format</small>
+                  </div>
+                  <div class="ctp-col-labels" aria-hidden="true">
+                    <span>HH</span><span>MM</span><span>SS</span>
+                  </div>
                   <div class="ctp-cols">
-                    <div class="ctp-col" id="ctpHour"></div>
-                    <div class="ctp-col" id="ctpMinute"></div>
-                    <div class="ctp-col" id="ctpSecond"></div>
+                    <div class="ctp-col" id="ctpHour" aria-label="Hour"></div>
+                    <div class="ctp-col" id="ctpMinute" aria-label="Minute"></div>
+                    <div class="ctp-col" id="ctpSecond" aria-label="Second"></div>
                   </div>
                   <button type="button" class="ctp-seed-btn" onclick="seedTimeWheelFromLog()">
-                    <i class="fas fa-location-crosshairs"></i> Use visible line's time
+                    <i class="fas fa-location-crosshairs"></i> Use visible log time
                   </button>
                 </div>
               </div>
@@ -294,6 +317,17 @@
           <input class="form-check-input" type="checkbox" role="switch" id="priorToggle" onchange="onPriorToggle()">
           <label class="form-check-label small text-muted" for="priorToggle" id="priorToggleLabel">Load skills</label>
         </span>
+        <select id="interviewMode" class="form-select form-select-sm interview-mode-select"
+                onchange="onInterviewModeChange()"
+                title="Quiet: no automatic questions. Smart: ask only on meaningful divergence. Grill: resolve skill-affecting decision branches one at a time.">
+          <option value="quiet">Quiet</option>
+          <option value="smart">Smart</option>
+          <option value="grill">Grill</option>
+        </select>
+        <button type="button" id="decisionBadge" class="btn btn-sm decision-ledger-btn"
+                onclick="openDecisionLedger()" title="Review specification decisions">
+          <i class="fas fa-code-branch"></i> <span id="decisionBadgeText">0 decisions</span>
+        </button>
         <!-- The one deliberate start of the teaching loop. The LLM's first
              read has to happen against a filter set that ACTUALLY SURVIVES
              something — a baseline formed on a filter matching zero lines
@@ -326,7 +360,8 @@
           <div class="input-group input-group-sm">
             <input id="chatInput" class="form-control" data-busy-lock placeholder="Answer / ask…" onkeypress="if(event.key==='Enter') sendMsg();">
             <button id="stepTagBtn" type="button" class="btn btn-outline-secondary step-tag-compact-btn" onclick="toggleStepTagDropdown()" title="Tag this message with a step (#N) or mark as general knowledge (All)">All</button>
-            <button id="chatSendBtn" class="btn btn-primary" data-busy-lock onclick="sendMsg()"><i class="fas fa-paper-plane"></i></button>
+            <button id="chatSendBtn" class="btn btn-primary" data-busy-lock onclick="sendMsg()"
+                    aria-label="Send chat message"><i class="fas fa-paper-plane"></i></button>
           </div>
         </div>
       </div>
@@ -351,6 +386,54 @@
     </div>
   </div>
 </div>
+
+<div class="skill-modal-overlay" id="decisionLedgerModal">
+  <div class="skill-modal-card" style="width:min(680px,100%);">
+    <div class="skill-modal-header">
+      <div class="skill-modal-heading">
+        <h5 class="mb-0"><i class="fas fa-code-branch"></i> Decision ledger</h5>
+        <div class="skill-modal-subtitle">Session-only specification control — not written into Avatar YAML</div>
+      </div>
+      <button type="button" class="skill-modal-close" onclick="closeDecisionLedger()">&times;</button>
+    </div>
+    <div class="skill-modal-body" id="decisionLedgerBody"></div>
+    <div class="skill-modal-footer">
+      <button type="button" class="btn btn-outline-secondary" onclick="closeDecisionLedger()">Close</button>
+    </div>
+  </div>
+</div>
+
+<!-- Chat can be used before a baseline only through an explicit one-time
+     override. Nothing is appended or sent until the engineer chooses
+     "Allow once", so Cancel leaves both the draft text and conversation
+     untouched. Export has no override and remains hard-locked. -->
+<div id="baselineGuardModal" class="baseline-guard-overlay" style="display:none;"
+     role="dialog" aria-modal="true" aria-labelledby="baselineGuardTitle"
+     aria-describedby="baselineGuardDescription">
+  <div class="baseline-guard-dialog">
+    <div class="baseline-guard-icon" aria-hidden="true">
+      <i class="fas fa-flag-checkered"></i>
+    </div>
+    <div class="baseline-guard-copy">
+      <span class="baseline-guard-kicker">Comparison baseline missing</span>
+      <h3 id="baselineGuardTitle">Send without a baseline?</h3>
+      <p id="baselineGuardDescription">
+        There is no starting analysis to compare this message against. Set the baseline first so the current
+        knowledge, filter steps, labeled log observations, and surviving log lines are analyzed together.
+      </p>
+      <div class="baseline-guard-note">
+        <i class="fas fa-lock" aria-hidden="true"></i>
+        Export stays locked until a baseline is set.
+      </div>
+    </div>
+    <div class="baseline-guard-actions">
+      <button type="button" id="baselineGuardCancel" class="btn btn-sm btn-outline-secondary"
+              onclick="closeBaselineGuard()">Go back</button>
+      <button type="button" id="baselineGuardAllow" class="btn btn-sm btn-primary"
+              onclick="allowChatWithoutBaselineOnce()">Allow once</button>
+    </div>
+  </div>
+</div>
 {% endblock %}
 
 {% block scripts %}
@@ -372,6 +455,7 @@
       learning_converge: "{{ url_for('learning.converge') }}",
       learning_save: "{{ url_for('learning.save') }}",
       learning_set_mode: "{{ url_for('learning.set_mode') }}",
+      learning_defer_decision: "{{ url_for('learning.defer_decision') }}",
       log_viewer_add_filter: "{{ url_for('log_viewer.add_filter') }}",
       log_viewer_annotate_line: "{{ url_for('log_viewer.annotate_line') }}",
       log_viewer_answer_red_flag: "{{ url_for('log_viewer.answer_red_flag') }}",
@@ -403,6 +487,8 @@
       hasBaseline: {{ has_baseline|tojson }},
       logPath: {{ (state.log_path or '')|tojson }},
       priorKnowledge: {{ state.prior_knowledge|tojson }},
+      interviewMode: {{ state.interview_mode|tojson }},
+      decisionLedger: {{ (decision_ledger or {})|tojson }},
       sessionUsage: {{ session_usage|tojson }},
       lastReadiness: {{ (state.last_readiness or {})|tojson }},
       lastCoverage: {{ (state.last_coverage or {})|tojson }},

@@ -172,6 +172,32 @@ precisely (not overclaimed) in [Paper grounding](#paper-grounding) below.
 - Two independent modes, chosen per export: **FRESH** (teach from scratch,
   nothing else consulted) or **PRIOR** (same-domain existing skills shown so
   the interview only asks about what's genuinely new).
+- **Update baseline** — the same button re-reads the filter after the baseline
+  is set (`force=true`), instead of only ever being usable once. Each re-read
+  keeps the prior version in a rolling history (last 10) and reports a
+  **delta from the previous read** — what newly counts as load-bearing or
+  noise — so re-baselining after a big filter change is legible rather than a
+  silent swap of one opinion for another.
+- **Interview mode** — a Quiet / Smart / Grill selector next to the chat
+  toggle. *Smart* is the behavior described above (a question only on
+  measurable divergence). *Quiet* never interrupts automatically — useful
+  when you'd rather filter uninterrupted and answer everything at the end.
+  *Grill* marks every open question **blocking** and walks them one at a
+  time, for a final pass before Export where nothing gets skipped by
+  accident.
+- **Decision ledger** — every question the interview asks (baseline
+  contradiction, per-step follow-up, clarification) is logged as one entry —
+  open / resolved / deferred — in a session-only ledger, reachable from a
+  badge next to the mode selector ("N decisions"). It is *never* written into
+  the exported skill YAML; at Export time it is folded into a **review-only
+  spec** (scope, triggers, required evidence, exclusions, resolved vs.
+  still-open decisions) shown alongside the draft, so what you decided and
+  what you skipped is visible before you save, without changing Avatar's
+  established file shape.
+- Sending a chat message before a baseline exists no longer requires one —
+  it shows a **"Send without a baseline?"** confirmation instead of a hard
+  block, since chatting freely is low-stakes compared to teaching a step or
+  exporting (which stay locked, see above). Confirm once and it proceeds.
 
 ### 3. Export → Self-Evolving Skill Lifecycle (AutoSkill-integrated)
 Exporting doesn't just dump a new file — every synthesized draft goes through
@@ -410,6 +436,10 @@ services/
                                  no model, no network)
   skill_memory.py              Per-skill measured usage + coverage gaps,
                                  sidecar json, never in the skills YAML
+  decision_ledger.py            Session-only ledger of interview questions +
+                                 answers (Quiet/Smart/Grill), folded into a
+                                 review-only spec at Export — never written
+                                 into the skill YAML
   learning_service.py          Interview prompts (Ambiguity Gate), readiness
                                  assessment, skill synthesis, judge (Agent B),
                                  stat-validated merge (Agent D), teaching-
@@ -501,13 +531,24 @@ as a future direction, so this list doesn't overclaim:
 python -m unittest discover -s tests -v
 ```
 
-71 tests, no LLM or network access required. They cover:
+99 tests, no LLM or network access required. They cover:
 
 - **Baseline + divergence** — contradictions vs omissions, materiality
   checked before opinion, pre-baseline edits excluded, an omission alone
-  never producing a question, a contradiction asked once then suppressed, and
+  never producing a question, a contradiction asked once then suppressed,
   effect attribution withheld across a focus-window change (a focused run and
-  an unfocused one count different populations).
+  an unfocused one count different populations), and an Update Baseline
+  delta correctly reporting what changed between two reads.
+- **Decision ledger** — it stays a session-only sidecar (never touches the
+  skill YAML), de-duplicates a repeated question by `source_key`, and
+  resolving/deferring updates status without losing the original question.
+- **IDF-weighted retrieval** — a rare shared token outweighs pool-wide
+  boilerplate, an unseen token is treated as maximally distinctive, and
+  scores stay stable regardless of which other candidate was excluded from
+  the same search.
+- **Skill-level memory** — usage counts and last-matched-lines survive
+  round-trips, coverage gaps only surface once a keyword was added after
+  nearly every load (not a one-off), and deleting a skill forgets its history.
 - **De-duplication** — substring containment beating similarity ratio in both
   directions (`covered` vs `widens`), near-matches routed to review rather
   than auto-dropped, and rules itemised before comparison so a reworded

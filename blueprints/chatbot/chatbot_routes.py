@@ -1,7 +1,8 @@
 from flask import Blueprint, request, jsonify
 
 from configs.global_configs import app_config
-from services import session_store
+from services import session_store, decision_ledger
+from utils.json_utils import parse_json_loose
 
 # No standalone page: the chat panel lives inside the combined Log Viewer
 # workbench (templates/log_viewer.html) — this blueprint only exposes the
@@ -24,6 +25,35 @@ BASE_SYS_PROMPT = (
     "scenario. Ground your questions in the operation-pattern stats (hit counts "
     "and which keywords co-fire), not vague generalities. Keep replies concise."
 )
+
+PROACTIVE_RESPONSE_SCHEMA = """
+The current comparison baseline is included below. Treat the engineer's newest
+message as potential teaching and compare it against that baseline. When
+prior-knowledge mode is ON, also compare it against the explicitly loaded
+skill knowledge.
+
+Return ONLY one JSON object:
+{
+  "reply": "your concise normal response",
+  "clarification": {
+    "detected": true,
+    "basis": "baseline | loaded_skill | both",
+    "summary": "what is new, contradictory, or outside prior knowledge",
+    "question": "one highest-information follow-up question",
+    "type": "choice | open",
+    "options": ["2-4 short mutually exclusive choices when type is choice"],
+    "recommended_answer": "your evidence-grounded recommendation, or empty",
+    "recommendation_reason": "one short evidence-grounded reason, or empty"
+  }
+}
+
+Set clarification.detected=false and the remaining clarification fields to
+empty values when the newest message only agrees with known knowledge or
+contains no teachable claim. Ask at most ONE question. Use "choice" only when
+there are genuinely finite alternatives; use "open" for reasons, diagnostic
+rules, thresholds, or missing context. A difference is not automatically an
+error: it is candidate expert knowledge whose boundary should be clarified.
+"""
 
 
 def _stats_summary(state) -> str:
@@ -71,12 +101,60 @@ def _other_skill_descriptions(active_key: str, domain: str = "wifi") -> str:
 def _build_system_prompt(state) -> str:
     domain = (state.log_domain or "wifi").lower()
     parts = [BASE_SYS_PROMPT]
-    others = _other_skill_descriptions(state.active_skill_key, domain)
-    if others:
-        parts.append("=== Existing skills (keep any new skill's scope distinct from these) ===\n" + others)
     skill = _skill_pool(domain).get(state.active_skill_key) if state.active_skill_key else None
-    if skill and skill.expert_rules:
-        parts.append(f"=== Expert Rules for the loaded skill '{skill.name}' ===\n{skill.expert_rules}")
+    if state.has_current_baseline():
+        baseline = state.baseline or {}
+        key_rows = "\n".join(
+            f"  - {row.get('text')}: {row.get('why') or '(no reason)'}"
+            for row in (baseline.get("expected_key_keywords") or [])
+        )
+        noise_rows = "\n".join(
+            f"  - {row.get('text')}: {row.get('why') or '(no reason)'}"
+            for row in (baseline.get("expected_noise_keywords") or [])
+        )
+        unknowns = "\n".join(f"  - {u}" for u in (baseline.get("open_unknowns") or []))
+        parts.append(
+            "=== COMMITTED COMPARISON BASELINE ===\n"
+            f"Scenario: {baseline.get('expected_scenario') or '(not identified)'}\n"
+            f"Interpretation: {baseline.get('analysis') or '(none)'}\n"
+            f"Expected key signals:\n{key_rows or '  - (none)'}\n"
+            f"Expected noise:\n{noise_rows or '  - (none)'}\n"
+            f"Open unknowns:\n{unknowns or '  - (none)'}"
+        )
+        if state.interview_mode != "quiet":
+            parts.append(PROACTIVE_RESPONSE_SCHEMA)
+        if state.interview_mode == "grill":
+            parts.append(
+                "INTERVIEW MODE — GRILL: continue down the single highest-impact "
+                "unresolved branch that would change scope, triggers, keywords, "
+                "exclusions, or an expert rule. A material omission may warrant "
+                "clarification even when it is not a contradiction. Ask only ONE."
+            )
+        elif state.interview_mode == "smart":
+            parts.append(
+                "INTERVIEW MODE — SMART: interrupt only for meaningful new or "
+                "divergent knowledge; ordinary agreement produces no question."
+            )
+        else:
+            parts.append(
+                "INTERVIEW MODE — QUIET: answer and analyze normally, but do not "
+                "ask a follow-up question. Missing decisions stay passive."
+            )
+
+    # The toggle is authoritative: OFF means the conversation is compared
+    # only with the model's own baseline; ON adds loaded/existing skills as
+    # prior professional knowledge.
+    if state.prior_knowledge:
+        others = _other_skill_descriptions(state.active_skill_key, domain)
+        if others:
+            parts.append("=== Existing skills (keep any new skill's scope distinct from these) ===\n" + others)
+        if skill:
+            parts.append(
+                f"=== Explicitly loaded prior skill: {skill.name} ===\n"
+                f"Description: {skill.description}\n"
+                f"Triggers: {'; '.join(skill.triggers or []) or '(none)'}\n"
+                f"Expert rules:\n{skill.expert_rules or '(none)'}"
+            )
     stats_summary = _stats_summary(state)
     if stats_summary:
         parts.append("=== Operation pattern (tool-computed, not the raw log) ===\n" + stats_summary)
@@ -99,6 +177,39 @@ def _build_system_prompt(state) -> str:
     return "\n\n".join(parts)
 
 
+def _parse_chat_response(raw, expect_structured: bool):
+    """Tolerant structured-chat parser.
+
+    A provider returning ordinary prose must still work; it simply produces
+    no proactive clarification card for that turn.
+    """
+    text = str(raw or "").strip()
+    if not expect_structured:
+        return text, None
+    parsed = parse_json_loose(text)
+    if not parsed:
+        return text, None
+    reply = str(parsed.get("reply") or "").strip() or text
+    item = parsed.get("clarification") or {}
+    question = str(item.get("question") or "").strip()
+    if not item.get("detected") or not question:
+        return reply, None
+    options = [str(o).strip() for o in (item.get("options") or []) if str(o).strip()][:4]
+    qtype = "choice" if item.get("type") == "choice" and len(options) >= 2 else "open"
+    basis = str(item.get("basis") or "baseline").strip().lower()
+    if basis not in {"baseline", "loaded_skill", "both"}:
+        basis = "baseline"
+    return reply, {
+        "question": question,
+        "type": qtype,
+        "options": options if qtype == "choice" else [],
+        "basis": basis,
+        "summary": str(item.get("summary") or "").strip(),
+        "recommended_answer": str(item.get("recommended_answer") or "").strip(),
+        "recommendation_reason": str(item.get("recommendation_reason") or "").strip(),
+    }
+
+
 @chatbot_bp.route("/send", methods=["POST"])
 def send():
     data = request.get_json(silent=True) or {}
@@ -113,6 +224,14 @@ def send():
     if not isinstance(step_tag, int) and step_tag != "all":
         step_tag = "all"
 
+    state = session_store.get_state()
+    if not state.has_current_baseline() and data.get("allow_without_baseline") is not True:
+        return jsonify({
+            "success": False,
+            "baseline_required": True,
+            "message": "Set the comparison baseline first, or explicitly allow this one message.",
+        }), 409
+
     llm_helper = app_config.llm_helper
     if not llm_helper or not llm_helper.is_ready:
         return jsonify({
@@ -120,8 +239,14 @@ def send():
             "message": "LLM is not configured yet. See README.md → 'Set up LLM'.",
         }), 503
 
-    state = session_store.get_state()
     state.chat_history.append({"role": "user", "content": message, "step": step_tag})
+    # Resolve before the model call: the engineer's answer remains captured
+    # even if the provider is temporarily unavailable.
+    decision_ledger.resolve(
+        state,
+        data.get("decision_id"),
+        data.get("decision_answer") or message,
+    )
     try:
         # Strip the "step" tag before handing history to the API — it's UI
         # metadata for this app's own message-tagging (see chat_history.step
@@ -129,9 +254,15 @@ def send():
         # it through as an extra key on each message dict risks a 400 from a
         # strict-schema provider.
         api_messages = [{"role": m["role"], "content": m["content"]} for m in state.chat_history[-20:]]
-        reply = llm_helper.chat(
+        raw_reply = llm_helper.chat(
             messages=api_messages,
             system_content=_build_system_prompt(state),
+        )
+        reply, clarification = _parse_chat_response(
+            raw_reply,
+            expect_structured=(
+                state.has_current_baseline() and state.interview_mode != "quiet"
+            ),
         )
     except Exception as e:
         return jsonify({"success": False, "message": f"LLM call failed: {e}"}), 500
@@ -140,7 +271,24 @@ def send():
     # if the engineer selected step #5 before asking, the LLM's answer is
     # tagged #5 too, not "all".
     state.chat_history.append({"role": "assistant", "content": reply, "step": step_tag})
-    return jsonify({"success": True, "reply": reply, "step_tag": step_tag, "usage": {
+    if clarification:
+        item = decision_ledger.record_question(
+            state,
+            source="chat",
+            question=clarification["question"],
+            qtype=clarification["type"],
+            options=clarification["options"],
+            basis=clarification["basis"],
+            summary=clarification["summary"],
+            recommended_answer=clarification["recommended_answer"],
+            recommendation_reason=clarification["recommendation_reason"],
+            step=step_tag,
+        )
+        if item:
+            clarification["decision_id"] = item["id"]
+    return jsonify({"success": True, "reply": reply, "clarification": clarification,
+                    "decision_ledger": decision_ledger.payload(state),
+                    "step_tag": step_tag, "usage": {
         "last": llm_helper.last_usage, "session": llm_helper.session_usage,
     }})
 

@@ -2,7 +2,7 @@ from flask import Blueprint, request, jsonify
 
 from configs import set_up_app
 from configs.global_configs import app_config
-from services import session_store, learning_service, skill_service
+from services import session_store, learning_service, skill_service, decision_ledger
 from utils import operation_journal, divergence, skill_dedup
 
 # No standalone page: the "Teach This Scenario" flow lives inline inside the
@@ -69,6 +69,57 @@ def _assessment_payload(state) -> dict:
         "coverage": state.last_coverage,
         "gaps": state.last_gaps,
         "validation": state.last_validation,
+    }
+
+
+def _record_questions(state, questions, *, source: str, step="all", source_prefix=""):
+    """Attach stable decision IDs without changing the question-card shape."""
+    out = []
+    for index, question in enumerate(questions or []):
+        item = decision_ledger.record_question(
+            state,
+            source=source,
+            question=question.get("question"),
+            qtype=question.get("type"),
+            options=question.get("options"),
+            recommended_answer=question.get("recommended_answer"),
+            recommendation_reason=question.get("recommendation_reason"),
+            step=step,
+            source_key=f"{source_prefix}:{index}" if source_prefix else "",
+        )
+        enriched = dict(question)
+        if item:
+            enriched["decision_id"] = item["id"]
+        out.append(enriched)
+    return out
+
+
+def _baseline_delta(before: dict, after: dict) -> dict:
+    """Small deterministic change-set between two committed baseline reads."""
+    def texts(value):
+        return {
+            str(item.get("text") if isinstance(item, dict) else item).strip()
+            for item in (value or [])
+            if str(item.get("text") if isinstance(item, dict) else item).strip()
+        }
+
+    before_keys = texts(before.get("expected_key_keywords"))
+    after_keys = texts(after.get("expected_key_keywords"))
+    before_noise = texts(before.get("expected_noise_keywords"))
+    after_noise = texts(after.get("expected_noise_keywords"))
+    before_unknowns = {str(value).strip() for value in before.get("open_unknowns") or [] if str(value).strip()}
+    after_unknowns = {str(value).strip() for value in after.get("open_unknowns") or [] if str(value).strip()}
+    return {
+        "scenario_changed": (
+            str(before.get("expected_scenario") or "").strip()
+            != str(after.get("expected_scenario") or "").strip()
+        ),
+        "key_added": sorted(after_keys - before_keys),
+        "key_removed": sorted(before_keys - after_keys),
+        "noise_added": sorted(after_noise - before_noise),
+        "noise_removed": sorted(before_noise - after_noise),
+        "unknowns_resolved": sorted(before_unknowns - after_unknowns),
+        "unknowns_added": sorted(after_unknowns - before_unknowns),
     }
 
 
@@ -240,6 +291,12 @@ def log_round():
     # zero (see analyze_round's docstring).
     if result.get("assessment") is not None:
         _store_assessment(state, result["assessment"])
+    result["questions"] = _record_questions(
+        state,
+        result.get("questions"),
+        source="round",
+        source_prefix=f"round:{state.round_count}",
+    )
 
     # Marks these operations as "accounted for" so the frontend's nudge card
     # (see checkRoundNudge in log_viewer.html) stops showing until the
@@ -263,6 +320,7 @@ def log_round():
         "ambiguity": result.get("ambiguity", {}),
         "assessment": _assessment_payload(state),
         "prior_knowledge": state.prior_knowledge,
+        "decision_ledger": decision_ledger.payload(state),
         "usage": {"last": llm_helper.last_usage, "session": llm_helper.session_usage},
     })
 
@@ -270,13 +328,13 @@ def log_round():
 def _filter_signature(state) -> str:
     """Identity of the filter SET a baseline was formed on.
 
-    Deliberately built from the filter texts + source file only, never from
-    their enabled/disabled state: toggling a checkbox is precisely the
+    Deliberately built from the source log + loaded .tat/skill identity, never
+    from individual filter contents or enabled state: filter edits are the
     engineer action the baseline exists to be compared against, so folding
     enabled-state in here would mark the baseline stale on every toggle and
     re-baseline against the engineer's own edit — erasing the comparison and
-    costing an LLM call per click. Loading a different .tat/skill DOES change
-    the text set, which is the case that should invalidate it.
+    costing an LLM call per click. Loading a different log/.tat/skill changes
+    the evidence source, which is the case that should invalidate it.
 
     Keys off filter_skill_key, NOT active_skill_key: this is the identity of
     what is on screen. Choosing a different export baseline from the Skill
@@ -284,8 +342,74 @@ def _filter_signature(state) -> str:
     folding that in here would mark the baseline stale and burn an LLM call
     re-reading a filter set that did not change.
     """
-    texts = sorted(f"{f['text']}\x00{int(bool(f['excluding']))}" for f in state.filters)
-    return f"{state.tat_path}\x01{state.filter_skill_key}\x01" + "\x02".join(texts)
+    return state.baseline_signature()
+
+
+def _format_baseline_message(result: dict) -> str:
+    """Turn the structured first read into a scan-friendly chat card.
+
+    Keeping the same markdown in chat_history means the live result and a
+    later page reload render identically through renderMarkdownLite().
+    """
+    parts = [
+        "# Baseline analysis",
+        "Current chat knowledge, filter steps, labeled E/X observations, and sampled surviving log lines were analyzed together.",
+    ]
+    version = result.get("version")
+    if version:
+        parts.extend(["## Baseline version", f"v{version}"])
+    basis = str(result.get("comparison_basis") or "").strip()
+    if basis:
+        parts.extend(["## Comparison basis", basis])
+    scenario = str(result.get("expected_scenario") or "").strip()
+    if scenario:
+        parts.extend(["## Expected scenario", scenario])
+    analysis = str(result.get("analysis") or "").strip()
+    if analysis:
+        parts.extend(["## Key interpretation", analysis])
+
+    key_rows = result.get("expected_key_keywords") or []
+    if key_rows:
+        parts.append("## Key signals")
+        parts.extend(
+            f"- **{row.get('text', '')}** — {row.get('why') or 'Likely load-bearing'}"
+            for row in key_rows
+        )
+
+    noise_rows = result.get("expected_noise_keywords") or []
+    if noise_rows:
+        parts.append("## Possible noise")
+        parts.extend(
+            f"- **{row.get('text', '')}** — {row.get('why') or 'Likely low-signal'}"
+            for row in noise_rows
+        )
+
+    issue_hint = str(result.get("expected_issue_time_hint") or "").strip()
+    if issue_hint:
+        parts.extend(["## Issue-time clue", issue_hint])
+
+    unknowns = result.get("open_unknowns") or []
+    if unknowns:
+        parts.append("## Open questions")
+        parts.extend(f"- {item}" for item in unknowns)
+    delta = result.get("delta_from_previous") or {}
+    changes = []
+    for key, label in (
+        ("key_added", "Key signal added"),
+        ("key_removed", "Key signal removed"),
+        ("noise_added", "Noise added"),
+        ("noise_removed", "Noise removed"),
+        ("unknowns_resolved", "Unknown resolved"),
+        ("unknowns_added", "Unknown added"),
+    ):
+        if delta.get(key):
+            changes.append(f"- **{label}:** {', '.join(delta[key])}")
+    if delta.get("scenario_changed"):
+        changes.insert(0, "- **Expected scenario changed**")
+    if changes:
+        parts.append("## Changes from previous baseline")
+        parts.extend(changes)
+    return "\n\n".join(parts)
 
 
 @learning_bp.route("/baseline", methods=["POST"])
@@ -323,17 +447,47 @@ def baseline():
             "baseline": state.baseline,
             "assessment": _assessment_payload(state),
         })
+    previous_baseline = (
+        dict(state.baseline)
+        if state.baseline and state.baseline_filter_sig == signature
+        else {}
+    )
 
-    # The baseline reads the filter set as loaded — it must NOT be shown the
-    # existing-skill library, whose descriptions would let it borrow a
-    # ready-made scenario read instead of committing to its own from the
-    # evidence. A borrowed read is not a falsifiable prediction.
-    context = _context_from_state(state, exclude_skill_key="", include_existing=False)
+    # The header toggle is the explicit boundary for prerequisite knowledge.
+    # OFF: commit to the LLM's own evidence-based first read. ON: include
+    # loaded/existing same-domain skills so the baseline records what was
+    # already known before the engineer teaches anything new.
+    context = _context_from_state(
+        state,
+        exclude_skill_key="",
+        include_existing=state.prior_knowledge,
+    )
     try:
-        result = learning_service.analyze_baseline(llm_helper, context, use_prior_knowledge=False)
+        result = learning_service.analyze_baseline(
+            llm_helper,
+            context,
+            use_prior_knowledge=state.prior_knowledge,
+        )
     except Exception as e:
         return jsonify({"success": False, "message": f"LLM call failed: {e}"}), 500
 
+    result["comparison_basis"] = (
+        "LLM + loaded/existing skills" if state.prior_knowledge else "LLM first read only"
+    )
+    if previous_baseline:
+        state.baseline_history.append({
+            "version": state.baseline_version or 1,
+            "signature": signature,
+            "baseline": previous_baseline,
+        })
+        state.baseline_history = state.baseline_history[-10:]
+        result["delta_from_previous"] = _baseline_delta(previous_baseline, result)
+        state.baseline_version = max(1, state.baseline_version) + 1
+    else:
+        # A different evidence source starts its own comparison history.
+        state.baseline_history = []
+        state.baseline_version = 1
+    result["version"] = state.baseline_version
     state.baseline = {k: v for k, v in result.items() if k != "assessment"}
     state.baseline_filter_sig = signature
     # Everything logged so far BUILT the filter set this read just described,
@@ -344,15 +498,17 @@ def baseline():
     if result.get("assessment") is not None:
         _store_assessment(state, result["assessment"])
 
+    baseline_message = _format_baseline_message(result)
     state.chat_history.append({
         "role": "assistant",
-        "content": f"**First read of this filter:** {result.get('analysis', '')}",
+        "content": baseline_message,
         "step": "all",
     })
 
     return jsonify({
         "success": True, "cached": False,
         "baseline": state.baseline,
+        "message": baseline_message,
         "assessment": _assessment_payload(state),
         "usage": {"last": llm_helper.last_usage, "session": llm_helper.session_usage},
     })
@@ -419,6 +575,22 @@ def clarify():
         # asked, so a transient parse failure doesn't burn it permanently.
         return jsonify({"success": True, "question": None})
 
+    decision = decision_ledger.record_question(
+        state,
+        source=target["kind"],
+        question=result["question"]["question"],
+        qtype=result["question"].get("type"),
+        options=result["question"].get("options"),
+        recommended_answer=result["question"].get("recommended_answer"),
+        recommendation_reason=result["question"].get("recommendation_reason"),
+        step=target.get("seq", "all"),
+        source_key=(
+            f"contradiction:{target.get('seq')}"
+            if target["kind"] == "contradiction"
+            else f"focus:{state.focus_center_iso}:{state.focus_window_min}"
+        ),
+    )
+
     seq = target.get("seq")
     if target["kind"] == "focus":
         state.focus_clarified = True
@@ -437,6 +609,8 @@ def clarify():
         "keyword": target.get("text", ""),
         "question": result["question"],
         "captures": result["captures"],
+        "decision_id": decision["id"] if decision else "",
+        "decision_ledger": decision_ledger.payload(state),
         "usage": {"last": llm_helper.last_usage, "session": llm_helper.session_usage},
     })
 
@@ -454,10 +628,11 @@ def answer_focus_clarify():
         return jsonify({"success": False, "message": "Empty answer"}), 400
     state = session_store.get_state()
     state.focus_reason = answer
+    decision_ledger.resolve(state, data.get("decision_id"), answer)
     if question:
         state.chat_history.append({"role": "assistant", "content": f"❓ {question}", "step": "all"})
     state.chat_history.append({"role": "user", "content": answer, "step": "all"})
-    return jsonify({"success": True})
+    return jsonify({"success": True, "decision_ledger": decision_ledger.payload(state)})
 
 
 @learning_bp.route("/set_mode", methods=["POST"])
@@ -467,8 +642,30 @@ def set_mode():
     Log Round. No LLM call — just stores the flag."""
     data = request.get_json(silent=True) or {}
     state = session_store.get_state()
-    state.prior_knowledge = bool(data.get("use_prior_knowledge"))
-    return jsonify({"success": True, "prior_knowledge": state.prior_knowledge})
+    if "use_prior_knowledge" in data:
+        state.prior_knowledge = bool(data.get("use_prior_knowledge"))
+    if "interview_mode" in data:
+        state.interview_mode = decision_ledger.normalize_mode(data.get("interview_mode"))
+        for item in state.decision_ledger:
+            if item.get("status") == "open":
+                item["blocking"] = state.interview_mode == "grill"
+    return jsonify({
+        "success": True,
+        "prior_knowledge": state.prior_knowledge,
+        "interview_mode": state.interview_mode,
+        "decision_ledger": decision_ledger.payload(state),
+    })
+
+
+@learning_bp.route("/decision/defer", methods=["POST"])
+def defer_decision():
+    """Record an explicit Skip so Grill mode never asks it again."""
+    data = request.get_json(silent=True) or {}
+    state = session_store.get_state()
+    item = decision_ledger.defer(state, data.get("decision_id"))
+    if not item:
+        return jsonify({"success": False, "message": "Unknown decision"}), 404
+    return jsonify({"success": True, "decision_ledger": decision_ledger.payload(state)})
 
 
 @learning_bp.route("/confirm_step", methods=["POST"])
@@ -546,6 +743,16 @@ def confirm_step():
     if follow_up:
         summary_parts.append(f"*(optional follow-up: {follow_up})*")
     state.chat_history.append({"role": "assistant", "content": "\n\n".join(summary_parts), "step": seq})
+    follow_up_decision = None
+    if follow_up:
+        follow_up_decision = decision_ledger.record_question(
+            state,
+            source="step_follow_up",
+            question=follow_up,
+            step=seq,
+            source_key=f"step-follow-up:{seq}:{follow_up}",
+            blocking=False,
+        )
 
     return jsonify({
         "success": True,
@@ -553,6 +760,8 @@ def confirm_step():
         "knowledge_core": knowledge_core,
         "expert_note": expert_note,
         "follow_up_question": follow_up,
+        "follow_up_decision_id": follow_up_decision["id"] if follow_up_decision else "",
+        "decision_ledger": decision_ledger.payload(state),
         "operations": operation_journal.payload(state),
         "usage": {"last": llm_helper.last_usage, "session": llm_helper.session_usage},
     })
@@ -597,11 +806,24 @@ def ask_step():
     if not question:
         return jsonify({"success": False, "message": "Couldn't generate a question — try again."}), 500
 
+    decision = decision_ledger.record_question(
+        state,
+        source="step",
+        question=question["question"],
+        qtype=question.get("type"),
+        options=question.get("options"),
+        recommended_answer=question.get("recommended_answer"),
+        recommendation_reason=question.get("recommendation_reason"),
+        step=seq,
+        source_key=f"step:{seq}:{question['question']}",
+    )
     state.chat_history.append({"role": "assistant", "content": f"❓ {question['question']}", "step": seq})
     return jsonify({
         "success": True,
         "seq": seq,
         "question": question,
+        "decision_id": decision["id"] if decision else "",
+        "decision_ledger": decision_ledger.payload(state),
         "usage": {"last": llm_helper.last_usage, "session": llm_helper.session_usage},
     })
 
@@ -625,12 +847,18 @@ def answer_step_question():
     if not answer:
         return jsonify({"success": False, "message": "Empty answer"}), 400
 
+    decision_ledger.resolve(state, data.get("decision_id"), answer)
     if not op["reason"]:
         operation_journal.annotate_reason(state, seq, answer)
     if question:
         state.chat_history.append({"role": "assistant", "content": f"❓ {question}", "step": seq})
     state.chat_history.append({"role": "user", "content": answer, "step": seq})
-    return jsonify({"success": True, "seq": seq, "operations": operation_journal.payload(state)})
+    return jsonify({
+        "success": True,
+        "seq": seq,
+        "operations": operation_journal.payload(state),
+        "decision_ledger": decision_ledger.payload(state),
+    })
 
 
 @learning_bp.route("/assess", methods=["POST"])
@@ -734,6 +962,12 @@ def converge():
         return jsonify({"success": False, "message": "LLM is not configured yet."}), 503
 
     state = session_store.get_state()
+    if not state.has_current_baseline():
+        return jsonify({
+            "success": False,
+            "baseline_required": True,
+            "message": "Set the comparison baseline before exporting a skill.",
+        }), 409
     if not state.filtered_preview and not state.chat_history:
         return jsonify({
             "success": False,
@@ -881,6 +1115,11 @@ def converge():
             rebuilt.append(ext)
         drafts = rebuilt
 
+    # Review-only control plane. These fields never enter skill_service.Skill
+    # and therefore never alter Avatar's YAML contract.
+    for draft in drafts:
+        draft["spec_review"] = decision_ledger.build_skill_spec(draft, state)
+
     state.skill_draft = drafts
     # Stamp the watermark AFTER a successful synthesis — the guard above
     # compares against this on the NEXT converge() call.
@@ -895,6 +1134,7 @@ def converge():
         "lineage_blocked": lineage_blocked,
         "mode": "prior" if use_prior else "fresh",
         "domain": domain,
+        "decision_ledger": decision_ledger.payload(state),
         "usage": {"last": llm_helper.last_usage, "session": llm_helper.session_usage},
     })
 

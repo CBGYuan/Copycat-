@@ -31,6 +31,8 @@ let activeSkillKey = LV.boot.activeSkillKey;
 let activeSkillName = LV.boot.baselineSkillName;
 let currentQuestions = [];
 let currentDraft = null;
+let decisionLedger = LV.boot.decisionLedger || {mode: 'smart', items: [], open: 0, resolved: 0, deferred: 0, blocking: 0};
+let interviewMode = LV.boot.interviewMode || 'smart';
 // Fixed UTC offset (minutes) of the machine that captured the current BT log
 // (see event_log_service.find_capture_utc_offset_minutes) — null means none
 // was found, so the event<->log click-sync applies no correction. Updated
@@ -76,6 +78,10 @@ function isBusy() { return _busy; }
 function setBusy(v) {
     _busy = v;
     document.querySelectorAll('[data-busy-lock]').forEach(elx => { elx.disabled = v; });
+    // Re-apply the Baseline gate after the generic busy lock is released.
+    // Otherwise setBusy(false) would enable Export even when no comparison
+    // baseline exists (most visible after an allowed one-off chat send).
+    if (document.getElementById('baselineBtn')) setBaselineGate();
 }
 
 // Which step (or "all" for general/session-wide knowledge) the NEXT typed
@@ -505,8 +511,8 @@ function renderLogRows(preview, emptyMessage) {
          const activeCls = (label) => (annotation && annotation.label === label) ? ' is-active' : '';
          const matchedArr = '[' + (p.matched || []).join(',') + ']';
          const annotationButtons = p.line_no == null ? '' : `<span class="log-annotation-tools">
-             <button type="button" class="${activeCls('evidence').trim()}" title="Evidence" onclick="annotateLogLine(event, ${p.line_no}, 'evidence', ${matchedArr})">E</button>
-             <button type="button" class="${activeCls('counterexample').trim()}" title="Counterexample" onclick="annotateLogLine(event, ${p.line_no}, 'counterexample', ${matchedArr})">X</button>
+             <button type="button" data-label="evidence" aria-label="Mark as supporting evidence" aria-pressed="${!!annotation && annotation.label === 'evidence'}" class="${activeCls('evidence').trim()}" title="Evidence — this line supports the scenario or rule" onclick="annotateLogLine(event, ${p.line_no}, 'evidence', ${matchedArr})">E</button>
+             <button type="button" data-label="counterexample" aria-label="Mark as counterexample" aria-pressed="${!!annotation && annotation.label === 'counterexample'}" class="${activeCls('counterexample').trim()}" title="Counterexample — this line is an exception or challenges the rule" onclick="annotateLogLine(event, ${p.line_no}, 'counterexample', ${matchedArr})">X</button>
          </span>`;
          return `<div class="tat-log-row${annotationClass}" data-line-no="${p.line_no == null ? '' : p.line_no}" data-raw-text="${escapeHtml(p.text)}"${ms != null ? ` data-ms="${ms}"` : ''}>` +
                `<span class="tat-log-lineno">${p.line_no != null ? p.line_no : ''}</span>` +
@@ -602,7 +608,9 @@ function annotateLogLine(event, lineNo, label, matchedFilters) {
         // Re-mark which single button (E/C/N/X) is the active one for this
         // line now — toggling off clears every button back to inactive.
         row.querySelectorAll('.log-annotation-tools button').forEach((btn) => {
-            btn.classList.toggle('is-active', !!annotation && btn.textContent.trim().toLowerCase() === annotation.label[0]);
+            const active = !!annotation && btn.dataset.label === annotation.label;
+            btn.classList.toggle('is-active', active);
+            btn.setAttribute('aria-pressed', String(active));
         });
         // A new/changed annotation can change which filter(s) show an
         // evidence/counterexample count — keep the Filter list and Steps
@@ -640,6 +648,7 @@ function pickLog() {
         .then(r => r.json())
         .then(d => {
             if (d.success) {
+                baselineDone = false;
                 document.getElementById('logPathInput').value = d.log_path;
                 showPathStatus('logStatus', '✔ Log loaded', 'ok');
                 if (d.domain) refreshSkillList(d.domain);
@@ -841,7 +850,13 @@ function seedTimeWheelFromLog() {
     scrollWheelToSelected(false);
 }
 document.addEventListener('keydown', function (e) {
-    if (e.key === 'Escape') toggleFocusPopover(false);
+    if (e.key !== 'Escape') return;
+    const guard = document.getElementById('baselineGuardModal');
+    if (guard && guard.style.display !== 'none') {
+        closeBaselineGuard();
+        return;
+    }
+    toggleFocusPopover(false);
 });
 
 function focusLogTime() {
@@ -1145,6 +1160,7 @@ function pickTat() {
         .then(r => r.json())
         .then(d => {
             if (d.success) {
+                baselineDone = false;
                 document.getElementById('tatPathInput').value = d.tat_path;
                 showPathStatus('tatStatus', '✔ Filter loaded', 'ok');
                 filterData = d.filters;
@@ -1208,6 +1224,7 @@ function loadSkill(key) {
     }).then(r => r.json()).then(d => {
         setBusy(false);
         if (d.success) {
+            baselineDone = false;
             document.getElementById('tatPathInput').value = d.tat_path;
             document.getElementById('tatPathInput').placeholder = d.tat_path ? '' : '(no .tat file — using built-in keywords)';
             showPathStatus('tatStatus', '✔ Skill loaded', 'ok');
@@ -1500,6 +1517,9 @@ function appendMsg(role, content, stepTag) {
     } else if (renderStepKnowledgeBubble(contentEl, content)) {
         bubble.classList.add('step-knowledge-msg');
     } else {
+        if (content.startsWith('# Baseline analysis')) {
+            bubble.classList.add('baseline-analysis-msg');
+        }
         contentEl.innerHTML = renderMarkdownLite(content);
     }
     bubble.appendChild(contentEl);
@@ -1597,28 +1617,136 @@ function toggleSpendPanel(evt) {
 // forceTag: overrides the step-context selector for this ONE send — used by
 // clarification follow-up answers (see showNextQuestionCard), which are always
 // about the whole round, not whatever step the selector happens to be on.
-function sendMsg(presetMsg, displayMsg, forceTag) {
+let pendingBaselineSend = null;
+let baselineGuardReturnFocus = null;
+
+function showBaselineGuard(presetMsg, displayMsg, forceTag, decisionId) {
+    pendingBaselineSend = {presetMsg, displayMsg, forceTag, decisionId};
+    baselineGuardReturnFocus = document.activeElement;
+    const modal = document.getElementById('baselineGuardModal');
+    modal.style.display = 'flex';
+    document.getElementById('baselineGuardCancel').focus();
+}
+
+function closeBaselineGuard(clearPending) {
+    const modal = document.getElementById('baselineGuardModal');
+    if (modal) modal.style.display = 'none';
+    if (clearPending !== false) pendingBaselineSend = null;
+    if (baselineGuardReturnFocus && baselineGuardReturnFocus.focus) baselineGuardReturnFocus.focus();
+    baselineGuardReturnFocus = null;
+}
+
+function allowChatWithoutBaselineOnce() {
+    const pending = pendingBaselineSend;
+    if (!pending) { closeBaselineGuard(); return; }
+    closeBaselineGuard(false);
+    pendingBaselineSend = null;
+    sendMsg(pending.presetMsg, pending.displayMsg, pending.forceTag, true, pending.decisionId);
+}
+
+function sendMsg(presetMsg, displayMsg, forceTag, allowWithoutBaseline, decisionId) {
     if (isBusy()) return;
     const input = document.getElementById('chatInput');
     const msg = presetMsg !== undefined ? presetMsg : input.value.trim();
     if (!msg) return;
+    if (!baselineDone && !allowWithoutBaseline) {
+        showBaselineGuard(presetMsg, displayMsg, forceTag, decisionId);
+        return;
+    }
     const tag = forceTag !== undefined ? forceTag : currentStepTag;
     appendMsg('user', displayMsg !== undefined ? displayMsg : msg, tag);
     if (presetMsg === undefined) input.value = '';
     setBusy(true);
     fetch(LV.url.chatbot_send, {
         method: 'POST', headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({message: msg, step_tag: tag})
+        body: JSON.stringify({
+            message: msg,
+            step_tag: tag,
+            allow_without_baseline: !!allowWithoutBaseline,
+            decision_id: decisionId || '',
+            decision_answer: decisionId ? (displayMsg !== undefined ? displayMsg : msg) : '',
+        })
     }).then(r => r.json()).then(d => {
         setBusy(false);
-        if (d.success) appendMsg('assistant', d.reply, d.step_tag !== undefined ? d.step_tag : tag);
-        else appendMsg('assistant', '⚠️ ' + d.message, tag);
+        if (d.success) {
+            appendMsg('assistant', d.reply, d.step_tag !== undefined ? d.step_tag : tag);
+            if (d.clarification) renderProactiveClarification(d.clarification, tag);
+        } else appendMsg('assistant', '⚠️ ' + d.message, tag);
         if (d.usage) updateTokenBadge(d.usage.session);
+        if (d.decision_ledger) updateDecisionLedger(d.decision_ledger);
         // Every answer re-scores readiness live (only once a filter has run —
         // the server skips assessing an empty session). This is what makes the
         // badge climb as the engineer teaches, instead of freezing between rounds.
         if (d.success) refreshAssessment();
     }).catch(e => { setBusy(false); appendMsg('assistant', '⚠️ Network error: ' + e, tag); });
+}
+
+// One high-information question when a chat message introduces knowledge
+// outside (or contrary to) the committed baseline / loaded prior skill.
+// Finite alternatives render as choices; diagnostic reasons and rules use a
+// direct-answer field.
+function renderProactiveClarification(q, stepTag) {
+    if (!q || !q.question) return;
+    const box = document.getElementById('chatBox');
+    const card = el('div', 'chat-question-card proactive-chat-card mb-2');
+    const basisLabels = {
+        baseline: 'New vs baseline',
+        loaded_skill: 'New vs loaded skill',
+        both: 'New vs baseline + loaded skill',
+    };
+    card.appendChild(el('div', 'chat-q-progress', basisLabels[q.basis] || basisLabels.baseline));
+    if (q.summary) card.appendChild(el('div', 'proactive-divergence-summary', q.summary));
+    card.appendChild(el('div', 'chat-q-text', q.question));
+    appendRecommendation(card, q);
+
+    const submit = (answer) => {
+        card.remove();
+        const contextualAnswer = `Clarification question: ${q.question}\nEngineer answer: ${answer}`;
+        sendMsg(contextualAnswer, answer, stepTag, false, q.decision_id);
+    };
+    const customBox = el('div', 'chat-q-custom');
+    if (q.type === 'choice' && q.options && q.options.length >= 2) {
+        customBox.style.display = 'none';
+        const optsBox = el('div', 'chat-q-opts');
+        q.options.forEach((opt) => {
+            const btn = el('button', 'chat-q-opt', opt);
+            btn.type = 'button';
+            btn.onclick = () => submit(opt);
+            optsBox.appendChild(btn);
+        });
+        const other = el('button', 'chat-q-opt chat-q-opt-other', 'Other…');
+        other.type = 'button';
+        other.onclick = () => {
+            optsBox.style.display = 'none';
+            customBox.style.display = 'flex';
+            customBox.querySelector('input').focus();
+        };
+        optsBox.appendChild(other);
+        card.appendChild(optsBox);
+    } else {
+        customBox.style.display = 'flex';
+    }
+
+    const input = document.createElement('input');
+    input.type = 'text';
+    input.className = 'form-control form-control-sm';
+    input.placeholder = 'Type the missing rule or reason…';
+    input.onkeypress = (e) => {
+        if (e.key === 'Enter' && input.value.trim()) submit(input.value.trim());
+    };
+    const send = el('button', 'btn btn-sm btn-primary');
+    send.type = 'button';
+    send.innerHTML = '<i class="fas fa-paper-plane"></i>';
+    send.onclick = () => { if (input.value.trim()) submit(input.value.trim()); };
+    const skip = el('button', 'btn btn-sm btn-outline-secondary', 'Skip');
+    skip.type = 'button';
+    skip.onclick = () => { deferDecision(q.decision_id); card.remove(); };
+    customBox.appendChild(input);
+    customBox.appendChild(send);
+    customBox.appendChild(skip);
+    card.appendChild(customBox);
+    box.appendChild(card);
+    box.scrollTop = box.scrollHeight;
 }
 
 // Live re-assessment after each chat answer: updates the readiness badge +
@@ -1646,6 +1774,8 @@ function resetChat() {
         // — mirror that here so the Steps panel doesn't go stale against
         // filter edits that no longer exist server-side.
         operationData = [];
+        decisionLedger = {mode: interviewMode, items: [], open: 0, resolved: 0, deferred: 0, blocking: 0};
+        updateDecisionLedger(decisionLedger);
         renderStepPanel();
     });
 }
@@ -1854,11 +1984,90 @@ function priorMode() {
 // auto-fired background assess (and a page reload) reflect the new mode even
 // before the next analysis.
 function onPriorToggle() {
+    // Switching prerequisite-knowledge mode changes what the baseline is
+    // allowed to know. Require one fresh read against that new comparison
+    // basis; the button returns to its one-time glow until pressed.
+    baselineDone = false;
+    setBaselineGate();
     fetch(LV.url.learning_set_mode, {
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
         body: JSON.stringify({use_prior_knowledge: priorMode()}),
     }).catch(() => {});
+}
+
+function onInterviewModeChange() {
+    const select = document.getElementById('interviewMode');
+    interviewMode = select ? select.value : 'smart';
+    fetch(LV.url.learning_set_mode, {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({interview_mode: interviewMode}),
+    })
+        .then(r => r.json())
+        .then(d => { if (d.decision_ledger) updateDecisionLedger(d.decision_ledger); })
+        .catch(() => {});
+}
+
+function updateDecisionLedger(data) {
+    if (!data) return;
+    decisionLedger = data;
+    interviewMode = data.mode || interviewMode;
+    const badge = document.getElementById('decisionBadgeText');
+    if (badge) {
+        const total = (data.items || []).length;
+        badge.textContent = `${data.resolved || 0}/${total} decisions`;
+    }
+    const button = document.getElementById('decisionBadge');
+    if (button) button.classList.toggle('has-open', !!data.open);
+}
+
+function openDecisionLedger() {
+    const body = document.getElementById('decisionLedgerBody');
+    const items = decisionLedger.items || [];
+    if (!items.length) {
+        body.innerHTML = '<div class="decision-empty"><i class="fas fa-code-branch"></i><b>No decisions yet</b><span>Questions that affect scope, rules, keywords, or exceptions will appear here.</span></div>';
+    } else {
+        body.innerHTML = items.map((item) => {
+            const status = item.status || 'open';
+            const answer = item.answer
+                ? `<div class="decision-answer"><b>Engineer:</b> ${escapeHtml(item.answer)}</div>` : '';
+            const rec = item.recommended_answer
+                ? `<div class="decision-recommendation"><b>Recommended:</b> ${escapeHtml(item.recommended_answer)}${item.recommendation_reason ? ` — ${escapeHtml(item.recommendation_reason)}` : ''}</div>` : '';
+            return `<div class="decision-row is-${escapeHtml(status)}">
+              <div class="decision-row-head"><span>${escapeHtml(item.id)}</span><b>${escapeHtml(item.source || 'chat')}</b><em>${escapeHtml(status)}</em></div>
+              <div class="decision-question">${escapeHtml(item.question)}</div>${rec}${answer}
+            </div>`;
+        }).join('');
+    }
+    document.getElementById('decisionLedgerModal').style.display = 'flex';
+}
+
+function closeDecisionLedger() {
+    document.getElementById('decisionLedgerModal').style.display = 'none';
+}
+
+function deferDecision(decisionId) {
+    if (!decisionId) return;
+    fetch(LV.url.learning_defer_decision, {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({decision_id: decisionId}),
+    })
+        .then(r => r.json())
+        .then(d => { if (d.decision_ledger) updateDecisionLedger(d.decision_ledger); })
+        .catch(() => {});
+}
+
+function appendRecommendation(card, q) {
+    if (!q || !q.recommended_answer) return;
+    const row = el('div', 'question-recommendation');
+    row.appendChild(el('span', 'question-recommendation-label', 'Recommended'));
+    row.appendChild(document.createTextNode(q.recommended_answer));
+    if (q.recommendation_reason) {
+        row.appendChild(el('small', '', q.recommendation_reason));
+    }
+    card.appendChild(row);
 }
 
 // ---- Baseline read (auto, once per loaded filter set) -------------------
@@ -1898,13 +2107,15 @@ function setBaselineGate() {
 
     btn.classList.toggle('is-ready', ready && !baselineDone);
     btn.classList.toggle('is-done', baselineDone);
-    btn.disabled = baselineDone || !ready || isBusy();
+    btn.disabled = !ready || isBusy();
 
     if (baselineDone) {
-        label.textContent = 'Baseline set';
+        label.textContent = 'Update baseline';
         btn.title = "The LLM's first read of this filter is recorded. Every later edit is "
                   + 'compared against it — that comparison is what turns your filtering into '
                   + 'taught knowledge.';
+        btn.title = 'Re-analyze the current chat knowledge, filter steps, labeled E/X observations, '
+                  + 'and surviving log lines. This remains available without the first-time glow.';
     } else if (!hasLog) {
         label.textContent = 'Set baseline';
         btn.title = 'Load a log first.';
@@ -1938,22 +2149,30 @@ function setTeachingLocks() {
     const exportBtn = document.getElementById('exportSkillBtn');
     if (exportBtn) {
         exportBtn.disabled = !baselineDone || isBusy();
-        if (!baselineDone) exportBtn.title = why;
+        exportBtn.title = baselineDone
+            ? 'Turn the baseline, teaching, and observations into reusable skill(s).'
+            : why;
     }
 }
 
-function requestBaseline(attempt) {
+function requestBaseline(attempt, forceRefresh) {
     attempt = attempt || 0;
-    if (baselineDone && !attempt) return;
+    if (forceRefresh === undefined) forceRefresh = baselineDone;
     if (!filterData.length) return;                       // nothing to read yet
     if (!document.getElementById('logPathInput').value.trim()) return;
     const btn = document.getElementById('baselineBtn');
-    if (btn && !attempt) {
-        btn.disabled = true;
-        document.getElementById('baselineBtnLabel').textContent = 'Reading…';
+    if (!attempt) {
+        setBusy(true);
+        if (btn) {
+            btn.disabled = true;
+            document.getElementById('baselineBtnLabel').textContent =
+                forceRefresh ? 'Updating…' : 'Reading…';
+        }
     }
     fetch(LV.url.learning_baseline, {
-        method: 'POST', headers: {'Content-Type': 'application/json'}, body: '{}',
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({force: !!forceRefresh}),
     })
         .then(r => r.status === 503 ? {retry: true} : r.json())
         .then(d => {
@@ -1965,18 +2184,32 @@ function requestBaseline(attempt) {
             // disable divergence detection for the whole session with no
             // visible symptom.
             if (d.retry) {
-                if (attempt < 8) setTimeout(() => requestBaseline(attempt + 1), 2000);
+                if (attempt < 8) {
+                    setTimeout(() => requestBaseline(attempt + 1, forceRefresh), 2000);
+                } else {
+                    setBusy(false);
+                    setBaselineGate();
+                    alert('AI connection is still unavailable. Try Update baseline again shortly.');
+                }
                 return;
             }
-            if (!d.success) { setBaselineGate(); alert(d.message || 'Baseline read failed'); return; }
+            if (!d.success) {
+                setBusy(false);
+                setBaselineGate();
+                alert(d.message || 'Baseline read failed');
+                return;
+            }
             baselineDone = true;
-            setBaselineGate();
+            setBusy(false);
             if (d.cached) return;                 // already read, nothing new to show
             if (d.usage) updateTokenBadge(d.usage.session);
             if (d.assessment) applyAssessment(d.assessment);
-            appendMsg('assistant', `**First read of this filter:** ${d.baseline.analysis}`, 'all');
+            appendMsg('assistant', d.message || `# Baseline analysis\n\n${d.baseline.analysis}`, 'all');
         })
-        .catch(() => { setBaselineGate(); });   // never let a failed baseline disrupt filtering
+        .catch(() => {
+            setBusy(false);
+            setBaselineGate();
+        });   // never let a failed baseline disrupt filtering
 }
 
 // "Teach this step" — USER-LED: clicking a step's 🎓 icon (see
@@ -2064,7 +2297,11 @@ function submitStepExplanation(seq, explanation, card) {
                     return;
                 }
                 if (d.llm_unavailable) return; // reason saved; nothing more to show
-                renderStepConfirmCard(seq, d.knowledge_core, d.expert_note, d.follow_up_question);
+                if (d.decision_ledger) updateDecisionLedger(d.decision_ledger);
+                renderStepConfirmCard(
+                    seq, d.knowledge_core, d.expert_note, d.follow_up_question,
+                    d.follow_up_decision_id
+                );
                 return;
             }
             // Nothing was saved (e.g. the operation vanished mid-edit) — keep
@@ -2097,7 +2334,7 @@ function stepKnowledgeCoreText(seq, knowledgeCore, expertNote, followUp) {
 // reason is already saved) plus the LLM's own expert_note (a second opinion,
 // shown read-only), and an optional follow-up question the engineer can
 // choose to address by adding more (never forced — this flow is user-led).
-function renderStepConfirmCard(seq, knowledgeCore, expertNote, followUp) {
+function renderStepConfirmCard(seq, knowledgeCore, expertNote, followUp, decisionId) {
     const box = document.getElementById('chatBox');
     const card = el('div', 'chat-question-card step-confirm-card mb-2');
     card.appendChild(el('div', 'chat-q-progress', `🧠 Knowledge core — step #${seq}`));
@@ -2141,11 +2378,11 @@ function renderStepConfirmCard(seq, knowledgeCore, expertNote, followUp) {
             if (!ans) return;
             persist();
             card.remove();
-            sendMsg(ans, undefined, seq);
+            sendMsg(ans, undefined, seq, false, decisionId);
         };
         fuInput.onkeypress = (e) => { if (e.key === 'Enter') submitFollowUp(); };
         fuSend.onclick = submitFollowUp;
-        fuSkip.onclick = () => fuSection.remove();
+        fuSkip.onclick = () => { deferDecision(decisionId); fuSection.remove(); };
         fuRow.appendChild(fuInput);
         fuRow.appendChild(fuSend);
         fuRow.appendChild(fuSkip);
@@ -2178,7 +2415,8 @@ function askStepQuestion(seq, btn) {
             btn.innerHTML = label;
             if (!d.success) { alert(d.message); return; }
             if (d.usage) updateTokenBadge(d.usage.session);
-            renderStepAskCard(seq, d.question);
+            if (d.decision_ledger) updateDecisionLedger(d.decision_ledger);
+            renderStepAskCard(seq, d.question, d.decision_id);
         })
         .catch(e => { setBusy(false); btn.innerHTML = label; alert('Failed: ' + e); });
 }
@@ -2201,6 +2439,7 @@ function askStepQuestion(seq, btn) {
 //   • nothing fires at all without contradictions, and the request is skipped
 //     client-side in that case so the common path costs literally nothing.
 function maybeClarify() {
+    if (interviewMode === 'quiet') return;
     const pending = (divergenceData.contradictions || []).length > 0
         || (divergenceData.focus && !divergenceData.focus_clarified);
     if (!pending) return;                       // no round-trip on the common path
@@ -2227,20 +2466,22 @@ function renderClarifyCard(d) {
         d.kind === 'focus' ? '🎯 About the time you focused on'
                            : `🔍 About "${d.keyword}"`));
     card.appendChild(el('div', 'chat-q-text', q.question));
+    appendRecommendation(card, q);
     if (d.captures) card.appendChild(el('div', 'clarify-captures', d.captures));
 
     const submit = (answer) => {
         if (d.kind === 'focus') {
             fetch(LV.url.learning_answer_focus_clarify, {
                 method: 'POST', headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify({question: q.question, answer}),
-            }).then(() => {
+                body: JSON.stringify({question: q.question, answer, decision_id: d.decision_id || ''}),
+            }).then(r => r.json()).then(result => {
+                if (result.decision_ledger) updateDecisionLedger(result.decision_ledger);
                 card.remove();
                 appendMsg('assistant', `❓ ${q.question}`, 'all');
                 appendMsg('user', answer, 'all');
             });
         } else {
-            submitStepAnswer(d.seq, q.question, answer, card);
+            submitStepAnswer(d.seq, q.question, answer, card, d.decision_id);
         }
     };
 
@@ -2281,7 +2522,7 @@ function renderClarifyCard(d) {
     // reappear on the next filter run.
     const skipBtn = el('button', 'btn btn-sm btn-outline-secondary', 'Skip');
     skipBtn.type = 'button';
-    skipBtn.onclick = () => card.remove();
+    skipBtn.onclick = () => { deferDecision(d.decision_id); card.remove(); };
     customBox.appendChild(input);
     customBox.appendChild(sendBtn);
     customBox.appendChild(skipBtn);
@@ -2290,7 +2531,7 @@ function renderClarifyCard(d) {
         const skipRow = el('div', 'step-ask-skip-row');
         const skip2 = el('button', 'btn btn-sm btn-outline-secondary', 'Skip');
         skip2.type = 'button';
-        skip2.onclick = () => card.remove();
+        skip2.onclick = () => { deferDecision(d.decision_id); card.remove(); };
         skipRow.appendChild(skip2);
         card.appendChild(skipRow);
     }
@@ -2298,11 +2539,12 @@ function renderClarifyCard(d) {
     box.scrollTop = box.scrollHeight;
 }
 
-function renderStepAskCard(seq, q) {
+function renderStepAskCard(seq, q, decisionId) {
     const box = document.getElementById('chatBox');
     const card = el('div', 'chat-question-card step-ask-card mb-2');
     card.appendChild(el('div', 'chat-q-progress', `❓ Step #${seq}`));
     card.appendChild(el('div', 'chat-q-text', q.question));
+    appendRecommendation(card, q);
 
     const customBox = el('div', 'chat-q-custom');
     if (q.type === 'choice' && q.options && q.options.length) {
@@ -2311,7 +2553,7 @@ function renderStepAskCard(seq, q) {
         q.options.forEach(opt => {
             const b = el('button', 'chat-q-opt', opt);
             b.type = 'button';
-            b.onclick = () => submitStepAnswer(seq, q.question, opt, card);
+            b.onclick = () => submitStepAnswer(seq, q.question, opt, card, decisionId);
             optsBox.appendChild(b);
         });
         const otherBtn = el('button', 'chat-q-opt chat-q-opt-other', 'Other…');
@@ -2332,15 +2574,15 @@ function renderStepAskCard(seq, q) {
     input.className = 'form-control form-control-sm';
     input.placeholder = 'Type your answer…';
     input.onkeypress = (e) => {
-        if (e.key === 'Enter' && input.value.trim()) submitStepAnswer(seq, q.question, input.value.trim(), card);
+        if (e.key === 'Enter' && input.value.trim()) submitStepAnswer(seq, q.question, input.value.trim(), card, decisionId);
     };
     const sendBtn = el('button', 'btn btn-sm btn-primary');
     sendBtn.type = 'button';
     sendBtn.innerHTML = '<i class="fas fa-paper-plane"></i>';
-    sendBtn.onclick = () => { if (input.value.trim()) submitStepAnswer(seq, q.question, input.value.trim(), card); };
+    sendBtn.onclick = () => { if (input.value.trim()) submitStepAnswer(seq, q.question, input.value.trim(), card, decisionId); };
     const skipBtn = el('button', 'btn btn-sm btn-outline-secondary', 'Skip');
     skipBtn.type = 'button';
-    skipBtn.onclick = () => card.remove();
+    skipBtn.onclick = () => { deferDecision(decisionId); card.remove(); };
 
     customBox.appendChild(input);
     customBox.appendChild(sendBtn);
@@ -2352,7 +2594,7 @@ function renderStepAskCard(seq, q) {
         const skipRow = el('div', 'step-ask-skip-row');
         const skip2 = el('button', 'btn btn-sm btn-outline-secondary', 'Skip');
         skip2.type = 'button';
-        skip2.onclick = () => card.remove();
+        skip2.onclick = () => { deferDecision(decisionId); card.remove(); };
         skipRow.appendChild(skip2);
         card.appendChild(skipRow);
     }
@@ -2361,13 +2603,13 @@ function renderStepAskCard(seq, q) {
     box.scrollTop = box.scrollHeight;
 }
 
-function submitStepAnswer(seq, question, answer, card) {
+function submitStepAnswer(seq, question, answer, card, decisionId) {
     if (isBusy()) return;
     setBusy(true);
     fetch(LV.url.learning_answer_step_question, {
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({seq: seq, question: question, answer: answer}),
+        body: JSON.stringify({seq: seq, question: question, answer: answer, decision_id: decisionId || ''}),
     })
         .then(r => r.json())
         .then(d => {
@@ -2376,6 +2618,7 @@ function submitStepAnswer(seq, question, answer, card) {
             if (!d.success) { alert(d.message); return; }
             appendMsg('assistant', `❓ ${question}`, seq);
             appendMsg('user', answer, seq);
+            if (d.decision_ledger) updateDecisionLedger(d.decision_ledger);
             syncOpsQuiet(d); // updates the step's "✓ why" indicator (only if it was previously empty)
         })
         .catch(e => { setBusy(false); alert('Failed: ' + e); });
@@ -2407,11 +2650,16 @@ function showNextQuestionCard(queue, doneCount, total) {
     qText.className = 'chat-q-text';
     qText.textContent = q.question;
     card.appendChild(qText);
+    appendRecommendation(card, q);
 
     const advance = () => showNextQuestionCard(queue, doneCount + 1, total);
     // forceTag 'all': these are clarification follow-ups, about the whole round —
     // not whatever step the step-context selector happens to be set to.
-    const finish = (answerText) => { card.remove(); sendMsg(answerText, undefined, 'all'); advance(); };
+    const finish = (answerText) => {
+        card.remove();
+        sendMsg(answerText, undefined, 'all', false, q.decision_id);
+        advance();
+    };
 
     const customBox = document.createElement('div');
     customBox.className = 'chat-q-custom';
@@ -2457,7 +2705,23 @@ function showNextQuestionCard(queue, doneCount, total) {
     sendBtn.onclick = () => { const v = input.value.trim(); if (v) finish(v); };
     customBox.appendChild(input);
     customBox.appendChild(sendBtn);
+    const skipBtn = el('button', 'btn btn-sm btn-outline-secondary', 'Skip');
+    skipBtn.type = 'button';
+    skipBtn.onclick = () => {
+        deferDecision(q.decision_id);
+        card.remove();
+        advance();
+    };
+    customBox.appendChild(skipBtn);
     card.appendChild(customBox);
+    if (q.type === 'choice' && q.options && q.options.length) {
+        const skipRow = el('div', 'step-ask-skip-row');
+        const visibleSkip = el('button', 'btn btn-sm btn-outline-secondary', 'Skip');
+        visibleSkip.type = 'button';
+        visibleSkip.onclick = skipBtn.onclick;
+        skipRow.appendChild(visibleSkip);
+        card.appendChild(skipRow);
+    }
 
     box.appendChild(card);
     box.scrollTop = box.scrollHeight;
@@ -2496,6 +2760,18 @@ function exportSkill() {
     // send, or a step teach/ask is still in flight, and vice versa.
     if (btn.disabled || isBusy()) return;
 
+    const blockingDecisions = (decisionLedger.items || []).filter(
+        item => item.status === 'open' && item.blocking
+    );
+    if (interviewMode === 'grill' && blockingDecisions.length &&
+        !confirm(
+            `Grill mode still has ${blockingDecisions.length} unresolved specification decision(s):\n\n` +
+            blockingDecisions.map(item => `• ${item.question}`).join('\n') +
+            '\n\nExport anyway? They will stay visible in the Skill Spec review.'
+        )) {
+        return;
+    }
+
     if (currentAssessment) {
         const score = (currentAssessment.readiness || {}).score;
         const flagged = (currentAssessment.validation || []).filter(v => v.status !== 'verified');
@@ -2530,6 +2806,7 @@ function exportSkill() {
             restore();
             if (!d.success) { alert(d.message); return; }
             if (d.usage) updateTokenBadge(d.usage.session);
+            if (d.decision_ledger) updateDecisionLedger(d.decision_ledger);
             draftQueue = (d.drafts || []).slice();
             draftTotal = draftQueue.length;
             if (!draftTotal) { alert('Nothing to export.'); return; }
@@ -2637,6 +2914,7 @@ function openNextDraft() {
         subtitle: subtitle,
         notices: notices,
         saveUrl: LV.url.learning_save,
+        approvalMode: true,
         onSaved: function (d2) {
             alert('Skill saved!' + (draftQueue.length ? ` Now reviewing the next one (${draftQueue.length} left)…` : ''));
             // The just-saved skill becomes the session's baseline server-side
@@ -2683,6 +2961,8 @@ document.getElementById('previewBox').addEventListener('click', function (e) {
 });
 // Restore the prior-knowledge toggle from server state on reload.
 document.getElementById('priorToggle').checked = LV.boot.priorKnowledge;
+document.getElementById('interviewMode').value = interviewMode;
+updateDecisionLedger(decisionLedger);
 // A baseline chosen in the Skill Library survives a reload, so the badge has
 // to be evaluated on load too, not only when it changes.
 renderExportBaselineBadge();

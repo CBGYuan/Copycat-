@@ -156,7 +156,7 @@ Output ONLY this JSON object, no markdown fences, no extra prose:
 {
   "analysis": "<2-4 sentences>",
     "ambiguity": {"requires_clarification": <true|false>, "divergent_behaviors": ["<interpretation and observable result>", "..."]},
-    "questions": [{"question": "<one discriminating question>", "type": "choice", "options": ["<behavior A>", "<behavior B>"]}],
+    "questions": [{"question": "<one discriminating question>", "type": "choice", "options": ["<behavior A>", "<behavior B>"], "recommended_answer": "<recommended option/answer or empty>", "recommendation_reason": "<one evidence-grounded reason or empty>"}],
 """ + _ASSESS_JSON + """
 }
 """
@@ -502,9 +502,13 @@ Question `type` is either:
    options. Do NOT add an "Other" option; the UI already offers free text.
  - "open": genuinely open-ended, no small fixed set of sensible answers.
 
+Also provide the answer you recommend from the currently available evidence.
+It is advice, not an automatic decision; use an empty recommendation when
+the evidence genuinely cannot favor one branch.
+
 Output ONLY this JSON object, no markdown fences, no extra prose:
 {
-  "question": {"question": "<one discriminating question>", "type": "choice|open", "options": ["<behaviour A>", "<behaviour B>"]},
+  "question": {"question": "<one discriminating question>", "type": "choice|open", "options": ["<behaviour A>", "<behaviour B>"], "recommended_answer": "<recommended option/answer or empty>", "recommendation_reason": "<one short evidence-grounded reason or empty>"},
   "captures": "<the one short sentence of skill knowledge this answer will pin down>"
 }
 """
@@ -532,9 +536,12 @@ paragraph-length question with clause-heavy options gets skipped rather than
 answered — which costs you the knowledge entirely. Put the nuance in the
 options' distinctions, not in a longer question stem.
 
+Also provide the answer you recommend from the currently available evidence,
+or empty fields when the evidence cannot favor one locating rule.
+
 Output ONLY this JSON object, no markdown fences, no extra prose:
 {
-  "question": {"question": "<one question>", "type": "choice|open", "options": ["<concrete locating signal A>", "<B>"]},
+  "question": {"question": "<one question>", "type": "choice|open", "options": ["<concrete locating signal A>", "<B>"], "recommended_answer": "<recommended option/answer or empty>", "recommendation_reason": "<one short evidence-grounded reason or empty>"},
   "captures": "<the one short sentence of skill knowledge this answer will pin down>"
 }
 """
@@ -733,6 +740,28 @@ def _build_context_block(context: Dict) -> str:
             "state conditions this session gives evidence for."
         )
 
+    annotations = context.get("log_annotations") or []
+    if annotations:
+        rows = []
+        for item in annotations[:24]:
+            label = "EVIDENCE" if item.get("label") == "evidence" else "COUNTEREXAMPLE"
+            keyword_names = [
+                str(m.get("text") if isinstance(m, dict) else m).strip()
+                for m in (item.get("matched_keywords") or [])
+            ]
+            keywords = ", ".join(name for name in keyword_names if name)
+            keyword_note = f" | matched: {keywords}" if keywords else ""
+            rows.append(
+                f"  - [{label}] line {item.get('line_no')}: "
+                f"{str(item.get('text') or '').strip()}{keyword_note}"
+            )
+        if len(annotations) > len(rows):
+            rows.append(f"  - ... {len(annotations) - len(rows)} more labeled observation(s) omitted")
+        lines.append(
+            "Engineer-labeled key log observations (E supports the scenario/rule; "
+            "X is a counterexample or exception):\n" + "\n".join(rows)
+        )
+
     sample = context.get("sample_lines") or []
     if sample:
         # Caller (learning_routes._sample_lines) already picked the right
@@ -765,7 +794,13 @@ def _normalize_question(q) -> Optional[Dict]:
         return None
     options = [str(o).strip() for o in (q.get("options") or []) if str(o).strip()]
     qtype = "choice" if (q.get("type") == "choice" and len(options) >= 2) else "open"
-    return {"question": text, "type": qtype, "options": options if qtype == "choice" else []}
+    return {
+        "question": text,
+        "type": qtype,
+        "options": options if qtype == "choice" else [],
+        "recommended_answer": str(q.get("recommended_answer") or "").strip(),
+        "recommendation_reason": str(q.get("recommendation_reason") or "").strip(),
+    }
 
 
 def _clamp_score(value, default: int = 0) -> int:
@@ -1121,10 +1156,13 @@ The question is EITHER "open" (genuinely open-ended) or "choice" (give 2-4
 concrete options in the engineer's own domain vocabulary — never add an
 "Other"/"Skip" option yourself, the UI already offers both).
 
+Provide an evidence-grounded recommended answer when the measured effect
+clearly favors one branch. Leave it empty rather than guessing.
+
 Output ONLY this JSON object, no markdown fences, no extra prose:
-{"question": "...", "type": "open"}
+{"question": "...", "type": "open", "recommended_answer": "...", "recommendation_reason": "..."}
 or
-{"question": "...", "type": "choice", "options": ["...", "..."]}
+{"question": "...", "type": "choice", "options": ["...", "..."], "recommended_answer": "...", "recommendation_reason": "..."}
 """
 
 
@@ -1736,4 +1774,3 @@ def _apply_judge_decision(draft: Dict, decision: Dict, pool: Dict[str, Skill], s
         "reason": decision.get("reason") or "", "source": source,
     }
     return out
-

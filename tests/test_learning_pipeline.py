@@ -1,10 +1,12 @@
 import json
 import unittest
 
-from blueprints.learning.learning_routes import _filter_signature
+from blueprints.learning.learning_routes import _filter_signature, _baseline_delta
+from blueprints.chatbot.chatbot_routes import _parse_chat_response
 from services.learning_service import (analyze_baseline, analyze_round, assess_teaching_evidence,
                                        clarify_divergence)
 from services.session_store import WorkingState
+from services import decision_ledger
 from utils import divergence, operation_journal
 from utils.tat_parser import matched_keywords_for_line
 
@@ -23,6 +25,32 @@ class FakeLlm:
 
 
 class LearningPipelineTests(unittest.TestCase):
+    def test_chat_divergence_parser_preserves_choice_questions(self):
+        raw = json.dumps({
+            "reply": "That is new expert knowledge.",
+            "clarification": {
+                "detected": True,
+                "basis": "both",
+                "summary": "The threshold differs from the baseline and loaded skill.",
+                "question": "Which threshold applies?",
+                "type": "choice",
+                "options": ["20%", "30%"],
+                "recommended_answer": "20%",
+                "recommendation_reason": "It matches the measured grade delta.",
+            },
+        })
+        reply, question = _parse_chat_response(raw, expect_structured=True)
+        self.assertEqual(reply, "That is new expert knowledge.")
+        self.assertEqual(question["type"], "choice")
+        self.assertEqual(question["basis"], "both")
+        self.assertEqual(question["options"], ["20%", "30%"])
+        self.assertEqual(question["recommended_answer"], "20%")
+
+    def test_chat_divergence_parser_falls_back_to_plain_reply(self):
+        reply, question = _parse_chat_response("ordinary reply", expect_structured=True)
+        self.assertEqual(reply, "ordinary reply")
+        self.assertIsNone(question)
+
     def test_round_only_asks_when_behaviors_diverge(self):
         base = {
             "analysis": "The edit has two possible scopes.",
@@ -131,10 +159,42 @@ class LearningPipelineTests(unittest.TestCase):
         state.chat_history = [{"role": "user", "content": "keep chat reset ownership external"}]
         state.operations = [{"seq": 1}]
         state.log_annotations = [{"line_no": 1, "label": "evidence", "text": "disconnect"}]
+        state.decision_ledger = [{"id": "D1", "status": "open"}]
         state.reset_teaching_progress()
         self.assertEqual(state.filters, [{"text": "disconnect"}])
         self.assertEqual(state.operations, [])
         self.assertEqual(state.log_annotations, [])
+        self.assertEqual(state.decision_ledger, [])
+
+    def test_decision_ledger_is_session_sidecar_and_resolves_answers(self):
+        state = WorkingState()
+        state.interview_mode = "grill"
+        item = decision_ledger.record_question(
+            state,
+            source="chat",
+            question="Is this exclusion global or scenario-specific?",
+            qtype="choice",
+            options=["Always", "Only here"],
+            recommended_answer="Only here",
+        )
+        self.assertTrue(item["blocking"])
+        decision_ledger.resolve(state, item["id"], "Only here")
+        payload = decision_ledger.payload(state)
+        self.assertEqual(payload["resolved"], 1)
+        self.assertEqual(payload["blocking"], 0)
+
+        spec = decision_ledger.build_skill_spec({
+            "description": "A bounded connection failure.",
+            "keywords": ["ASSOC_RSP"],
+            "exclusive": ["periodic"],
+            "expert_rules": "1. If ASSOC_RSP fails, report the status.",
+            "teaching_evidence": {"labeled_examples": 2, "counterexample_count": 1},
+        }, state)
+        self.assertEqual(
+            spec["avatar_fields"],
+            ["name", "description", "keywords", "exclusive", "expert_rules"],
+        )
+        self.assertEqual(spec["resolved_decisions"][0]["answer"], "Only here")
 
 
 class BaselineTests(unittest.TestCase):
@@ -198,8 +258,18 @@ class BaselineTests(unittest.TestCase):
         state.filters[0]["enabled"] = False
         self.assertEqual(before, _filter_signature(state))
 
-        # Loading a genuinely different filter set MUST invalidate it.
+        # Adding/removing keywords after the read is the teaching delta, so it
+        # must stay comparable to the same baseline.
         state.filters = [{"text": "roam", "excluding": False, "enabled": True}]
+        self.assertEqual(before, _filter_signature(state))
+
+        # A different capture is genuinely new evidence and needs a new read.
+        state.log_path = "next_capture.log"
+        self.assertNotEqual(before, _filter_signature(state))
+
+        state.log_path = ""
+        self.assertEqual(before, _filter_signature(state))
+        state.prior_knowledge = True
         self.assertNotEqual(before, _filter_signature(state))
 
     def test_baseline_survives_clear_because_it_belongs_to_the_filter_set(self):
@@ -209,6 +279,25 @@ class BaselineTests(unittest.TestCase):
         state.reset_teaching_progress()
         self.assertEqual(state.baseline, {"expected_scenario": "Association failure."})
         self.assertEqual(state.baseline_filter_sig, "sig")
+
+    def test_baseline_update_delta_preserves_what_changed(self):
+        before = {
+            "expected_scenario": "Connect failure.",
+            "expected_key_keywords": [{"text": "AUTH_REQ"}],
+            "expected_noise_keywords": [{"text": "Mcc"}],
+            "open_unknowns": ["Whether this is a roam."],
+        }
+        after = {
+            "expected_scenario": "Roam authentication failure.",
+            "expected_key_keywords": [{"text": "AUTH_REQ"}, {"text": "TASK ROAM"}],
+            "expected_noise_keywords": [],
+            "open_unknowns": [],
+        }
+        delta = _baseline_delta(before, after)
+        self.assertTrue(delta["scenario_changed"])
+        self.assertEqual(delta["key_added"], ["TASK ROAM"])
+        self.assertEqual(delta["noise_removed"], ["Mcc"])
+        self.assertEqual(delta["unknowns_resolved"], ["Whether this is a roam."])
 
 
 class DivergenceTests(unittest.TestCase):

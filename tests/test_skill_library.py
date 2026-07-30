@@ -246,6 +246,8 @@ class ConvergeInheritanceRouteTests(unittest.TestCase):
             {"role": "assistant", "content": "Noted — grade-driven roam."},
         ]
         state.filtered_preview = ["00:01:02 candidate grade 55 -> 78"]
+        state.baseline = {"expected_scenario": "Grade-driven roam."}
+        state.baseline_filter_sig = state.baseline_signature()
         return client.post("/learning/converge", json={}).get_json()
 
     def test_a_root_parent_is_inherited_and_the_prompt_is_told_so(self):

@@ -30,6 +30,9 @@
     // Caller-supplied banners about this draft (see renderNotices).
     notices: [],
     teachingEvidence: null,
+    // Review-only decision/spec summary. Never included by collect(), so it
+    // cannot leak into Avatar's YAML contract.
+    specReview: null,
     domain: "wifi",
     // Ancestry of whatever was opened. Held verbatim and sent straight back on
     // save: the editor never sets or reasons about it, it only makes sure a
@@ -254,6 +257,39 @@
     el.style.display = "flex";
   }
 
+  function renderSpecReview() {
+    const box = document.getElementById("skm-spec-review");
+    const spec = state.specReview;
+    if (!box || !spec) {
+      if (box) box.style.display = "none";
+      return;
+    }
+    const resolved = (spec.resolved_decisions || []).map((item) =>
+      `<li><b>${escapeHtml(item.question)}</b><span>${escapeHtml(item.answer)}</span></li>`
+    ).join("");
+    const unresolved = (spec.unresolved_decisions || []).map((item) =>
+      `<li>${escapeHtml(item)}</li>`
+    ).join("");
+    const evidence = (spec.required_evidence || []).slice(0, 8)
+      .map((item) => `<span class="skm-spec-chip">${escapeHtml(item)}</span>`).join("");
+    box.innerHTML = `
+      <div class="skm-spec-head">
+        <div><span class="skm-spec-kicker">Skill spec</span><b>Review before approving</b></div>
+        <span class="skm-avatar-safe"><i class="fas fa-shield-halved"></i> Avatar-compatible</span>
+      </div>
+      <div class="skm-spec-grid">
+        <div><span>Rules</span><b>${Number(spec.rule_count || 0)}</b></div>
+        <div><span>Labeled examples</span><b>${Number(spec.labeled_examples || 0)}</b></div>
+        <div><span>Counterexamples</span><b>${Number(spec.counterexamples || 0)}</b></div>
+        <div><span>Open decisions</span><b>${(spec.unresolved_decisions || []).length}</b></div>
+      </div>
+      ${evidence ? `<div class="skm-spec-section"><b>Required evidence</b><div class="skm-spec-chips">${evidence}</div></div>` : ""}
+      ${resolved ? `<div class="skm-spec-section"><b>Engineer-approved decisions</b><ul class="skm-spec-decisions">${resolved}</ul></div>` : ""}
+      ${unresolved ? `<div class="skm-spec-section skm-spec-open"><b>Still open / deferred</b><ul>${unresolved}</ul></div>` : ""}
+      <div class="skm-spec-foot">This review data stays in the workbench. Saved execution fields remain: ${escapeHtml((spec.avatar_fields || []).join(", "))}.</div>`;
+    box.style.display = "block";
+  }
+
   // Show the sentence the downstream agent will actually select on, since
   // that is the description PLUS the compiled trigger clause — not what the
   // description field alone displays.
@@ -346,6 +382,7 @@
     state.lineageInfo = data.lineage_info || null;
     state.notices = options.notices || [];
     state.teachingEvidence = data.teaching_evidence || null;
+    state.specReview = data.spec_review || null;
     state.domain = data.domain || "wifi";
     state.parent = data.parent || null;
     state.lineage = (data.lineage || []).slice();
@@ -372,6 +409,7 @@
     document.getElementById("skm-delete-btn").style.display = state.options.deleteUrl ? "inline-block" : "none";
 
     renderNotices();
+    renderSpecReview();
     renderDiffBanner();
     renderVerificationBanner();
     renderChips("skm-keywords", state.keywords, newKwSet(), inhKwSet());
@@ -380,6 +418,9 @@
     renderTriggerPreview();
     renderRules();
     renderDescMeter();
+    document.getElementById("skm-save-btn").innerHTML = options.approvalMode
+      ? '<i class="fas fa-check"></i> Approve & Save'
+      : '<i class="fas fa-save"></i> Save Changes';
 
     document.getElementById("skillEditorModal").style.display = "flex";
   }

@@ -107,6 +107,13 @@ class WorkingState:
         self.chat_history: list = []       # [{"role": "user"/"assistant", "content": str}]
         self.learning_questions: list = []
         self.learning_answers: list = []
+        # Optional interview policy. "smart" preserves the established
+        # workflow; "quiet" never interrupts automatically; "grill" walks
+        # unresolved skill decisions one at a time.
+        self.interview_mode: str = "smart"
+        # Session-only sidecar. Never serialized into Avatar's skill YAML.
+        self.decision_ledger: list = []
+        self.decision_next_id: int = 0
         self.skill_draft: list = []        # list of draft skill dicts from the last /learning/converge (usually 1, can be more — see synthesize_skill_draft)
         # TWO different questions, deliberately kept as two fields — one field
         # answering both is what made the Log Viewer's skill dropdown lie.
@@ -162,6 +169,30 @@ class WorkingState:
         # when operations has grown past this since, instead of guessing
         # client-side or nagging on every single filter edit.
         self.last_round_op_count: int = 0
+        # Preserve committed reads when Update baseline is used.
+        self.baseline_history: list = []
+        self.baseline_version: int = 0
+
+    def baseline_signature(self) -> str:
+        """Identity of the evidence set described by the comparison baseline.
+
+        Individual filter edits are deliberately excluded because additions,
+        removals, and toggles are the later actions compared against the
+        baseline. The source log, loaded .tat/skill identity, and prior-
+        knowledge mode are included: changing any of those starts a genuinely
+        different comparison basis.
+        """
+        return (
+            f"{self.log_path}\x01{self.tat_path}\x01{self.filter_skill_key}"
+            f"\x01prior={int(bool(self.prior_knowledge))}"
+        )
+
+    def has_current_baseline(self) -> bool:
+        return bool(
+            self.baseline
+            and self.baseline_filter_sig
+            and self.baseline_filter_sig == self.baseline_signature()
+        )
 
     def reset_teaching_progress(self) -> None:
         """Clears the readiness/round/operation-journal state that should
@@ -181,6 +212,8 @@ class WorkingState:
         self.skill_draft = []
         self.last_export_chat_len = 0
         self.last_round_op_count = 0
+        self.decision_ledger = []
+        self.decision_next_id = 0
         # Line labels belong to the prior teaching case and must not leak
         # into the next one.
         self.log_annotations = []

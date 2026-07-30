@@ -4,7 +4,7 @@ from datetime import date, datetime
 from flask import Blueprint, render_template, request, jsonify
 
 from configs.global_configs import app_config
-from services import session_store, skill_memory, event_log_service
+from services import session_store, skill_memory, event_log_service, decision_ledger
 from utils import file_picker, tat_parser, helpers, operation_journal, divergence
 
 log_viewer_bp = Blueprint("log_viewer", __name__, url_prefix="/log_viewer")
@@ -161,7 +161,8 @@ def index():
                             # them is why every step read `undefined "..."` after
                             # a reload while looking correct during the session.
                             operations=operation_journal.payload(state),
-                            has_baseline=bool(state.baseline))
+                            decision_ledger=decision_ledger.payload(state),
+                            has_baseline=state.has_current_baseline())
 
 
 RAW_PREVIEW_LINES = 500
