@@ -122,12 +122,22 @@ precisely (not overclaimed) in [Paper grounding](#paper-grounding) below.
 ### 2. Skill-Building Chat
 - Claude-style layout: your messages sit in a right-aligned bubble; the
   assistant's replies flow as plain full-width Markdown text.
-- **Baseline first, then divergence** — there is no "analyze now" button. The
-  moment a `.tat` file or a skill produces a filtered view, one LLM call
-  commits a **structured baseline read**: what scenario this looks like,
-  which keywords it expects to be load-bearing, which it expects to be noise,
-  and what it doesn't know yet. That prediction is recorded *before* you
-  teach anything, which is what makes the rest of the loop possible.
+- **Set the comparison baseline** — one button, and it is the deliberate start
+  of the teaching loop. It stays disabled until a log is loaded **and the
+  filter actually matches something**, glows once it can be pressed, and
+  everything that feeds knowledge back (teaching a step, Export) waits behind
+  it. Pressing it makes one LLM call that commits a **structured baseline
+  read**: what scenario this looks like, which keywords it expects to be
+  load-bearing, which it expects to be noise, and what it doesn't know yet.
+
+  Gated rather than automatic for two reasons. A baseline formed on a filter
+  that survives nothing *describes* nothing — and it then becomes the thing
+  every later edit is compared against, so a junk first read poisons the whole
+  session's divergence detection. And auto-firing spent a call on every `.tat`
+  load, including the ones immediately replaced by a different file.
+
+  That prediction is recorded *before* you teach anything, which is what makes
+  the rest of the loop possible.
 - **You then teach by filtering.** Every edit is measured, and a
   deterministic (zero-LLM-cost) pass compares what you did against what the
   baseline committed to:

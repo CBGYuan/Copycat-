@@ -153,7 +153,15 @@ def index():
                 or app_config.bt_skills.get(state.active_skill_key))
     return render_template("log_viewer.html", state=state, skills=app_config.skills,
                             llm_ready=llm_ready, session_usage=session_usage,
-                            baseline_skill_name=baseline.name if baseline else "")
+                            baseline_skill_name=baseline.name if baseline else "",
+                            # The RENDERED journal, not state.operations. The raw
+                            # entries carry `action` but none of the display
+                            # fields payload() derives (`verb`, `effect_phrase`,
+                            # the label fallback) — seeding the Steps panel from
+                            # them is why every step read `undefined "..."` after
+                            # a reload while looking correct during the session.
+                            operations=operation_journal.payload(state),
+                            has_baseline=bool(state.baseline))
 
 
 RAW_PREVIEW_LINES = 500

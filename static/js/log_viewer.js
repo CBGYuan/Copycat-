@@ -188,6 +188,7 @@ function syncOps(d) {
         surfaceRedFlags();
         renderStepPanel();
         renderStepTagSelector();
+        setTeachingLocks();   // teach buttons were just rebuilt
     }
 }
 
@@ -307,7 +308,7 @@ function showRedFlagCard(seq, question, opts) {
 // used after answer_red_flag's own response, which only carries the reason
 // update (no new flags to show, panel already reflects the just-answered one).
 function syncOpsQuiet(d) {
-    if (d && d.operations) { operationData = d.operations; renderStepPanel(); }
+    if (d && d.operations) { operationData = d.operations; renderStepPanel(); setTeachingLocks(); }
 }
 
 // ---- Step viewer -----------------------------------------------------------
@@ -320,6 +321,9 @@ function syncOpsQuiet(d) {
 function renderStepPanel() {
     const panel = document.getElementById('stepPanel');
     if (!panel) return;
+    // The teach buttons below are rebuilt from scratch here, so whatever lock
+    // the baseline gate applied to the previous set is gone — reapplied at the
+    // end of this function.
     panel.innerHTML = '';
 
     const body = el('div', 'step-body');
@@ -643,7 +647,8 @@ function pickLog() {
                 // Show the log immediately — don't make the engineer wait
                 // for a .tat/skill to be loaded just to see the file.
                 document.getElementById('logPaneTitle').textContent = 'Log';
-                document.getElementById('matchCount').textContent = d.preview.length;
+                lastMatchCount = d.preview.length;
+            document.getElementById('matchCount').textContent = d.preview.length;
                 document.getElementById('totalLines').textContent = d.total_lines;
                 document.getElementById('statsSummary').textContent =
                     d.total_lines > d.preview.length
@@ -678,7 +683,7 @@ function pickLog() {
                 } else if (filterData.length) {
                     // Filters already set up — run right away (replaces this
                     // raw view), then read the filter set against the NEW log.
-                    applyFilter().then(() => requestBaseline());
+                    applyFilter().then(() => setBaselineGate());
                 }
             } else showPathStatus('logStatus', d.message, 'err');
         });
@@ -695,6 +700,7 @@ function showAllLog() {
         .then(d => {
             if (!d.success) { alert(d.message); return; }
             document.getElementById('logPaneTitle').textContent = 'Log';
+            lastMatchCount = d.preview.length;
             document.getElementById('matchCount').textContent = d.preview.length;
             document.getElementById('totalLines').textContent = d.total_lines;
             document.getElementById('statsSummary').textContent =
@@ -766,7 +772,8 @@ function focusLogTime() {
                 applyFilter();
             } else {
                 document.getElementById('logPaneTitle').textContent = 'Log';
-                document.getElementById('matchCount').textContent = d.preview.length;
+                lastMatchCount = d.preview.length;
+            document.getElementById('matchCount').textContent = d.preview.length;
                 document.getElementById('totalLines').textContent = d.total_lines;
                 renderLogRows(d.preview);
             }
@@ -1054,7 +1061,7 @@ function pickTat() {
                 // Baseline AFTER the filter run — it reads the resulting
                 // stats, which don't exist until applyFilter has populated
                 // them server-side.
-                if (document.getElementById('logPathInput').value.trim()) applyFilter().then(() => requestBaseline());
+                if (document.getElementById('logPathInput').value.trim()) applyFilter().then(() => setBaselineGate());
             } else showPathStatus('tatStatus', d.message, 'err');
         });
 }
@@ -1136,7 +1143,7 @@ function loadSkill(key) {
                 const t = document.getElementById('priorToggle');
                 if (t && !t.checked) t.checked = true;
             }
-            if (document.getElementById('logPathInput').value.trim()) applyFilter().then(() => requestBaseline());
+            if (document.getElementById('logPathInput').value.trim()) applyFilter().then(() => setBaselineGate());
         } else showPathStatus('tatStatus', d.message, 'err');
     }).catch(() => setBusy(false));
 }
@@ -1212,6 +1219,7 @@ function applyFilter() {
         .then(d => {
             if (!d.success) { box.innerHTML = ''; alert(d.message); return; }
             document.getElementById('logPaneTitle').textContent = 'Filtered Log';
+            lastMatchCount = d.total_matched;
             document.getElementById('matchCount').textContent = d.total_matched;
             document.getElementById('totalLines').textContent = d.total_lines;
             document.getElementById('statsSummary').textContent =
@@ -1773,10 +1781,85 @@ function onPriorToggle() {
 // edit: re-reading after each toggle would re-baseline against the engineer's
 // own change and destroy the comparison. The server additionally caches by
 // filter signature, so a repeat call can't spend a second LLM call.
+// ---- The baseline gate ---------------------------------------------------
+// The first read is an explicit, engineer-pressed action rather than something
+// that fires the moment a filter loads. Two reasons it has to be:
+//
+//   * A baseline formed on a filter that survives NOTHING describes nothing —
+//     and it then becomes the thing every later edit is compared against, so a
+//     junk first read poisons the whole session's divergence detection.
+//   * Auto-firing spent an LLM call on every .tat load, including the ones
+//     where the engineer immediately picked a different file.
+//
+// So: disabled until a log is loaded AND the filter actually matched
+// something, glowing once it can be pressed, and the knowledge-feeding
+// actions (teaching a step, exporting) stay locked until it has run.
+let baselineDone = LV.boot.hasBaseline || false;
+let lastMatchCount = 0;
+
+function setBaselineGate() {
+    const btn = document.getElementById('baselineBtn');
+    if (!btn) return;
+    const label = document.getElementById('baselineBtnLabel');
+    const hasLog = !!document.getElementById('logPathInput').value.trim();
+    const ready = hasLog && filterData.length > 0 && lastMatchCount > 0;
+
+    btn.classList.toggle('is-ready', ready && !baselineDone);
+    btn.classList.toggle('is-done', baselineDone);
+    btn.disabled = baselineDone || !ready || isBusy();
+
+    if (baselineDone) {
+        label.textContent = 'Baseline set';
+        btn.title = "The LLM's first read of this filter is recorded. Every later edit is "
+                  + 'compared against it — that comparison is what turns your filtering into '
+                  + 'taught knowledge.';
+    } else if (!hasLog) {
+        label.textContent = 'Set comparison baseline';
+        btn.title = 'Load a log first.';
+    } else if (!filterData.length) {
+        label.textContent = 'Set comparison baseline';
+        btn.title = 'Load a .tat file or a skill so there is a filter to read.';
+    } else if (!lastMatchCount) {
+        label.textContent = 'Set comparison baseline';
+        btn.title = 'The filter currently matches 0 lines. A first read of a filter that '
+                  + 'survives nothing would describe nothing, and everything you teach '
+                  + 'afterwards is compared against it — adjust the filter until it hits '
+                  + 'something.';
+    } else {
+        label.textContent = 'Set comparison baseline';
+        btn.title = "Record the LLM's first read of this filter. Teaching steps and Export "
+                  + 'unlock once it has run.';
+    }
+    setTeachingLocks();
+}
+
+// Everything that feeds knowledge back waits behind the baseline, because
+// without a recorded first read there is nothing for an edit to diverge FROM —
+// the teaching would have no comparison to be measured against.
+function setTeachingLocks() {
+    const why = 'Set the comparison baseline first — teaching is measured as divergence '
+              + "from the LLM's first read, so there has to be one.";
+    document.querySelectorAll('.step-teach-btn').forEach((b) => {
+        b.disabled = !baselineDone;
+        if (!baselineDone) b.title = why;
+    });
+    const exportBtn = document.getElementById('exportSkillBtn');
+    if (exportBtn) {
+        exportBtn.disabled = !baselineDone || isBusy();
+        if (!baselineDone) exportBtn.title = why;
+    }
+}
+
 function requestBaseline(attempt) {
     attempt = attempt || 0;
+    if (baselineDone && !attempt) return;
     if (!filterData.length) return;                       // nothing to read yet
     if (!document.getElementById('logPathInput').value.trim()) return;
+    const btn = document.getElementById('baselineBtn');
+    if (btn && !attempt) {
+        btn.disabled = true;
+        document.getElementById('baselineBtnLabel').textContent = 'Reading…';
+    }
     fetch(LV.url.learning_baseline, {
         method: 'POST', headers: {'Content-Type': 'application/json'}, body: '{}',
     })
@@ -1793,12 +1876,15 @@ function requestBaseline(attempt) {
                 if (attempt < 8) setTimeout(() => requestBaseline(attempt + 1), 2000);
                 return;
             }
-            if (!d.success || d.cached) return;   // cached = already read, nothing new to show
+            if (!d.success) { setBaselineGate(); alert(d.message || 'Baseline read failed'); return; }
+            baselineDone = true;
+            setBaselineGate();
+            if (d.cached) return;                 // already read, nothing new to show
             if (d.usage) updateTokenBadge(d.usage.session);
             if (d.assessment) applyAssessment(d.assessment);
             appendMsg('assistant', `**First read of this filter:** ${d.baseline.analysis}`, 'all');
         })
-        .catch(() => {});   // never let a failed baseline disrupt filtering
+        .catch(() => { setBaselineGate(); });   // never let a failed baseline disrupt filtering
 }
 
 // "Teach this step" — USER-LED: clicking a step's 🎓 icon (see
@@ -2525,3 +2611,17 @@ applyAssessment({
 // rather than mislabeling old messages as general knowledge they were never
 // actually confirmed to be.
 (LV.boot.chatHistory).forEach(m => appendMsg(m.role, m.content, m.step));
+
+// The log rows are NOT part of the boot payload — sending a 400k-line preview
+// through the page would be absurd — so a reload used to leave the pane at
+// "Log (0 of 0)" and blank even though the session still had a log and a full
+// filter set, which read as the log having been lost. Re-run the filter once
+// on load to repaint it from the server's own state. Deliberately does NOT
+// trigger a baseline read: that is now an explicit, engineer-pressed action
+// (see setBaselineGate).
+if (LV.boot.logPath && filterData.length) {
+    applyFilter();
+} else if (LV.boot.logPath) {
+    showAllLog();
+}
+setBaselineGate();

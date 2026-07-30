@@ -276,11 +276,18 @@
           <input class="form-check-input" type="checkbox" role="switch" id="priorToggle" onchange="onPriorToggle()">
           <label class="form-check-label small text-muted" for="priorToggle" id="priorToggleLabel">Load skills</label>
         </span>
-        <!-- No Log Round control here or anywhere else. Analysis is no
-             longer something the engineer submits: the LLM reads the filter
-             set itself the moment one is loaded (see requestBaseline), and
-             follow-up questions fire only when a later edit actually
-             contradicts that read (see maybeClarify / utils/divergence.py). -->
+        <!-- The one deliberate start of the teaching loop. The LLM's first
+             read has to happen against a filter set that ACTUALLY SURVIVES
+             something — a baseline formed on a filter matching zero lines
+             describes nothing and would then be the thing every later edit is
+             compared against. So the button stays disabled until a log is
+             loaded AND the filter has at least one hit, glows once it can be
+             pressed, and everything that feeds knowledge back (teaching a
+             step, exporting) waits behind it. -->
+        <button type="button" id="baselineBtn" class="btn btn-sm baseline-btn" disabled
+                onclick="requestBaseline()">
+          <i class="fas fa-flag-checkered"></i> <span id="baselineBtnLabel">Set comparison baseline</span>
+        </button>
         <div class="d-flex align-items-center gap-2 ms-auto">
           <button type="button" class="icon-btn" onclick="resetChat()" title="Clear the conversation">
             <i class="fas fa-eraser"></i>
@@ -374,7 +381,9 @@
       hasEventLog: {{ (state.event_log_path|length > 0)|tojson }},
       hasDateAnchor: {{ (state.log_date_anchor|length > 0)|tojson }},
       logAnnotations: {{ (state.log_annotations or [])|tojson }},
-      operations: {{ (state.operations or [])|tojson }},
+      operations: {{ (operations or [])|tojson }},
+      hasBaseline: {{ has_baseline|tojson }},
+      logPath: {{ (state.log_path or '')|tojson }},
       priorKnowledge: {{ state.prior_knowledge|tojson }},
       sessionUsage: {{ session_usage|tojson }},
       lastReadiness: {{ (state.last_readiness or {})|tojson }},
