@@ -978,6 +978,7 @@ a.btn-primary {
 .tat-filter-row .c-hit { text-align: right; font-weight: 600; white-space: nowrap; }
 .tat-filter-head .c-evid,
 .tat-filter-row .c-evid { text-align: right; font-size: 0.6rem; color: var(--primary-dark); white-space: nowrap; }
+.tat-filter-row .c-evid.is-over-matching { color: var(--bad); font-weight: 700; }
 .tat-filter-row .c-del { display: flex; align-items: center; justify-content: center; padding: 0; }
 #filterList { max-height: 180px; overflow-y: auto; }
 .tat-filter-row { border-bottom: 1px solid #f0f2f4; line-height: 1.5; }

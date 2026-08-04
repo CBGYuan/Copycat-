@@ -82,6 +82,13 @@ class WorkingState:
         # so this list exists purely for the dismissed case. Being asked and
         # declining is itself a decision; re-prompting would override it.
         self.clarified_seqs: list = []
+        # Material omissions already elicited (see /learning/clarify's omission
+        # branch) so a still-unexplained addition is prompted for once, not on
+        # every filter run. Separate from clarified_seqs: a contradiction is a
+        # genuine ambiguity (blocking), an omission is provenance capture
+        # (non-blocking) -- keeping their "already asked" tracking apart keeps
+        # that distinction visible in the code, not just in decision_ledger.
+        self.elicited_omission_seqs: list = []
         self.focus_clarified: bool = False
         # The engineer's answer to "how did you know the issue was here?"
         # (see /learning/clarify's focus branch). Kept separately from the
@@ -224,6 +231,7 @@ class WorkingState:
         # deliberately survives) — starting the teaching over should let the
         # same question be asked again rather than silently suppressing it.
         self.clarified_seqs = []
+        self.elicited_omission_seqs = []
         self.focus_clarified = False
         self.focus_reason = ""
 

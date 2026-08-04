@@ -100,6 +100,38 @@ class LearningPipelineTests(unittest.TestCase):
         self.assertNotIn("true_positive", result)
         self.assertFalse(any("TP" in check["note"] or "FP" in check["note"] for check in result["checks"]))
 
+    def test_an_include_keyword_labeled_only_by_counterexamples_is_reported_as_over_matching(self):
+        # The E/X labels are attributed per keyword at annotate time, so
+        # "every labeled line this keyword matched was called wrong" is a
+        # measured per-keyword signal -- not an inferred or LLM-judged one.
+        # It is reported, never auto-moved into `exclusive`.
+        result = assess_teaching_evidence(
+            {"keywords": ["disconnect", "assoc"], "exclusive": []},
+            {
+                "filter_stats": {"per_filter": [
+                    {"text": "disconnect", "hits": 2, "unique_hits": 2, "dropped": None},
+                    {"text": "assoc", "hits": 3, "unique_hits": 3, "dropped": None},
+                ]},
+                "operation_journal": "#1 added include",
+                "unreasoned_ops": [],
+                "log_annotations": [
+                    {"line_no": 1, "label": "counterexample", "text": "benign",
+                     "matched_keywords": [{"text": "Disconnect", "excluding": False}]},
+                    {"line_no": 2, "label": "counterexample", "text": "benign too",
+                     "matched_keywords": [{"text": "disconnect", "excluding": False}]},
+                    {"line_no": 3, "label": "evidence", "text": "real failure",
+                     "matched_keywords": [{"text": "assoc", "excluding": False}]},
+                ],
+            },
+        )
+        self.assertEqual(result["over_matching_keywords"], ["disconnect"])
+        by_text = {entry["text"]: entry for entry in result["keyword_labels"]}
+        self.assertEqual(by_text["disconnect"], {"text": "disconnect", "evidence": 0, "counterexample": 2})
+        self.assertEqual(by_text["assoc"], {"text": "assoc", "evidence": 1, "counterexample": 0})
+        # Reported only -- the draft's exclusive list is left untouched.
+        check = next(c for c in result["checks"] if c["name"] == "Include keywords labeled only by counterexamples")
+        self.assertEqual(check["status"], "warn")
+
     def test_annotation_evidence_coverage_is_deterministic_not_llm_judged(self):
         # coverage.evidence must move purely from log_annotations, regardless
         # of whatever score the (fake) LLM itself returned for the other
@@ -601,10 +633,12 @@ class ClarifyRoutePolicyTests(unittest.TestCase):
             pass
         return ops, baseline
 
-    def test_an_omission_alone_never_produces_a_question(self):
+    def test_an_omission_produces_a_non_blocking_elicitation_and_is_not_re_asked(self):
         """Omissions have no competing reading to discriminate between, so
-        asking would be low-information-gain prompting (GATE). They belong to
-        the Steps panel's passive hint instead."""
+        they don't get a discriminating (blocking) contradiction-style
+        question — but they ARE elicited as open, non-blocking provenance
+        capture (this is the highest-value knowledge-distillation target:
+        previously these only surfaced as the Steps panel's passive hint)."""
         from services import session_store
         client = self.app.test_client()
         with client.session_transaction() as sess:
@@ -616,9 +650,16 @@ class ClarifyRoutePolicyTests(unittest.TestCase):
         st.baseline_op_seq = 0
         st.operations = [{"seq": 1, "action": "add_include", "text": "BG_SCAN", "reason": "",
                           "effect": {"unique_hits": 40}, "excluding": False, "red_flags": []}]
-        resp = client.post("/learning/clarify", json={})
-        self.assertEqual(resp.status_code, 200)
-        self.assertIsNone(resp.get_json()["question"])
+
+        first = client.post("/learning/clarify", json={}).get_json()
+        self.assertEqual(first["kind"], "omission")
+        self.assertIsNotNone(first["question"])
+        decision = next(d for d in first["decision_ledger"]["items"] if d["id"] == first["decision_id"])
+        self.assertFalse(decision["blocking"])
+
+        # Same omission is not re-elicited on the next filter run.
+        second = client.post("/learning/clarify", json={}).get_json()
+        self.assertIsNone(second["question"])
 
     def test_a_contradiction_produces_one_question_and_is_not_re_asked(self):
         from services import session_store

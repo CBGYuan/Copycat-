@@ -64,8 +64,9 @@ precisely (not overclaimed) in [Paper grounding](#paper-grounding) below.
   opposite things — picking for you would be a guess about intent. The point
   isn't saved typing: the selected text is verbatim, and retyped keywords are
   where `TASK_DISCONNECT` quietly becomes `TASK_DISCONECT` and matches nothing.
-- **Focus a time window** — a labeled "Focus" button (with a custom tooltip
-  that shows immediately on hover, not the slow native one) opens a popover
+- **Focus a time window** — a labeled "Issue Time" button (with a custom
+  tooltip that shows immediately on hover, not the slow native one) opens a
+  popover
   with a custom 24-hour time picker and a ±minutes field; it seeds itself from
   the first visible log line, with a shortcut to re-seed from whatever line is
   currently on screen. The picker is three independently-scrollable HH/MM/SS
@@ -124,6 +125,12 @@ precisely (not overclaimed) in [Paper grounding](#paper-grounding) below.
   column (`2E/1X`) is the one authoritative view; the Steps panel's own E/X
   counts are explicitly an indirect, secondary cross-reference, never claimed
   as "this step caused this evidence."
+- **Over-matching signal** — because attribution is per keyword, an *include*
+  keyword whose only labels are `X` means every line it was labeled on was
+  called wrong. That keyword's `Ev` cell turns red, and
+  `assess_teaching_evidence` reports it as `over_matching_keywords` with a
+  `warn` check. It is reported, never auto-applied: whether the term it drags
+  in belongs in `exclusive` is the engineer's call, not the workbench's.
 
 ### 2. Skill-Building Chat
 - Claude-style layout: your messages sit in a right-aligned bubble; the
@@ -153,11 +160,17 @@ precisely (not overclaimed) in [Paper grounding](#paper-grounding) below.
     measurable (unique hits, survivor delta), so exploring a filter list
     checkbox-by-checkbox never triggers anything.
   - **Omission** — you added something the baseline never mentioned. This is
-    a provenance gap, not an ambiguity, so it is **never** turned into a
-    question; it lights up the 🎓 hint in the Steps panel instead.
-- **Only a contradiction becomes a question**, and only once per edit. The
-  question must discriminate between two concrete readings that predict
-  different observable behavior — never a generic "is this temporary or
+    a provenance gap, not an ambiguity, so it never gets a *discriminating*
+    question (there is no competing reading to discriminate between).
+    Instead it gets an open, **non-blocking** provenance-elicitation question
+    — "why does this matter, does it generalize?" — since this is the
+    highest-value target for distilling what you know into the skill; the
+    Steps panel's 🎓 hint still lights up too, for whenever you'd rather
+    explain it there instead.
+- **A contradiction or an omission becomes a question**, and only once per
+  edit. A contradiction's question must discriminate between two concrete
+  readings that predict different observable behavior — never a generic "is
+  this temporary or
   permanent?" template. (See [Paper grounding](#paper-grounding) —
   ClarifyGPT's consistency check, GATE's discriminating-question framing, and
   AutoManual's provenance-vs-ambiguity distinction.)
@@ -220,8 +233,10 @@ Edit-Skill modal.
 
 - **Teaching evidence assessment** (`assess_teaching_evidence`) — reports
   which keywords were actually exercised on the log, whether every material
-  edit has an engineer explanation, and how many counterexamples were
-  flagged. This is provenance for you to review, explicitly **not** a
+  edit has an engineer explanation, how many counterexamples were flagged,
+  and the per-keyword E/X tally (`keyword_labels`) including any include
+  keyword backed by counterexamples alone. This is provenance for you to
+  review, explicitly **not** a
   correctness score — see the [Responsibility boundary](#responsibility-boundary-copycat-is-a-teaching-workbench-not-a-validator)
   above. The same data is packaged (`build_validation_packet`) for eventual
   hand-off to `wireless_ce_avatar`, and there's a slot to store whatever
@@ -547,11 +562,12 @@ python -m unittest discover -s tests -v
 99 tests, no LLM or network access required. They cover:
 
 - **Baseline + divergence** — contradictions vs omissions, materiality
-  checked before opinion, pre-baseline edits excluded, an omission alone
-  never producing a question, a contradiction asked once then suppressed,
-  effect attribution withheld across a focus-window change (a focused run and
-  an unfocused one count different populations), and an Update Baseline
-  delta correctly reporting what changed between two reads.
+  checked before opinion, pre-baseline edits excluded, an omission producing
+  a non-blocking open elicitation question (never a blocking, discriminating
+  one) that isn't re-asked once elicited, a contradiction asked once then
+  suppressed, effect attribution withheld across a focus-window change (a
+  focused run and an unfocused one count different populations), and an
+  Update Baseline delta correctly reporting what changed between two reads.
 - **Decision ledger** — it stays a session-only sidecar (never touches the
   skill YAML), de-duplicates a repeated question by `source_key`, and
   resolving/deferring updates status without losing the original question.
@@ -579,7 +595,9 @@ python -m unittest discover -s tests -v
   write path refuse instead of erasing it.
 - **Teaching evidence** — `assess_teaching_evidence` reports counterexamples
   without scoring correctness, deterministic (non-LLM) evidence-coverage
-  computation, filter-identity-based E/X attribution, and that a session
+  computation, filter-identity-based E/X attribution, an include keyword
+  labeled only by counterexamples being reported as over-matching (reported,
+  never auto-moved into `exclusive`), and that a session
   reset clears case-specific teaching state.
 
 ## Setup

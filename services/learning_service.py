@@ -513,6 +513,56 @@ Output ONLY this JSON object, no markdown fences, no extra prose:
 }
 """
 
+# Asked once per still-unexplained MATERIAL omission — a keyword the baseline
+# never had a stance on at all (utils.divergence's OMISSION case). This is
+# deliberately NOT the ambiguity gate: there is no competing reading to
+# discriminate between, so the question is framed as open provenance capture
+# (AutoManual), not as a choice between two behaviours (ClarifyGPT). This is
+# the single highest-value elicitation target for distilling the engineer's
+# knowledge into the skill: a contradiction is already asked every time
+# (below), but an omission — something the engineer knows that was never in
+# contention — used to stay silent unless the engineer happened to click the
+# Steps panel's passive 🎓 hint. Recorded non-blocking (see learning_routes'
+# /clarify): capturing it is valuable, but nothing about it needs resolving
+# before Export the way a genuine contradiction does.
+CLARIFY_OMISSION_SYS_PROMPT = """\
+You are a senior Wi-Fi/BT debug expert. The engineer added a keyword to the
+filter that your earlier baseline read never considered at all — this is not
+a disagreement, just something you didn't know to look for.
+
+Ask exactly ONE question that captures WHY it matters and whether it
+generalizes, so a reusable skill can be written from the answer:
+
+ - Ground it in the specific keyword and its MEASURED effect below, not in
+   generalities.
+ - The scope axis is the point: does this keyword matter for THIS kind of
+   log ALWAYS, or only in the current scenario? A reusable skill cannot be
+   written without that distinction.
+ - Do NOT frame this as a disagreement and do NOT ask the engineer to defend
+   the choice — you have no competing view here. You are only capturing
+   knowledge you didn't have.
+ - No preamble, no apology, no restating the situation back to them. One
+   question, in an engineer's register.
+ - LENGTH: the question itself must be at most 25 words and a single
+   sentence, and each option at most 12 words — a paragraph-length question
+   gets skipped rather than answered, which costs you the knowledge entirely.
+
+Question `type` is either:
+ - "choice": you can enumerate the realistic scope answers — give 2-4
+   concrete options (e.g. "always relevant" / "only in this scenario").
+ - "open": genuinely open-ended, no small fixed set of sensible answers.
+
+Also provide the answer you recommend from the currently available evidence.
+It is advice, not an automatic decision; use an empty recommendation when the
+evidence genuinely cannot favor one branch.
+
+Output ONLY this JSON object, no markdown fences, no extra prose:
+{
+  "question": {"question": "<one question>", "type": "choice|open", "options": ["<scope answer A>", "<B>"], "recommended_answer": "<recommended option/answer or empty>", "recommendation_reason": "<one short evidence-grounded reason or empty>"},
+  "captures": "<the one short sentence of skill knowledge this answer will pin down>"
+}
+"""
+
 # Asked once when the engineer sets an issue-time focus window. Not a
 # contradiction — a focus doesn't change what any keyword means — but "how did
 # you know to look at 09:41?" is often the most transferable thing in a whole
@@ -548,13 +598,20 @@ Output ONLY this JSON object, no markdown fences, no extra prose:
 
 
 def clarify_divergence(llm_helper, target: Dict, use_prior_knowledge: bool = False) -> Optional[Dict]:
-    """One discriminating question about ONE divergence (utils.divergence).
+    """One question about ONE divergence (utils.divergence).
 
-    `target` is either
+    `target` is one of
       {"kind": "contradiction", "text", "action_phrase", "effect_phrase",
        "baseline_stance", "baseline_why", "domain"}
-    or
+      {"kind": "omission", "text", "action_phrase", "effect_phrase", "domain"}
       {"kind": "focus", "center", "window_min", "baseline_hint", "domain"}
+
+    A contradiction gets a DISCRIMINATING question (two competing readings,
+    pick one) — the ambiguity-gate case. An omission has no competing
+    reading (the baseline never had a stance), so it gets an open
+    PROVENANCE-ELICITATION question instead — capturing knowledge the
+    baseline lacked, not resolving a disagreement (see CLARIFY_OMISSION_SYS_
+    PROMPT). Both still ground the question in the same measured effect.
 
     Returns {"question": {...}, "captures": str} or None if the model produced
     nothing usable — None is a normal outcome the caller must handle by simply
@@ -573,6 +630,15 @@ def clarify_divergence(llm_helper, target: Dict, use_prior_knowledge: bool = Fal
                          f"  {target['baseline_hint']}")
         else:
             lines.append("Your earlier read had no proposal for locating the issue moment.")
+    elif target.get("kind") == "omission":
+        system = CLARIFY_OMISSION_SYS_PROMPT
+        lines = [
+            f"Domain: {(target.get('domain') or 'wifi').upper()}",
+            f"Keyword: \"{target.get('text')}\"",
+            "Your earlier read never had a stance on this keyword either way — it simply wasn't considered.",
+            f"What the engineer just did: {target.get('action_phrase')}",
+            f"Measured effect of that action: {target.get('effect_phrase') or '(no effect measured)'}",
+        ]
     else:
         system = CLARIFY_SYS_PROMPT
         stance = target.get("baseline_stance")
@@ -1284,6 +1350,36 @@ def synthesize_skill_draft(llm_helper, context: Dict, qa_pairs: List[Dict],
     return {"drafts": drafts}
 
 
+def keyword_label_counts(annotations) -> Dict[str, Dict]:
+    """Tally each E/X label back onto the filter keyword(s) that matched that
+    line, keyed by ``"i:"``/``"x:"`` + casefolded text so an include and an
+    exclude spelled the same never merge.
+
+    The attribution is measured, not inferred: annotate_line stores the
+    matching keywords on the annotation itself (tat_parser.
+    matched_keywords_for_line).
+    """
+    counts: Dict[str, Dict] = {}
+    for item in annotations or []:
+        label = item.get("label")
+        if label not in ("evidence", "counterexample"):
+            continue
+        for keyword in item.get("matched_keywords") or []:
+            if isinstance(keyword, dict):
+                text = str(keyword.get("text") or "").strip()
+                excluding = bool(keyword.get("excluding"))
+            else:
+                text, excluding = str(keyword).strip(), False
+            if not text:
+                continue
+            key = ("x:" if excluding else "i:") + text.casefold()
+            entry = counts.setdefault(
+                key, {"text": text, "excluding": excluding, "evidence": 0, "counterexample": 0}
+            )
+            entry[label] += 1
+    return counts
+
+
 def assess_teaching_evidence(draft: Dict, context: Dict) -> Dict:
     """Summarize the teaching evidence behind a candidate skill draft.
 
@@ -1350,6 +1446,31 @@ def assess_teaching_evidence(draft: Dict, context: Dict) -> Dict:
                 "None flagged yet. Not required, but worth checking for edge cases before Save.",
     })
 
+    # An include keyword the engineer only ever labeled X is the one signal
+    # here that points at a specific keyword rather than at the session: every
+    # line it was labeled on was called wrong. Reported, never auto-applied —
+    # deciding it should become an exclude is the engineer's call.
+    label_counts = keyword_label_counts(annotations)
+    keyword_labels = []
+    over_matching = []
+    for value in keywords:
+        entry = label_counts.get("i:" + value.casefold()) or {}
+        evidence_n = int(entry.get("evidence") or 0)
+        counterexample_n = int(entry.get("counterexample") or 0)
+        keyword_labels.append({
+            "text": value, "evidence": evidence_n, "counterexample": counterexample_n,
+        })
+        if counterexample_n and not evidence_n:
+            over_matching.append(value)
+    checks.append({
+        "name": "Include keywords labeled only by counterexamples",
+        "status": "warn" if over_matching else "info",
+        "note": (f"{', '.join(over_matching)} — every labeled line this keyword matched was "
+                 "called a counterexample, so it may be over-matching. Consider narrowing it "
+                 "or moving the term it drags in into `exclusive`.") if over_matching else
+                "No include keyword is backed by counterexamples alone.",
+    })
+
     return {
         "status": "assessed",
         "summary": "Teaching evidence recorded for this session. Correctness is validated externally.",
@@ -1358,6 +1479,8 @@ def assess_teaching_evidence(draft: Dict, context: Dict) -> Dict:
         "counterexample_count": len(counterexamples),
         "positive_keywords": used,
         "effective_excludes": effective_excludes,
+        "keyword_labels": keyword_labels,
+        "over_matching_keywords": over_matching,
         "external_validation": "not_run",
         "limitations": ["TP/FP/FN correctness is only ever measured by running this skill in wireless_ce_avatar."],
     }

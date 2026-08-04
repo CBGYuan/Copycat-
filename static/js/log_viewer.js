@@ -183,15 +183,22 @@ function renderFilters() {
         );
         const evN = filterAnn.filter(a => a.label === 'evidence').length;
         const cxN = filterAnn.filter(a => a.label === 'counterexample').length;
-        const evidTitle = (evN || cxN)
+        // Only-X on an include keyword means every line it was labeled on was
+        // called wrong — the one per-keyword over-matching signal the labels
+        // can measure (see learning_service.assess_teaching_evidence).
+        const overMatching = !f.excluding && cxN > 0 && evN === 0;
+        const evidTitle = overMatching
+            ? `${cxN} counterexample(s) and no evidence — this keyword may be over-matching`
+            : (evN || cxN)
             ? `${evN} evidence line(s), ${cxN} counterexample(s) labeled for this keyword`
             : 'No labeled evidence yet';
         const evidText = (evN || cxN) ? `${evN}E/${cxN}X` : '';
+        const evidCls = 'c-evid' + (overMatching ? ' is-over-matching' : '');
         html += `<div class="tat-filter-row">
             <span class="c-mod"><input type="checkbox" id="f_${i}" ${f.enabled ? 'checked' : ''} onchange="toggleFilter(${i}, this.checked)"><label for="f_${i}" class="tat-filter-letter">${letterLabel(i)}</label></span>
             <span class="c-pat"><span class="${patClass}" style="${patStyle}">${badge}${escapeHtml(f.text)}</span></span>
             <span class="c-hit">${hits}</span>
-            <span class="c-evid" title="${evidTitle}">${evidText}</span>
+            <span class="${evidCls}" title="${evidTitle}">${evidText}</span>
             <span class="c-del"><button class="btn-remove-filter" onclick="removeFilter(${i})" title="Remove">&times;</button></span>
         </div>`;
     });
@@ -2598,7 +2605,8 @@ function renderClarifyCard(d) {
     const box = document.getElementById('chatBox');
     const card = el('div', 'chat-question-card clarify-card mb-2');
     card.appendChild(el('div', 'chat-q-progress',
-        d.kind === 'focus' ? '🎯 About the time you focused on'
+        d.kind === 'focus' ? '🎯 About the issue time you selected'
+        : d.kind === 'omission' ? `💡 New knowledge about "${d.keyword}"`
                            : `🔍 About "${d.keyword}"`));
     card.appendChild(el('div', 'chat-q-text', q.question));
     appendRecommendation(card, q);

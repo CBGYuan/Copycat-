@@ -516,7 +516,7 @@ def baseline():
 
 @learning_bp.route("/clarify", methods=["POST"])
 def clarify():
-    """Turn ONE divergence into ONE discriminating question.
+    """Turn ONE divergence into ONE question.
 
     The decision of WHETHER to interrupt was already made, deterministically
     and without a model, by utils.divergence.detect (measured materiality
@@ -525,16 +525,28 @@ def clarify():
     phrasing it. If nothing qualifies it returns question=None and costs
     nothing — the common case on an ordinary filter edit.
 
-    Only CONTRADICTIONS and the focus window are asked about. Omissions are
-    deliberately never asked here: with no competing reading there is nothing
-    to discriminate between, so a question would be low-information-gain
-    prompting. Those surface as the Steps panel's passive 🎓 hints instead.
+    CONTRADICTIONS, material OMISSIONS, and the focus window are all eligible
+    — but not in the same voice, and not with the same stakes:
 
-    Contradictions are answered through /learning/answer_step_question, whose
-    existing behaviour closes the loop exactly right — recording the answer as
-    the operation's `reason` both captures the knowledge for export and
-    removes the edit from the unexplained set, so the same divergence cannot
-    come back.
+      - CONTRADICTION — two competing readings, so this gets a DISCRIMINATING
+        question (ambiguity gate) and BLOCKS Export until resolved (a genuine
+        specification decision — see decision_ledger's `blocking`).
+      - OMISSION — the baseline never had a stance, so there is nothing to
+        discriminate between; asking "which is right" here would be
+        low-information-gain prompting. Instead this gets an open PROVENANCE
+        question ("why does this matter, does it generalize?") and is
+        explicitly NON-BLOCKING — capturing this knowledge is valuable, but
+        Export shouldn't nag over something that was never ambiguous. This is
+        the single highest-value elicitation target for distilling the
+        engineer's tacit knowledge into the skill: previously an omission
+        only surfaced as the Steps panel's passive 🎓 hint, so it was skipped
+        far more often than it was explained.
+
+    Both are answered through /learning/answer_step_question, whose existing
+    behaviour closes the loop exactly right — recording the answer as the
+    operation's `reason` both captures the knowledge for export and removes
+    the edit from the unexplained set, so the same divergence cannot come
+    back.
     """
     llm_helper = app_config.llm_helper
     if not llm_helper or not llm_helper.is_ready:
@@ -545,8 +557,8 @@ def clarify():
     domain = (state.log_domain or "wifi").lower()
 
     # Contradictions first: they carry two concrete competing readings, which
-    # is strictly more information than the focus question. Most recent first
-    # — it's the edit the engineer still has in their head.
+    # is strictly more information than an omission or the focus question.
+    # Most recent first — it's the edit the engineer still has in their head.
     target = None
     pending = [c for c in report["contradictions"] if c["seq"] not in state.clarified_seqs]
     if pending:
@@ -558,7 +570,22 @@ def clarify():
             "baseline_stance": c["baseline_stance"], "baseline_why": c["baseline_why"],
             "seq": c["seq"],
         }
-    elif report["focus"] and not state.focus_clarified:
+
+    # Then material omissions — genuinely new knowledge the baseline never
+    # had, so it outranks the focus question (which the baseline DID have a
+    # locating guess for).
+    if not target:
+        pending_omissions = [o for o in report["omissions"] if o["seq"] not in state.elicited_omission_seqs]
+        if pending_omissions:
+            o = sorted(pending_omissions, key=lambda x: x["seq"])[-1]
+            target = {
+                "kind": "omission", "domain": domain, "text": o["text"],
+                "action_phrase": operation_journal._ACTION_VERB.get(o["action"], o["action"]),
+                "effect_phrase": o["effect_phrase"],
+                "seq": o["seq"],
+            }
+
+    if not target and report["focus"] and not state.focus_clarified:
         target = {"kind": "focus", "domain": domain, **report["focus"]}
 
     if not target:
@@ -585,15 +612,21 @@ def clarify():
         recommendation_reason=result["question"].get("recommendation_reason"),
         step=target.get("seq", "all"),
         source_key=(
-            f"contradiction:{target.get('seq')}"
-            if target["kind"] == "contradiction"
+            f"contradiction:{target.get('seq')}" if target["kind"] == "contradiction"
+            else f"omission:{target.get('seq')}" if target["kind"] == "omission"
             else f"focus:{state.focus_center_iso}:{state.focus_window_min}"
         ),
+        # An omission is provenance capture, not a specification ambiguity —
+        # see the docstring above — so it must not block Export the way a
+        # genuine contradiction does.
+        blocking=(target["kind"] != "omission"),
     )
 
     seq = target.get("seq")
     if target["kind"] == "focus":
         state.focus_clarified = True
+    elif target["kind"] == "omission":
+        state.elicited_omission_seqs.append(seq)
     else:
         state.clarified_seqs.append(seq)
 
