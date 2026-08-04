@@ -178,16 +178,22 @@ precisely (not overclaimed) in [Paper grounding](#paper-grounding) below.
   **delta from the previous read** — what newly counts as load-bearing or
   noise — so re-baselining after a big filter change is legible rather than a
   silent swap of one opinion for another.
-- **Interview mode** — a Quiet / Smart / Grill selector, tucked behind a
-  collapsible **Refinement** row under the chat header (a sliders icon showing
-  a live summary, e.g. "Smart · 2/5") rather than sitting permanently in the
-  primary toolbar — this is a strategy setting changed rarely, not a
-  per-message control. *Smart* is the behavior described above (a question
-  only on measurable divergence). *Quiet* never interrupts automatically —
-  useful when you'd rather filter uninterrupted and answer everything at the
-  end. *Grill* marks every open question **blocking** and walks them one at a
-  time, for a final pass before Export where nothing gets skipped by
-  accident.
+- **Interview mode** — an Ask / Quiet selector, tucked behind a collapsible
+  **Refinement** row under the chat header (a sliders icon showing a live
+  summary, e.g. "Ask · 2/5") rather than sitting permanently in the primary
+  toolbar — this is a strategy setting changed rarely, not a per-message
+  control. *Ask* is the behavior described above: at most one question, only
+  on measurable divergence, taking the highest-impact unresolved branch.
+  *Quiet* never interrupts automatically — useful when you'd rather filter
+  uninterrupted and answer everything at the end — and is also genuinely
+  cheaper, because it drops the structured-question schema from every chat
+  turn's system prompt *and* suppresses the auto-clarify call entirely.
+  Whether an unresolved decision is flagged before Export is deliberately
+  **not** part of this setting: that check is unconditional (see the decision
+  ledger below), because whether a question was asked and whether an asked
+  question went unanswered are two different concerns. An earlier design tied
+  them together as Smart/Grill modes, which meant the default mode exported
+  with open decisions and no warning at all.
 - **Decision ledger** — every question the interview asks (baseline
   contradiction, per-step follow-up, clarification) is logged as one entry —
   open / resolved / deferred — in a session-only ledger, reachable from a
@@ -196,7 +202,11 @@ precisely (not overclaimed) in [Paper grounding](#paper-grounding) below.
   into a **review-only spec** (scope, triggers, required evidence, exclusions,
   resolved vs. still-open decisions) shown alongside the draft, so what you
   decided and what you skipped is visible before you save, without changing
-  Avatar's established file shape.
+  Avatar's established file shape. Each entry carries its own `blocking` flag
+  — a real specification decision blocks (i.e. warns) by default, an optional
+  teach-step follow-up explicitly does not — so Export warns on genuinely
+  unresolved decisions in **every** mode, without an optional follow-up
+  nagging you about nothing.
 - Sending a chat message before a baseline exists no longer requires one —
   it shows a **"Send without a baseline?"** confirmation instead of a hard
   block, since chatting freely is low-stakes compared to teaching a step or
@@ -440,7 +450,7 @@ services/
   skill_memory.py              Per-skill measured usage + coverage gaps,
                                  sidecar json, never in the skills YAML
   decision_ledger.py            Session-only ledger of interview questions +
-                                 answers (Quiet/Smart/Grill), folded into a
+                                 answers (Ask/Quiet), folded into a
                                  review-only spec at Export — never written
                                  into the skill YAML
   learning_service.py          Interview prompts (Ambiguity Gate), readiness

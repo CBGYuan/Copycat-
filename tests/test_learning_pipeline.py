@@ -168,7 +168,6 @@ class LearningPipelineTests(unittest.TestCase):
 
     def test_decision_ledger_is_session_sidecar_and_resolves_answers(self):
         state = WorkingState()
-        state.interview_mode = "grill"
         item = decision_ledger.record_question(
             state,
             source="chat",
@@ -195,6 +194,82 @@ class LearningPipelineTests(unittest.TestCase):
             ["name", "description", "keywords", "exclusive", "expert_rules"],
         )
         self.assertEqual(spec["resolved_decisions"][0]["answer"], "Only here")
+
+
+class InterviewModeTests(unittest.TestCase):
+    """Ask/Quiet is ONE axis: whether the interview asks. Whether an already
+    asked question blocks Export is a property of the question, not the mode
+    — the merge of the old Smart/Grill pair rests on that separation."""
+
+    def test_legacy_smart_and_grill_both_normalize_to_ask(self):
+        """Sessions and stored state predating the merge must not fall back to
+        the default via the unknown-value path — they mean 'ask'."""
+        self.assertEqual(decision_ledger.normalize_mode("smart"), "ask")
+        self.assertEqual(decision_ledger.normalize_mode("grill"), "ask")
+        self.assertEqual(decision_ledger.normalize_mode("GRILL"), "ask")
+
+    def test_unknown_and_empty_modes_fall_back_to_ask(self):
+        self.assertEqual(decision_ledger.normalize_mode("nonsense"), "ask")
+        self.assertEqual(decision_ledger.normalize_mode(""), "ask")
+        self.assertEqual(decision_ledger.normalize_mode(None), "ask")
+        self.assertEqual(decision_ledger.normalize_mode("quiet"), "quiet")
+
+    def test_a_real_decision_blocks_in_every_mode(self):
+        """The defect the merge fixes: under the old Smart default, a genuine
+        unresolved decision carried blocking=False and Export warned about
+        nothing."""
+        for mode in ("ask", "quiet"):
+            with self.subTest(mode=mode):
+                state = WorkingState()
+                state.interview_mode = mode
+                item = decision_ledger.record_question(
+                    state, source="chat", question="Global or scenario-specific?",
+                )
+                self.assertTrue(item["blocking"])
+                self.assertEqual(decision_ledger.payload(state)["blocking"], 1)
+
+    def test_an_optional_follow_up_never_blocks(self):
+        state = WorkingState()
+        item = decision_ledger.record_question(
+            state, source="step_follow_up", question="Worth noting the retry count?",
+            blocking=False,
+        )
+        self.assertFalse(item["blocking"])
+        self.assertEqual(decision_ledger.payload(state)["blocking"], 0)
+
+    def test_deferring_clears_blocking_but_keeps_the_entry_visible(self):
+        state = WorkingState()
+        item = decision_ledger.record_question(
+            state, source="chat", question="Does this exclusion generalize?",
+        )
+        decision_ledger.defer(state, item["id"])
+        payload = decision_ledger.payload(state)
+        self.assertEqual(payload["blocking"], 0)
+        self.assertEqual(payload["deferred"], 1)
+        self.assertEqual(len(payload["items"]), 1)
+
+    def test_switching_mode_does_not_downgrade_an_open_decision(self):
+        """Mode changes used to retroactively rewrite every open item's
+        blocking flag, so flipping to the lenient mode silently erased a
+        pending decision's weight."""
+        from app import create_app
+        from services import session_store
+
+        app = create_app()
+        client = app.test_client()
+        with client.session_transaction() as sess:
+            sess["wsid"] = "mode-switch"
+        session_store._STORE["mode-switch"] = state = WorkingState()
+        decision_ledger.record_question(
+            state, source="chat", question="Is the threshold 20% or 30%?",
+        )
+
+        resp = client.post("/learning/set_mode", json={"interview_mode": "quiet"})
+
+        self.assertEqual(resp.status_code, 200)
+        payload = resp.get_json()
+        self.assertEqual(payload["interview_mode"], "quiet")
+        self.assertEqual(payload["decision_ledger"]["blocking"], 1)
 
 
 class BaselineTests(unittest.TestCase):

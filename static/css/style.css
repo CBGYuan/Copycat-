@@ -501,6 +501,11 @@ a.btn-primary {
    lands on the time-matched line after clicking an event. */
 .tat-log-row.is-time-hit { background: #fff3bf !important; outline: 1px solid #f0c000; }
 
+/* The event row's UTC time shifted into the driver log's own frame — lets the
+   engineer eyeball whether a sync is landing somewhere reasonable without
+   doing the offset math themselves. */
+.evt-time-local { font-size: 0.78em; color: var(--muted); }
+
 /* ===== System Event Log panel (collapsible, above the driver log) ===== */
 .evt-section {
   border-bottom: 1px solid var(--border);

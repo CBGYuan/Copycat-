@@ -107,10 +107,12 @@ class WorkingState:
         self.chat_history: list = []       # [{"role": "user"/"assistant", "content": str}]
         self.learning_questions: list = []
         self.learning_answers: list = []
-        # Optional interview policy. "smart" preserves the established
-        # workflow; "quiet" never interrupts automatically; "grill" walks
-        # unresolved skill decisions one at a time.
-        self.interview_mode: str = "smart"
+        # Interview policy — one axis only: "ask" interrupts for meaningful
+        # new or divergent knowledge, "quiet" never interrupts and skips the
+        # structured-question schema and the auto-clarify call entirely.
+        # Whether an unresolved decision warns before Export is NOT part of
+        # this; it is unconditional (see decision_ledger.VALID_MODES).
+        self.interview_mode: str = "ask"
         # Session-only sidecar. Never serialized into Avatar's skill YAML.
         self.decision_ledger: list = []
         self.decision_next_id: int = 0

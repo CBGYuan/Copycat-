@@ -1,4 +1,6 @@
-from flask import Blueprint, request, jsonify
+import json
+
+from flask import Blueprint, Response, request, jsonify, stream_with_context
 
 from configs.global_configs import app_config
 from services import session_store, decision_ledger
@@ -123,17 +125,14 @@ def _build_system_prompt(state) -> str:
         )
         if state.interview_mode != "quiet":
             parts.append(PROACTIVE_RESPONSE_SCHEMA)
-        if state.interview_mode == "grill":
+        if state.interview_mode == "ask":
             parts.append(
-                "INTERVIEW MODE — GRILL: continue down the single highest-impact "
-                "unresolved branch that would change scope, triggers, keywords, "
+                "INTERVIEW MODE — ASK: interrupt only for meaningful new or "
+                "divergent knowledge; ordinary agreement produces no question. "
+                "When you do ask, take the single highest-impact unresolved "
+                "branch — the one that would change scope, triggers, keywords, "
                 "exclusions, or an expert rule. A material omission may warrant "
                 "clarification even when it is not a contradiction. Ask only ONE."
-            )
-        elif state.interview_mode == "smart":
-            parts.append(
-                "INTERVIEW MODE — SMART: interrupt only for meaningful new or "
-                "divergent knowledge; ordinary agreement produces no question."
             )
         else:
             parts.append(
@@ -291,6 +290,102 @@ def send():
                     "step_tag": step_tag, "usage": {
         "last": llm_helper.last_usage, "session": llm_helper.session_usage,
     }})
+
+
+@chatbot_bp.route("/send_stream", methods=["POST"])
+def send_stream():
+    """Same contract as /send, but as a cancellable streaming response: the
+    engineer's Stop button aborts the fetch, which disconnects this request,
+    which unwinds llm_helper.chat_stream()'s generator and closes the
+    provider connection early — an actual stop, not just the UI giving up on
+    waiting for an answer it discards. The frontend doesn't render partial
+    text (the JSON-clarification schema below can't be shown mid-stream);
+    it only uses the ability to end the request early. See sendMsg() /
+    stopChatSend() in log_viewer.js.
+
+    Streamed as one SSE-style `event: done` frame carrying the exact same
+    JSON shape /send returns, so the two share one response-handling path
+    on the frontend."""
+    data = request.get_json(silent=True) or {}
+    message = (data.get("message") or "").strip()
+    if not message:
+        return jsonify({"success": False, "message": "Empty message"}), 400
+    step_tag = data.get("step_tag")
+    if not isinstance(step_tag, int) and step_tag != "all":
+        step_tag = "all"
+
+    state = session_store.get_state()
+    if not state.has_current_baseline() and data.get("allow_without_baseline") is not True:
+        return jsonify({
+            "success": False,
+            "baseline_required": True,
+            "message": "Set the comparison baseline first, or explicitly allow this one message.",
+        }), 409
+
+    llm_helper = app_config.llm_helper
+    if not llm_helper or not llm_helper.is_ready:
+        return jsonify({
+            "success": False,
+            "message": "LLM is not configured yet. See README.md → 'Set up LLM'.",
+        }), 503
+
+    state.chat_history.append({"role": "user", "content": message, "step": step_tag})
+    decision_ledger.resolve(
+        state,
+        data.get("decision_id"),
+        data.get("decision_answer") or message,
+    )
+    api_messages = [{"role": m["role"], "content": m["content"]} for m in state.chat_history[-20:]]
+    system_content = _build_system_prompt(state)
+    expect_structured = state.has_current_baseline() and state.interview_mode != "quiet"
+
+    def generate():
+        chunks = []
+        try:
+            for delta in llm_helper.chat_stream(messages=api_messages, system_content=system_content):
+                chunks.append(delta)
+                yield ": keep-alive\n\n"  # no partial text is rendered; this just keeps the connection open/flushed
+        except GeneratorExit:
+            # The engineer clicked Stop (or navigated away). Best-effort:
+            # keep whatever text had already arrived rather than silently
+            # dropping it, clearly marked as cut short.
+            partial = "".join(chunks).strip()
+            if partial:
+                state.chat_history.append({
+                    "role": "assistant", "content": partial + "\n\n_(stopped early)_", "step": step_tag,
+                })
+            raise
+        except Exception as e:
+            yield f"event: done\ndata: {json.dumps({'success': False, 'message': f'LLM call failed: {e}'})}\n\n"
+            return
+
+        raw_reply = "".join(chunks)
+        reply, clarification = _parse_chat_response(raw_reply, expect_structured=expect_structured)
+        state.chat_history.append({"role": "assistant", "content": reply, "step": step_tag})
+        if clarification:
+            item = decision_ledger.record_question(
+                state,
+                source="chat",
+                question=clarification["question"],
+                qtype=clarification["type"],
+                options=clarification["options"],
+                basis=clarification["basis"],
+                summary=clarification["summary"],
+                recommended_answer=clarification["recommended_answer"],
+                recommendation_reason=clarification["recommendation_reason"],
+                step=step_tag,
+            )
+            if item:
+                clarification["decision_id"] = item["id"]
+        meta = {
+            "success": True, "reply": reply, "clarification": clarification,
+            "decision_ledger": decision_ledger.payload(state),
+            "step_tag": step_tag,
+            "usage": {"last": llm_helper.last_usage, "session": llm_helper.session_usage},
+        }
+        yield f"event: done\ndata: {json.dumps(meta)}\n\n"
+
+    return Response(stream_with_context(generate()), mimetype="text/event-stream")
 
 
 @chatbot_bp.route("/reset", methods=["POST"])

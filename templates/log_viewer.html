@@ -333,7 +333,7 @@
                 onclick="toggleChatRefinement()" aria-expanded="false"
                 aria-controls="chatRefinementRow" title="Show interview and specification controls">
           <i class="fas fa-sliders-h"></i>
-          <span id="chatRefinementSummary">Smart · 0/0</span>
+          <span id="chatRefinementSummary">Ask · 0/0</span>
           <i id="chatRefinementChevron" class="fas fa-chevron-down chat-refinement-chevron"></i>
         </button>
         <!-- The one deliberate start of the teaching loop. The LLM's first
@@ -368,10 +368,9 @@
           <label for="interviewMode" class="chat-refinement-label">Question style</label>
           <select id="interviewMode" class="form-select form-select-sm interview-mode-select"
                   onchange="onInterviewModeChange()"
-                  title="Quiet: no automatic questions. Smart: ask only on meaningful divergence. Grill: resolve skill-affecting decision branches one at a time.">
+                  title="Ask: one high-impact question when something meaningfully diverges from the baseline. Quiet: never asks — also skips the question schema and the auto-clarify call, so it costs less. Either way, unresolved decisions are flagged before Export.">
+            <option value="ask">Ask</option>
             <option value="quiet">Quiet</option>
-            <option value="smart">Smart</option>
-            <option value="grill">Grill</option>
           </select>
           <button type="button" id="decisionBadge" class="btn btn-sm decision-ledger-btn"
                   onclick="openDecisionLedger()" title="Review specification decisions">
@@ -476,6 +475,7 @@
     url: {
       chatbot_reset: "{{ url_for('chatbot.reset') }}",
       chatbot_send: "{{ url_for('chatbot.send') }}",
+      chatbot_send_stream: "{{ url_for('chatbot.send_stream') }}",
       learning_answer_focus_clarify: "{{ url_for('learning.answer_focus_clarify') }}",
       learning_answer_step_question: "{{ url_for('learning.answer_step_question') }}",
       learning_ask_step: "{{ url_for('learning.ask_step') }}",

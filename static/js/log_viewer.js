@@ -31,8 +31,8 @@ let activeSkillKey = LV.boot.activeSkillKey;
 let activeSkillName = LV.boot.baselineSkillName;
 let currentQuestions = [];
 let currentDraft = null;
-let decisionLedger = LV.boot.decisionLedger || {mode: 'smart', items: [], open: 0, resolved: 0, deferred: 0, blocking: 0};
-let interviewMode = LV.boot.interviewMode || 'smart';
+let decisionLedger = LV.boot.decisionLedger || {mode: 'ask', items: [], open: 0, resolved: 0, deferred: 0, blocking: 0};
+let interviewMode = LV.boot.interviewMode || 'ask';
 // Fixed UTC offset (minutes) of the machine that captured the current BT log
 // (see event_log_service.find_capture_utc_offset_minutes) — null means none
 // was found, so the event<->log click-sync applies no correction. Updated
@@ -77,7 +77,21 @@ let _busy = false;
 function isBusy() { return _busy; }
 function setBusy(v) {
     _busy = v;
-    document.querySelectorAll('[data-busy-lock]').forEach(elx => { elx.disabled = v; });
+    document.querySelectorAll('[data-busy-lock]').forEach(elx => {
+        // chatSendBtn is deliberately exempted below: while busy it turns
+        // into a Stop button rather than a disabled one, so an in-flight
+        // chat response can actually be cancelled instead of just ignored.
+        if (elx.id === 'chatSendBtn') return;
+        elx.disabled = v;
+    });
+    const sendBtn = document.getElementById('chatSendBtn');
+    if (sendBtn) {
+        sendBtn.disabled = false;
+        sendBtn.classList.toggle('btn-primary', !v);
+        sendBtn.classList.toggle('btn-outline-danger', v);
+        sendBtn.setAttribute('aria-label', v ? 'Stop response' : 'Send chat message');
+        sendBtn.innerHTML = v ? '<i class="fas fa-stop"></i>' : '<i class="fas fa-paper-plane"></i>';
+    }
     // Re-apply the Baseline gate after the generic busy lock is released.
     // Otherwise setBusy(false) would enable Export even when no comparison
     // baseline exists (most visible after an allowed one-off chat send).
@@ -952,6 +966,11 @@ function setFocusUiState(focus) {
 // machine's UTC offset applied so the two are compared in one frame.
 let _evtLoaded = false, _evtOpen = false, _evtData = [], _evtLoading = false;
 let _evtOffset = 0, _evtHasMore = false, _evtTotal = 0;
+// True once per freshly-(re)loaded event log, until its first page comes
+// back — tells the next fetch to ask the server to pick the Source dropdown
+// value from what the capture actually contains (see detect_default_source_
+// filter) instead of leaving it on whatever the dropdown was last set to.
+let _evtAutoPending = true;
 const _EVT_PAGE = 300;
 
 // Show/hide + enable the event section based on domain + availability.
@@ -973,7 +992,7 @@ function updateEvtSection(domain, available, path) {
     if (path !== undefined) document.getElementById('evtPathInput').value = path || '';
     updateEvtTzBadge();
     // A freshly (re)loaded log invalidates any cached events.
-    _evtLoaded = false; _evtData = []; _evtOffset = 0;
+    _evtLoaded = false; _evtData = []; _evtOffset = 0; _evtAutoPending = true;
     if (_evtOpen && !available) _closeEvtPanel();
 }
 
@@ -1027,7 +1046,7 @@ function pickEventLog() {
             document.getElementById('evtPathInput').value = d.event_log_path || '';
             captureUtcOffsetMin = d.capture_utc_offset_min;
             updateEvtTzBadge();
-            _evtLoaded = false; _evtData = []; _evtOffset = 0;
+            _evtLoaded = false; _evtData = []; _evtOffset = 0; _evtAutoPending = true;
             if (!_evtOpen) toggleEvtPanel(); else _evtResetAndFetch();
         });
 }
@@ -1053,6 +1072,10 @@ function _evtResetAndFetch() {
 function _evtFetchPage() {
     if (_evtLoading) return;
     _evtLoading = true;
+    // Only the first page of a freshly-(re)loaded log asks the server to pick
+    // the Source value — a manual dropdown change (evtFilterChanged) never
+    // sets _evtAutoPending, so it's never overridden once the user has chosen.
+    const useAuto = _evtAutoPending && _evtOffset === 0;
     fetch(LV.url.log_viewer_parse_event_log, {
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
@@ -1060,11 +1083,16 @@ function _evtFetchPage() {
             offset: _evtOffset, limit: _EVT_PAGE,
             source_filter: document.getElementById('evtSourceFilter').value,
             level_filter: document.getElementById('evtLevelFilter').value,
+            auto_source: useAuto,
         }),
     })
         .then(r => r.json())
         .then(d => {
             if (d.error) { document.getElementById('evtBody').innerHTML = `<p class="evt-msg evt-msg-err">${escapeHtml(d.error)}</p>`; return; }
+            if (useAuto) {
+                _evtAutoPending = false;
+                if (d.applied_source_filter) document.getElementById('evtSourceFilter').value = d.applied_source_filter;
+            }
             _evtTotal = d.total || 0;
             _evtHasMore = d.has_more || false;
             _evtOffset += (d.events || []).length;
@@ -1073,6 +1101,20 @@ function _evtFetchPage() {
         })
         .catch(e => { document.getElementById('evtBody').innerHTML = `<p class="evt-msg evt-msg-err">Network error: ${escapeHtml(e.message)}</p>`; })
         .finally(() => { _evtLoading = false; });
+}
+
+// The capture-local-equivalent of an event's raw UTC time — same shift
+// jumpLogToMs/jumpEvtToMs already use to compare the two timestamp sources,
+// just formatted for a human to eyeball next to the driver log's own
+// MM/DD/YYYY-HH:MM:SS.mmm rows instead of having to do the offset math
+// themselves to tell whether a sync landed somewhere reasonable.
+function _evtLocalTimeLabel(text) {
+    if (typeof captureUtcOffsetMin !== 'number') return '';
+    const ms = parseEvtTimeMs(text);
+    if (ms == null) return '';
+    const d = new Date(ms);
+    const pad = n => String(n).padStart(2, '0');
+    return `${pad(d.getMonth() + 1)}/${pad(d.getDate())}-${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
 }
 
 function _evtRenderTable(timeHeader) {
@@ -1087,8 +1129,9 @@ function _evtRenderTable(timeHeader) {
         const ev = _evtData[i];
         const dot = (ev.level === 'Error' || ev.level === 'Critical') ? '🔴'
             : ev.level === 'Warning' ? '🟡' : '🟢';
+        const localLabel = _evtLocalTimeLabel(ev.time);
         html += `<tr data-evt-idx="${i}">
-            <td>${escapeHtml(ev.time)}</td>
+            <td>${escapeHtml(ev.time)}${localLabel ? `<div class="evt-time-local">→ ${escapeHtml(localLabel)} local</div>` : ''}</td>
             <td style="text-align:center;">${dot}</td>
             <td>${escapeHtml(ev.source)}</td>
             <td>${escapeHtml(ev.event_id)}</td>
@@ -1143,8 +1186,10 @@ function _onEvtRowEnter(e) {
     const card = document.getElementById('evtHoverCard');
     const lvColor = (ev.level === 'Error' || ev.level === 'Critical') ? '#dc2626'
         : ev.level === 'Warning' ? '#ca8a04' : '#16a34a';
+    const localLabel = _evtLocalTimeLabel(ev.time);
     let h = '<table>';
-    h += `<tr><th>Time</th><td>${escapeHtml(ev.time)}</td></tr>`;
+    h += `<tr><th>Time</th><td>${escapeHtml(ev.time)} (UTC)</td></tr>`;
+    if (localLabel) h += `<tr><th>Local</th><td>${escapeHtml(localLabel)} — capture machine / driver-log frame</td></tr>`;
     h += `<tr><th>Level</th><td style="color:${lvColor};font-weight:600;">${escapeHtml(ev.level)}</td></tr>`;
     h += `<tr><th>Source</th><td>${escapeHtml(ev.source)}</td></tr>`;
     h += `<tr><th>ID</th><td>${escapeHtml(ev.event_id)}</td></tr>`;
@@ -1671,8 +1716,35 @@ function allowChatWithoutBaselineOnce() {
     sendMsg(pending.presetMsg, pending.displayMsg, pending.forceTag, true, pending.decisionId);
 }
 
+// The in-flight chat request's AbortController — set only while a response
+// is streaming, so stopChatSend() has something to cancel and setBusy(false)
+// (via .finally below) always clears it, cancelled or not.
+let _activeChatAbort = null;
+
+function stopChatSend() {
+    if (_activeChatAbort) _activeChatAbort.abort();
+}
+
+// /send_stream replies as one `event: done\ndata: {...}` frame (see
+// chatbot_routes.send_stream) once the model finishes; an early-validation
+// failure (empty message, no baseline, LLM not configured) instead returns
+// a plain JSON body with no SSE framing at all. Try the framed form first,
+// fall back to parsing the whole body as JSON so both shapes work here.
+function _parseStreamDone(text) {
+    const marker = 'event: done\ndata: ';
+    const idx = text.lastIndexOf(marker);
+    if (idx >= 0) {
+        try { return JSON.parse(text.slice(idx + marker.length).split('\n\n')[0]); } catch (e) { /* fall through */ }
+    }
+    try { return JSON.parse(text); } catch (e) { return null; }
+}
+
 function sendMsg(presetMsg, displayMsg, forceTag, allowWithoutBaseline, decisionId) {
-    if (isBusy()) return;
+    // chatSendBtn stays enabled while busy (see setBusy) so this same click
+    // handler doubles as Stop — everything else with data-busy-lock is
+    // disabled, so isBusy() here only ever means "the button itself was
+    // clicked again," never a stray programmatic call racing a live request.
+    if (isBusy()) { stopChatSend(); return; }
     const input = document.getElementById('chatInput');
     const msg = presetMsg !== undefined ? presetMsg : input.value.trim();
     if (!msg) return;
@@ -1684,8 +1756,10 @@ function sendMsg(presetMsg, displayMsg, forceTag, allowWithoutBaseline, decision
     appendMsg('user', displayMsg !== undefined ? displayMsg : msg, tag);
     if (presetMsg === undefined) input.value = '';
     setBusy(true);
-    fetch(LV.url.chatbot_send, {
+    _activeChatAbort = new AbortController();
+    fetch(LV.url.chatbot_send_stream, {
         method: 'POST', headers: {'Content-Type': 'application/json'},
+        signal: _activeChatAbort.signal,
         body: JSON.stringify({
             message: msg,
             step_tag: tag,
@@ -1693,8 +1767,9 @@ function sendMsg(presetMsg, displayMsg, forceTag, allowWithoutBaseline, decision
             decision_id: decisionId || '',
             decision_answer: decisionId ? (displayMsg !== undefined ? displayMsg : msg) : '',
         })
-    }).then(r => r.json()).then(d => {
-        setBusy(false);
+    }).then(r => r.text()).then(text => {
+        const d = _parseStreamDone(text);
+        if (!d) { appendMsg('assistant', '⚠️ Empty or malformed response from server.', tag); return; }
         if (d.success) {
             appendMsg('assistant', d.reply, d.step_tag !== undefined ? d.step_tag : tag);
             if (d.clarification) renderProactiveClarification(d.clarification, tag);
@@ -1705,7 +1780,13 @@ function sendMsg(presetMsg, displayMsg, forceTag, allowWithoutBaseline, decision
         // the server skips assessing an empty session). This is what makes the
         // badge climb as the engineer teaches, instead of freezing between rounds.
         if (d.success) refreshAssessment();
-    }).catch(e => { setBusy(false); appendMsg('assistant', '⚠️ Network error: ' + e, tag); });
+    }).catch(e => {
+        if (e.name === 'AbortError') {
+            appendMsg('assistant', '⏹️ Stopped — response cancelled before finishing (no completion tokens spent past that point).', tag);
+        } else {
+            appendMsg('assistant', '⚠️ Network error: ' + e, tag);
+        }
+    }).finally(() => { setBusy(false); _activeChatAbort = null; });
 }
 
 // One high-information question when a chat message introduces knowledge
@@ -2025,7 +2106,7 @@ function onPriorToggle() {
 
 function onInterviewModeChange() {
     const select = document.getElementById('interviewMode');
-    interviewMode = select ? select.value : 'smart';
+    interviewMode = select ? select.value : 'ask';
     updateChatRefinementSummary();
     fetch(LV.url.learning_set_mode, {
         method: 'POST',
@@ -2814,12 +2895,18 @@ function exportSkill() {
     // send, or a step teach/ask is still in flight, and vice versa.
     if (btn.disabled || isBusy()) return;
 
+    // Unconditional, deliberately: this used to fire only in the old "grill"
+    // mode, so the DEFAULT mode exported with unresolved decisions and no
+    // warning whatsoever. Whether a question was asked at all is the
+    // interview mode's business; whether an ASKED question went unanswered
+    // is the export's business, and belongs here regardless of mode. Optional
+    // follow-ups opt out via blocking=false (see decision_ledger).
     const blockingDecisions = (decisionLedger.items || []).filter(
         item => item.status === 'open' && item.blocking
     );
-    if (interviewMode === 'grill' && blockingDecisions.length &&
+    if (blockingDecisions.length &&
         !confirm(
-            `Grill mode still has ${blockingDecisions.length} unresolved specification decision(s):\n\n` +
+            `${blockingDecisions.length} specification decision(s) are still unresolved:\n\n` +
             blockingDecisions.map(item => `• ${item.question}`).join('\n') +
             '\n\nExport anyway? They will stay visible in the Skill Spec review.'
         )) {

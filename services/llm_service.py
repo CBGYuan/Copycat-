@@ -86,6 +86,30 @@ class _AnthropicCompletions:
         response = self._client.messages.create(**params)
         return _AnthropicResponseAdapter(response)
 
+    def stream_text(self, model, messages, temperature, max_tokens, record_usage):
+        """Yield response text incrementally. Breaking out of this generator
+        early (the caller's fetch was aborted) unwinds through the `with`
+        block below, which closes the underlying stream/connection — the
+        provider stops generating further tokens instead of finishing a
+        response nobody reads, which is the whole point of a Stop button."""
+        system, filtered = _convert_messages_to_anthropic(messages)
+        params = dict(model=model, messages=filtered, max_tokens=max_tokens, temperature=temperature)
+        if system:
+            params["system"] = [{
+                "type": "text", "text": system, "cache_control": {"type": "ephemeral"},
+            }]
+        with self._client.messages.stream(**params) as stream:
+            for text in stream.text_stream:
+                yield text
+            # Only reached on a normal (non-cancelled) finish — the stream is
+            # already fully consumed at this point, so this is a cheap local
+            # read, not an extra wait. On early cancellation this line never
+            # runs, which is the correct call: nobody can report token counts
+            # the provider never fully committed to the response.
+            final = stream.get_final_message()
+            if final is not None and getattr(final, "usage", None):
+                record_usage(_AnthropicUsageAdapter(final.usage))
+
 
 class _AnthropicChatAdapter:
     def __init__(self, client):
@@ -151,6 +175,50 @@ class LLM_helper:
         )
         self._record_usage(getattr(response, "usage", None))
         return response.choices[0].message.content or ""
+
+    def chat_stream(self, messages: list, system_content: str = None,
+                     temperature: float = 0.2, max_tokens: int = 4000):
+        """Generator variant of chat() for callers that let the engineer
+        cancel mid-response (blueprints/chatbot's /send_stream). Stopping
+        iteration early (the HTTP client disconnected) propagates a
+        GeneratorExit into whichever branch below is active, which closes
+        that branch's own stream/connection — see AnthropicOpenAIAdapter's
+        stream_text and the try/finally here."""
+        if not self.is_ready:
+            raise RuntimeError("LLM_helper is not configured (no key.py found — see README.md).")
+        api_messages = []
+        if system_content:
+            api_messages.append({"role": "system", "content": system_content})
+        api_messages.extend(messages)
+
+        if isinstance(self.client, AnthropicOpenAIAdapter):
+            yield from self.client.chat.completions.stream_text(
+                model=self.model, messages=api_messages,
+                temperature=temperature, max_tokens=max_tokens,
+                record_usage=self._record_usage,
+            )
+            return
+
+        stream = self.client.chat.completions.create(
+            model=self.model, messages=api_messages,
+            temperature=temperature, max_tokens=max_tokens,
+            stream=True, stream_options={"include_usage": True},
+        )
+        try:
+            for chunk in stream:
+                choices = getattr(chunk, "choices", None) or []
+                if choices:
+                    delta = getattr(choices[0], "delta", None)
+                    text = getattr(delta, "content", None) if delta else None
+                    if text:
+                        yield text
+                usage = getattr(chunk, "usage", None)
+                if usage:
+                    self._record_usage(usage)
+        finally:
+            close = getattr(stream, "close", None)
+            if callable(close):
+                close()
 
     def _record_usage(self, usage) -> None:
         if usage is None:

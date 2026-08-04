@@ -412,6 +412,7 @@ def parse_event_log():
         limit=int(data.get("limit", 0) or 0),
         source_filter=data.get("source_filter", "all"),
         level_filter=data.get("level_filter", "warning_error"),
+        auto_source=bool(data.get("auto_source")),
     )
     return jsonify(result)
 

@@ -645,10 +645,11 @@ def set_mode():
     if "use_prior_knowledge" in data:
         state.prior_knowledge = bool(data.get("use_prior_knowledge"))
     if "interview_mode" in data:
+        # No retroactive re-flagging of open items here any more: `blocking`
+        # is now a property of the question itself (see decision_ledger.
+        # record_question), so switching modes can no longer silently
+        # downgrade a real decision already put to the engineer.
         state.interview_mode = decision_ledger.normalize_mode(data.get("interview_mode"))
-        for item in state.decision_ledger:
-            if item.get("status") == "open":
-                item["blocking"] = state.interview_mode == "grill"
     return jsonify({
         "success": True,
         "prior_knowledge": state.prior_knowledge,
@@ -659,7 +660,9 @@ def set_mode():
 
 @learning_bp.route("/decision/defer", methods=["POST"])
 def defer_decision():
-    """Record an explicit Skip so Grill mode never asks it again."""
+    """Record an explicit Skip: the decision stays visible in the ledger and
+    in the Export-time spec review, but stops being asked and stops warning
+    before Export — a deliberate "not now", distinct from an unanswered one."""
     data = request.get_json(silent=True) or {}
     state = session_store.get_state()
     item = decision_ledger.defer(state, data.get("decision_id"))

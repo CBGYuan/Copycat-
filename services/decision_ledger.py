@@ -8,12 +8,23 @@ import re
 from typing import Dict, Optional
 
 
-VALID_MODES = {"quiet", "smart", "grill"}
+VALID_MODES = {"quiet", "ask"}
+
+# "smart" and "grill" were two separate modes until they were merged into
+# "ask". They differed by one prompt paragraph and by whether an unresolved
+# decision warned before Export -- but those are independent axes, and tying
+# them together made "ask conservatively, yet still warn me before I export
+# with open questions" unreachable. Warning before Export is now
+# unconditional (see log_viewer.js's exportSkill) and blocking became a
+# property of the QUESTION rather than of the mode (see record_question), so
+# the axis the mode still controls is only "ask, or don't".
+_LEGACY_MODES = {"smart": "ask", "grill": "ask"}
 
 
 def normalize_mode(value) -> str:
     mode = str(value or "").strip().lower()
-    return mode if mode in VALID_MODES else "smart"
+    mode = _LEGACY_MODES.get(mode, mode)
+    return mode if mode in VALID_MODES else "ask"
 
 
 def record_question(
@@ -57,7 +68,13 @@ def record_question(
         "step": step if isinstance(step, int) else "all",
         "status": "open",
         "answer": "",
-        "blocking": bool(state.interview_mode == "grill") if blocking is None else bool(blocking),
+        # A property of THIS question, not of the interview mode: a genuine
+        # specification decision (the default) is worth warning about before
+        # Export; an optional follow-up explicitly passes blocking=False (see
+        # learning_routes' teach-step follow-ups) so it never nags. Making
+        # this mode-dependent is what previously let the default mode export
+        # with unresolved decisions and no warning at all.
+        "blocking": True if blocking is None else bool(blocking),
     }
     state.decision_ledger.append(item)
     return item

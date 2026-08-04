@@ -281,10 +281,41 @@ def peek_event_log_date(path):
         return None
 
 
-def get_paged_events(path, offset=0, limit=0, source_filter='all', level_filter='all'):
+def detect_default_source_filter(raw_events, domain=None):
+    """Pick a starting Source dropdown value from what the capture actually
+    contains, instead of a blind WiFi-vs-BT guess. The dropdown isn't really
+    binary: it's (a) which bus the BT radio is on (PCI vs USB) and (b)
+    whether to also fold in WiFi-coexistence sources (netwaw/netwtw). Both
+    are answered by scanning the sources that are actually present.
+
+    Falls back to 'all' when no BT bus source is present at all (e.g. a pure
+    WiFi capture with no BT radio events) — there is nothing to narrow to."""
+    pci_count = usb_count = 0
+    has_wifi = False
+    for row in raw_events:
+        source = (row.get('source') or '').lower()
+        if any(kw in source for kw in _SOURCE_GROUPS['pci_bt']):
+            pci_count += 1
+        if any(kw in source for kw in _SOURCE_GROUPS['usb_bt']):
+            usb_count += 1
+        if any(kw in source for kw in ('netwaw', 'netwtw')):
+            has_wifi = True
+
+    if not pci_count and not usb_count:
+        return 'all'
+    bus = 'pci_bt' if pci_count >= usb_count else 'usb_bt'
+    return f'{bus}_wifi' if has_wifi else bus
+
+
+def get_paged_events(path, offset=0, limit=0, source_filter='all', level_filter='all', auto_source=False):
     """A filtered page of events for the UI's virtual scroll. Never raises to
     the route: pywin32-missing / unreadable-file come back as {"error": ...}
-    so the panel can show it inline."""
+    so the panel can show it inline.
+
+    `auto_source=True` ignores `source_filter` and derives it from the
+    capture's own data instead (see detect_default_source_filter) — used
+    only for a panel's first load, so the dropdown starts on a value that
+    reflects what's actually in this capture rather than always "All"."""
     if not path or not os.path.isfile(path):
         return {"error": "No event log file loaded."}
     try:
@@ -293,6 +324,9 @@ def get_paged_events(path, offset=0, limit=0, source_filter='all', level_filter=
         return {"error": str(e)}
     except Exception as e:
         return {"error": f"Couldn't read event log: {e}"}
+
+    if auto_source:
+        source_filter = detect_default_source_filter(raw_events)
 
     filtered = [
         row for row in raw_events
@@ -308,4 +342,5 @@ def get_paged_events(path, offset=0, limit=0, source_filter='all', level_filter=
         'limit': limit,
         'has_more': offset + len(page) < total,
         'time_header': 'Time (UTC)',
+        'applied_source_filter': source_filter,
     }
