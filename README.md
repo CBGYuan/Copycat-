@@ -698,6 +698,14 @@ page instead. Same app, no install.
 pyinstaller copycat.spec        # -> dist\Copycat.exe
 ```
 
+Ship it as a **zip**, not a bare `.exe` — corporate web filtering blocks direct
+executable downloads, so a raw exe release asset is undownloadable on the
+Intel network (IntelAvatar's releases are zipped for the same reason).
+
+```powershell
+Compress-Archive dist\Copycat.exe, dist\README.txt dist\Copycat-<version>.zip
+```
+
 A frozen build has two roots and `configs/path_configs.py` keeps them apart:
 `BUNDLE_ROOT` is the temp folder the one-file exe unpacks into and is wiped
 on exit, so `templates/` and `static/` are read from there, while
