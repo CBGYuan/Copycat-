@@ -24,3 +24,6 @@ data/*.pdf
 tests/
 docs/test_scenario_*.md
 .pytest_cache/
+# PyInstaller output — the exe ships as a release asset, never in the tree.
+build/
+dist/

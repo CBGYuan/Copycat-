@@ -14,6 +14,7 @@ for _stream in (sys.stdout, sys.stderr):
 
 from flask import Flask
 
+from configs import path_configs
 from configs.set_up_app import set_up
 from blueprints import main_bp, log_viewer_bp, chatbot_bp, learning_bp, skills_bp
 from utils import helpers
@@ -22,7 +23,13 @@ from utils.browser_utils import ManagedChromeWindow
 HOST = "127.0.0.1"
 
 def create_app():
-    app = Flask(__name__)
+    # Explicit folders: in a frozen build Flask would otherwise resolve them
+    # relative to the exe rather than the unpacked bundle, and find neither.
+    app = Flask(
+        __name__,
+        template_folder=os.path.join(path_configs.BUNDLE_ROOT, "templates"),
+        static_folder=os.path.join(path_configs.BUNDLE_ROOT, "static"),
+    )
     app.secret_key = os.environ.get("LOG_TRIAGE_SECRET", "dev-secret-change-me")
 
     set_up()

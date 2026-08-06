@@ -1,6 +1,17 @@
 import os
+import sys
 
-PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+# Frozen (PyInstaller) builds have TWO roots, and conflating them silently
+# destroys the engineer's own skills: read-only bundled assets are unpacked
+# into a temp dir that is deleted the moment the exe exits, so anything
+# written there is gone at the next launch. BUNDLE_ROOT is that temp dir;
+# PROJECT_ROOT is the folder the exe actually sits in, and is the only place
+# this app may write to.
+_FROZEN = getattr(sys, "frozen", False)
+_SOURCE_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+BUNDLE_ROOT = getattr(sys, "_MEIPASS", _SOURCE_ROOT) if _FROZEN else _SOURCE_ROOT
+PROJECT_ROOT = os.path.dirname(sys.executable) if _FROZEN else _SOURCE_ROOT
 
 # ---- LLM key locations (checked in order, first existing wins) ----
 # 1) local override for offline/dev testing (gitignored) — create it by hand

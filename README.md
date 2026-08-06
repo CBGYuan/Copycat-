@@ -689,6 +689,24 @@ history, the operation journal, and the committed baseline are all
 case-specific and deliberately not carried across. Saved skills are on disk
 and unaffected.
 
+### Standalone executable
+
+Engineers without a Python environment run `Copycat.exe` from the Releases
+page instead. Same app, no install.
+
+```powershell
+pyinstaller copycat.spec        # -> dist\Copycat.exe
+```
+
+A frozen build has two roots and `configs/path_configs.py` keeps them apart:
+`BUNDLE_ROOT` is the temp folder the one-file exe unpacks into and is wiped
+on exit, so `templates/` and `static/` are read from there, while
+`PROJECT_ROOT` is the folder the exe sits in and is the only place the app
+writes. `data\skills\` therefore appears **next to the exe** and survives
+restarts — keep the exe somewhere permanent, not in Downloads.
+
+The build is unsigned, so Windows SmartScreen will warn on first run.
+
 ## Skill data model
 
 Each entry in `data/skills/local/{skills,bt_skills}.yaml`:
