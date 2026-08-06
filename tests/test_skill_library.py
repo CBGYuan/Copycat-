@@ -221,9 +221,15 @@ class ConvergeInheritanceRouteTests(unittest.TestCase):
         self._real_pool = dict(app_config.skills)
         # route_draft is its own LLM call and not what these tests are about.
         self._real_route = learning_service.route_draft
-        learning_service.route_draft = lambda llm, draft, pool, cont, **kw: dict(
-            draft, judge={"action": "add", "target_skill_key": None,
-                          "reason": "new", "confidence": 0.9})
+        self.route_calls = []
+
+        def _route(llm, draft, pool, cont, **kw):
+            self.route_calls.append({"draft": draft, "pool": pool, "continuity": cont})
+            return dict(
+                draft, judge={"action": "add", "target_skill_key": None,
+                              "reason": "new", "confidence": 0.9})
+
+        learning_service.route_draft = _route
 
     def tearDown(self):
         from configs.global_configs import app_config
@@ -232,7 +238,7 @@ class ConvergeInheritanceRouteTests(unittest.TestCase):
         app_config.set_skills(self._real_pool)
         learning_service.route_draft = self._real_route
 
-    def _converge_with(self, parent, key):
+    def _converge_with(self, parent, key, use_prior=None):
         from services import session_store
         pool = dict(self._real_pool)
         pool[key] = parent
@@ -248,7 +254,8 @@ class ConvergeInheritanceRouteTests(unittest.TestCase):
         state.filtered_preview = ["00:01:02 candidate grade 55 -> 78"]
         state.baseline = {"expected_scenario": "Grade-driven roam."}
         state.baseline_filter_sig = state.baseline_signature()
-        return client.post("/learning/converge", json={}).get_json()
+        payload = {} if use_prior is None else {"use_prior_knowledge": use_prior}
+        return client.post("/learning/converge", json=payload).get_json()
 
     def test_a_root_parent_is_inherited_and_the_prompt_is_told_so(self):
         d = self._converge_with(self.GEN0, "connection_flow")
@@ -283,6 +290,102 @@ class ConvergeInheritanceRouteTests(unittest.TestCase):
     def test_a_refused_chain_never_promises_inheritance_in_the_prompt(self):
         self._converge_with(self.GEN2, "gen2")
         self.assertNotIn("BASELINE SKILL (currently loaded)", "\n".join(self.llm.prompts))
+
+    def test_load_skills_off_is_strictly_standalone_and_skips_old_skill_routing(self):
+        d = self._converge_with(self.GEN0, "connection_flow", use_prior=False)
+
+        self.assertTrue(d["success"])
+        self.assertEqual(d["mode"], "fresh")
+        self.assertIsNone(d["inherited_from"])
+        self.assertFalse(d["inheritance_summary"]["enabled"])
+        self.assertEqual(d["inheritance_summary"]["inherited_drafts"], 0)
+        self.assertNotIn("DeAuth", d["drafts"][0]["keywords"])
+        self.assertIsNone(d["drafts"][0]["skill_key"])
+        self.assertEqual(d["drafts"][0]["judge"]["source"], "fresh")
+        self.assertEqual(self.route_calls, [])
+        prompts = "\n".join(self.llm.prompts)
+        self.assertNotIn("BASELINE SKILL (currently loaded)", prompts)
+        self.assertNotIn("Read-only prior skill documents", prompts)
+
+    def test_prior_mode_inherits_only_the_related_draft_after_domain_split(self):
+        from services import learning_service
+
+        self.llm.response = {"skills": [
+            {
+                "name": "Roam Grade Analysis",
+                "description": "Grade-driven roam decision after association.",
+                "keywords": ["candidate grade"],
+                "exclusive": [],
+                "expert_rules": "1. Compare candidate grade before roaming.",
+            },
+            {
+                "name": "DHCP Lease Failure",
+                "description": "DHCP lease acquisition failure after link-up.",
+                "keywords": ["DHCPDISCOVER"],
+                "exclusive": [],
+                "expert_rules": "1. If no DHCPOFFER follows, report lease failure.",
+            },
+        ]}
+        real_classifier = learning_service.classify_loaded_parent
+
+        def _classify(_llm, draft, parent_key, parent, _pool, **_kwargs):
+            related = draft["name"] == "Roam Grade Analysis"
+            return {
+                "relationship": "extends" if related else "unrelated",
+                "parent_key": parent_key,
+                "parent_name": parent.name,
+                "similarity": 0.8 if related else 0.01,
+                "reason": "same roam capability" if related else "different DHCP capability",
+            }
+
+        learning_service.classify_loaded_parent = _classify
+        try:
+            d = self._converge_with(self.GEN0, "connection_flow", use_prior=True)
+        finally:
+            learning_service.classify_loaded_parent = real_classifier
+
+        self.assertTrue(d["success"])
+        self.assertEqual(len(d["drafts"]), 2)
+        by_name = {draft["name"]: draft for draft in d["drafts"]}
+        roam = by_name["Roam Grade Analysis"]
+        dhcp = by_name["DHCP Lease Failure"]
+        self.assertEqual(roam["parent"], "connection_flow")
+        self.assertIn("DeAuth", roam["keywords"])
+        self.assertIsNone(dhcp.get("parent"))
+        self.assertNotIn("DeAuth", dhcp["keywords"])
+        self.assertEqual(d["inheritance_summary"]["inherited_drafts"], 1)
+        self.assertEqual(d["inheritance_summary"]["standalone_drafts"], 1)
+        self.assertEqual(self.route_calls, [])
+
+    def test_fresh_mode_preserves_multiple_mutually_exclusive_drafts(self):
+        self.llm.response = {"skills": [
+            {
+                "name": "Roam Grade Analysis",
+                "description": "Grade-driven roam decision after association.",
+                "keywords": ["candidate grade"],
+                "exclusive": [],
+                "expert_rules": "1. Compare candidate grade before roaming.",
+            },
+            {
+                "name": "DHCP Lease Failure",
+                "description": "DHCP lease acquisition failure after link-up.",
+                "keywords": ["DHCPDISCOVER"],
+                "exclusive": [],
+                "expert_rules": "1. If no DHCPOFFER follows, report lease failure.",
+            },
+        ]}
+
+        d = self._converge_with(self.GEN0, "connection_flow", use_prior=False)
+
+        self.assertTrue(d["success"])
+        self.assertEqual(len(d["drafts"]), 2)
+        self.assertEqual(
+            {draft["name"] for draft in d["drafts"]},
+            {"Roam Grade Analysis", "DHCP Lease Failure"},
+        )
+        self.assertTrue(all(draft.get("parent") is None for draft in d["drafts"]))
+        self.assertTrue(all(draft["judge"]["source"] == "fresh" for draft in d["drafts"]))
+        self.assertEqual(self.route_calls, [])
 
 
 class DurableWriteTests(_LocalFileCase):

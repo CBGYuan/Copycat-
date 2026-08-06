@@ -122,6 +122,20 @@ class ManagedChromeWindow:
             _safe_print("⚠️  This fallback browser tab must be closed manually.")
             return False
 
+    def wait_for_exit(self) -> bool:
+        """Block until this app's Chrome instance exits (user closed the window).
+
+        Returns False right away when no managed Chrome is running -- the
+        unmanaged fallback tab belongs to the engineer's own browser, so there
+        is no process whose lifetime tracks this app's window.
+        """
+        with self._lock:
+            process = self._process
+        if process is None:
+            return False
+        process.wait()
+        return True
+
     def close(self) -> None:
         """Close only this app's Chrome instance and remove its temp profile."""
         with self._lock:

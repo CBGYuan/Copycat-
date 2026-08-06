@@ -1,4 +1,5 @@
 import os
+from bisect import bisect_left
 from datetime import date, datetime
 
 from flask import Blueprint, render_template, request, jsonify
@@ -22,6 +23,26 @@ log_viewer_bp = Blueprint("log_viewer", __name__, url_prefix="/log_viewer")
 # window below) is built lazily — most sessions never use Focus, so paying
 # for it up front on every load would be wasted work for them.
 _LOG_CACHE: dict = {}
+
+
+def _as_int(value, default: int, lo: int, hi: int) -> int:
+    """Clamped int() for numbers that arrive straight from the frontend --
+    a non-numeric or out-of-range value is a bad request, not a 500."""
+    try:
+        n = int(value)
+    except (TypeError, ValueError):
+        return default
+    return max(lo, min(hi, n))
+
+
+def _refresh_event_time_alignment(state) -> None:
+    """Resolve which wall-clock frame the current text log uses."""
+    alignment = event_log_service.resolve_event_time_alignment(
+        state.log_path, state.event_log_path, state.log_domain,
+    )
+    state.event_sync_offset_min = alignment["offset_min"]
+    state.event_sync_basis = alignment["basis"]
+    state.customer_utc_offset_min = alignment["customer_offset_min"]
 
 
 def _cached_log_lines(path: str, fallback_date) -> list:
@@ -143,6 +164,15 @@ def _filters_from_skill(skill) -> list:
 @log_viewer_bp.route("/")
 def index():
     state = session_store.get_state()
+    # The refinement workbench now always asks only high-value grounded
+    # follow-ups. The old Quiet choice is intentionally no longer exposed;
+    # normalize a session that was left there before the UI change.
+    state.interview_mode = "ask"
+    if state.prior_knowledge and not state.selected_skill_keys:
+        pool = app_config.bt_skills if (state.log_domain or "wifi").lower() == "bt" else app_config.skills
+        state.selected_skill_keys = (
+            [state.active_skill_key] if state.active_skill_key in pool else list(pool)
+        )
     llm_ready = bool(app_config.llm_helper and app_config.llm_helper.is_ready)
     session_usage = app_config.llm_helper.session_usage if llm_ready else None
     # Name of the skill the next Export inherits from, resolved across BOTH
@@ -168,13 +198,48 @@ def index():
 RAW_PREVIEW_LINES = 500
 
 
-def _raw_preview(path: str, anchor_date, focus_dt=None, focus_window_min: int = 5):
-    """Uncoloured (no filter applied) preview of a log file — shared by
+def _raw_rows(log_lines: list, start_idx: int, offset: int, limit: int, view_total: int) -> list:
+    """Rows [offset, offset+limit) of an unfiltered view."""
+    rows = []
+    for i in range(offset, min(offset + limit, view_total)):
+        idx = start_idx + i
+        if idx >= len(log_lines):
+            break
+        rows.append({"line_no": idx + 1, "text": log_lines[idx].rstrip("\n"),
+                     "back_color": None, "fore_color": None})
+    return rows
+
+
+def _filtered_rows(log_lines: list, state, offset: int, limit: int) -> list:
+    """Rows [offset, offset+limit) of the last filter run, rebuilt from the
+    survivor index (see tat_parser.compute_filter_stats' survivor_rows) plus
+    the already-cached lines — the full coloured result is never held twice."""
+    rows = []
+    for line_no, matched in state.view_rows[offset:offset + limit]:
+        if not 1 <= line_no <= len(log_lines):
+            continue
+        first = (state.filters[matched[0]]
+                 if matched and matched[0] < len(state.filters) else {})
+        rows.append({
+            "line_no": line_no,
+            "text": tat_parser.clean_row_text(log_lines[line_no - 1]),
+            "matched": list(matched),
+            "back_color": first.get("back_color"),
+            "fore_color": first.get("fore_color"),
+        })
+    return rows
+
+
+def _raw_preview(state, path: str, anchor_date, focus_dt=None, focus_window_min: int = 5):
+    """Uncoloured (no filter applied) view of a log file — shared by
     /pick_log (right after a file is chosen), /show_all (jumping back to it
     from a filtered view without re-opening the file dialog), and /set_focus
-    (jumping to a ±focus_window_min slice around an issue time). `total_lines`
-    is always the TRUE full-file count regardless of focus, so the UI can
-    still show "N of <full total>"."""
+    (jumping to a ±focus_window_min slice around an issue time).
+
+    Returns (total_lines, first page of rows). `total_lines` is always the
+    TRUE full-file count regardless of focus, so the UI can still show
+    "N of <full total>"; the view's own row count lands on state.view_total.
+    """
     log_lines = _cached_log_lines(path, anchor_date)
     total_lines = len(log_lines)
     start_idx = 0
@@ -182,11 +247,80 @@ def _raw_preview(path: str, anchor_date, focus_dt=None, focus_window_min: int = 
     if focus_dt is not None:
         ts_index = _cached_timestamp_index(path, log_lines)
         start_idx, window = tat_parser.slice_by_focus_window(log_lines, ts_index, focus_dt, focus_window_min)
-    preview = [
-        {"line_no": start_idx + i, "text": line.rstrip("\n"), "back_color": None, "fore_color": None}
-        for i, line in enumerate(window[:RAW_PREVIEW_LINES], start=1)
-    ]
-    return total_lines, preview
+    state.view_mode = "raw"
+    state.view_start_idx = start_idx
+    state.view_rows = []
+    state.view_total = len(window)
+    return total_lines, _raw_rows(log_lines, start_idx, 0, RAW_PREVIEW_LINES, state.view_total)
+
+
+@log_viewer_bp.route("/preview_page", methods=["POST"])
+def preview_page():
+    """One window of the current log view, for the pane's virtual scroller.
+
+    The pane used to be handed a flat 500-row cap and nothing else existed
+    client-side; this is what makes the whole result reachable without pushing
+    a six-figure row count into the DOM.
+    """
+    data = request.get_json(silent=True) or {}
+    offset = _as_int(data.get("offset"), 0, 0, 100_000_000)
+    limit = _as_int(data.get("limit"), RAW_PREVIEW_LINES, 1, 2000)
+    state = session_store.get_state()
+    if not state.log_path or not os.path.exists(state.log_path):
+        return jsonify({"success": False, "message": "No log loaded yet"}), 400
+    anchor_date = date.fromisoformat(state.log_date_anchor) if state.log_date_anchor else None
+    try:
+        log_lines = _cached_log_lines(state.log_path, anchor_date)
+    except Exception as e:
+        return jsonify({"success": False, "message": f"Failed to read log: {e}"}), 500
+    if state.view_mode == "filtered":
+        rows = _filtered_rows(log_lines, state, offset, limit)
+    else:
+        rows = _raw_rows(log_lines, state.view_start_idx, offset, limit, state.view_total)
+    return jsonify({"success": True, "offset": offset, "rows": rows,
+                    "view_total": state.view_total})
+
+
+@log_viewer_bp.route("/nearest_row", methods=["POST"])
+def nearest_row():
+    """Index (within the current view) of the row closest in time to `ms`.
+
+    The event panel's click-sync used to find this by scanning the rendered
+    log rows, which only works while the whole result is in the DOM. The
+    server owns the timestamps, so it answers instead.
+    """
+    data = request.get_json(silent=True) or {}
+    try:
+        target = datetime.fromtimestamp(float(data.get("ms")) / 1000.0)
+    except (TypeError, ValueError, OSError, OverflowError):
+        return jsonify({"success": False, "message": "Invalid time"}), 400
+    state = session_store.get_state()
+    if not state.log_path or not os.path.exists(state.log_path) or not state.view_total:
+        return jsonify({"success": True, "index": None})
+    anchor_date = date.fromisoformat(state.log_date_anchor) if state.log_date_anchor else None
+    try:
+        log_lines = _cached_log_lines(state.log_path, anchor_date)
+    except Exception as e:
+        return jsonify({"success": False, "message": f"Failed to read log: {e}"}), 500
+    ts_index = _cached_timestamp_index(state.log_path, log_lines)
+    if not ts_index:
+        return jsonify({"success": True, "index": None})
+
+    def _nearest(values, key):
+        pos = bisect_left(values, key)
+        if pos == 0:
+            return 0
+        if pos >= len(values):
+            return len(values) - 1
+        return pos if (values[pos] - key) < (key - values[pos - 1]) else pos - 1
+
+    file_idx = ts_index[_nearest([dt for _, dt in ts_index], target)][0]
+    if state.view_mode == "filtered":
+        line_nos = [ln for ln, _ in state.view_rows]
+        index = _nearest(line_nos, file_idx + 1) if line_nos else None
+    else:
+        index = min(max(file_idx - state.view_start_idx, 0), state.view_total - 1)
+    return jsonify({"success": True, "index": index})
 
 
 @log_viewer_bp.route("/pick_log", methods=["POST"])
@@ -235,13 +369,10 @@ def pick_log():
     # does ship one had no way to use it. A capture without one simply gets
     # "" here and the panel stays hidden exactly as before.
     state.event_log_path = event_log_service.find_event_log_near(path)
-    # Same relative search for the CAPTURE MACHINE's fixed UTC offset (see
-    # find_capture_utc_offset_minutes). This is what puts the two timestamp
-    # sources in one frame: Windows stores TimeCreated/@SystemTime in UTC, the
-    # driver log carries capture-machine-local time, so event + offset =
-    # driver-log frame. Without it the click-sync compares two genuinely
-    # different moments as raw numbers and lands on a plausible wrong line.
-    state.capture_utc_offset_min = event_log_service.find_capture_utc_offset_minutes(path)
+    # Event XML is UTC. WiFi text uses the analysing engineer's local frame;
+    # BT HCI text uses the customer's System Info frame. Resolve that domain-
+    # specific alignment explicitly instead of assuming both are customer-local.
+    _refresh_event_time_alignment(state)
 
     # Some BT/WiFi driver-log exports carry only a time-of-day, no date at all
     # (BT's dateless HCI export, WiFi's DDD-player export) — a date must be
@@ -259,7 +390,9 @@ def pick_log():
     anchor_date = None
     if date_synthesized:
         if state.event_log_path:
-            anchor_date = event_log_service.peek_event_log_date(state.event_log_path)
+            anchor_date = event_log_service.peek_event_log_date(
+                state.event_log_path, state.event_sync_offset_min or 0,
+            )
         if anchor_date is None:
             anchor_date = helpers.extract_date_from_filename(path)
         if anchor_date is None:
@@ -273,7 +406,7 @@ def pick_log():
     raw_preview = []
     total_lines = 0
     try:
-        total_lines, raw_preview = _raw_preview(path, anchor_date)
+        total_lines, raw_preview = _raw_preview(state, path, anchor_date)
     except Exception as e:
         print(f"⚠️  Could not build raw preview for {path}: {e}")
 
@@ -283,11 +416,14 @@ def pick_log():
         "domain": state.log_domain,
         "total_lines": total_lines,
         "preview": raw_preview,
+        "view_total": state.view_total,
         "filters": state.filters,
         "filters_cleared": filters_cleared,
         "event_log_path": state.event_log_path,
         "event_log_available": bool(state.event_log_path),
-        "capture_utc_offset_min": state.capture_utc_offset_min,
+        "event_sync_offset_min": state.event_sync_offset_min,
+        "event_sync_basis": state.event_sync_basis,
+        "customer_utc_offset_min": state.customer_utc_offset_min,
         # True when this log's own lines had no date (dateless BT HCI / WiFi
         # DDD export) and the leading timestamps shown are synthesized —
         # the UI surfaces this so the engineer knows the date component (not
@@ -313,10 +449,11 @@ def show_all():
     state.focus_center_iso = ""
     anchor_date = date.fromisoformat(state.log_date_anchor) if state.log_date_anchor else None
     try:
-        total_lines, raw_preview = _raw_preview(state.log_path, anchor_date)
+        total_lines, raw_preview = _raw_preview(state, state.log_path, anchor_date)
     except Exception as e:
         return jsonify({"success": False, "message": f"Failed to read log: {e}"}), 500
-    return jsonify({"success": True, "total_lines": total_lines, "preview": raw_preview})
+    return jsonify({"success": True, "total_lines": total_lines, "preview": raw_preview,
+                    "view_total": state.view_total})
 
 
 @log_viewer_bp.route("/set_focus", methods=["POST"])
@@ -350,15 +487,16 @@ def set_focus():
         }), 400
 
     state.focus_center_iso = focus_dt.strftime(tat_parser._TS_DT_FMT)[:-3]
-    state.focus_window_min = int(window_min) if window_min else 5
+    state.focus_window_min = _as_int(window_min, 5, 1, 24 * 60)
 
-    total_lines, preview = _raw_preview(state.log_path, anchor_date, focus_dt, state.focus_window_min)
+    total_lines, preview = _raw_preview(state, state.log_path, anchor_date, focus_dt, state.focus_window_min)
     return jsonify({
         "success": True,
         "focus_center": state.focus_center_iso,
         "focus_window_min": state.focus_window_min,
         "total_lines": total_lines,
-        "window_lines": len(preview),
+        "window_lines": state.view_total,
+        "view_total": state.view_total,
         "preview": preview,
     })
 
@@ -386,13 +524,12 @@ def pick_event_log():
         return jsonify({"success": False, "message": "File not found"}), 400
     state = session_store.get_state()
     state.event_log_path = path
+    _refresh_event_time_alignment(state)
     return jsonify({
         "success": True, "event_log_path": path, "event_log_available": True,
-        # The UTC-offset correction is about the CAPTURE MACHINE (from
-        # systeminfo.txt near the driver log), not this evt file specifically
-        # — already computed in /pick_log, just echoed back here so the
-        # frontend has it regardless of which of the two picks ran last.
-        "capture_utc_offset_min": state.capture_utc_offset_min,
+        "event_sync_offset_min": state.event_sync_offset_min,
+        "event_sync_basis": state.event_sync_basis,
+        "customer_utc_offset_min": state.customer_utc_offset_min,
     })
 
 
@@ -408,8 +545,8 @@ def parse_event_log():
         return jsonify({"error": "No event log loaded."})
     result = event_log_service.get_paged_events(
         state.event_log_path,
-        offset=int(data.get("offset", 0) or 0),
-        limit=int(data.get("limit", 0) or 0),
+        offset=_as_int(data.get("offset"), 0, 0, 10_000_000),
+        limit=_as_int(data.get("limit"), 0, 0, 5000),
         source_filter=data.get("source_filter", "all"),
         level_filter=data.get("level_filter", "warning_error"),
         auto_source=bool(data.get("auto_source")),
@@ -470,6 +607,8 @@ def load_skill():
     # learning_service._INTERVIEW_PRIOR_CLAUSE). A bare .tat file (no skill
     # identity to compare descriptions/keywords against) does NOT do this.
     state.prior_knowledge = True
+    if skill_key not in state.selected_skill_keys:
+        state.selected_skill_keys.append(skill_key)
 
     return jsonify({
         "success": True,
@@ -479,6 +618,7 @@ def load_skill():
         "description": skill.description,
         "operations": operation_journal.payload(state),
         "prior_knowledge": state.prior_knowledge,
+        "selected_skill_keys": state.selected_skill_keys,
     })
 
 
@@ -584,10 +724,18 @@ def apply_filter():
     # Keep a plain-text, token-friendly copy for the chat/learning system
     # prompts (services/learning_service.py, blueprints/chatbot) — never the
     # full 100k-line log, just the same capped/deduped preview shown in the UI.
-    preview_texts = [p["text"] for p in stats["preview"]]
+    # The visible table stays a prefix, while context_preview is a bounded
+    # chronological head+tail view of the COMPLETE survivor set. Keeping the
+    # two separate prevents a 1000-line UI cap from hiding the final failure
+    # event from Copycat's questions.
+    preview_texts = [p["text"] for p in stats.get("context_preview", stats["preview"])]
     processed = tat_parser.preprocess_log_for_llm(preview_texts)
     state.filtered_preview = tat_parser.group_similar_logs(processed)
     state.filter_stats = stats
+    state.view_mode = "filtered"
+    state.view_start_idx = 0
+    state.view_rows = stats["survivor_rows"]
+    state.view_total = len(state.view_rows)
     # How much of the log this skill's filter set actually reaches, kept per
     # skill across sessions (services.skill_memory). Recorded on every run, so
     # the stored figure is the most recent one rather than whatever the very
@@ -615,7 +763,9 @@ def apply_filter():
         "co_occurrence": stats["co_occurrence"],
         "time_span": stats["time_span"],
         "preview_count": len(stats["preview"]),
-        "preview": stats["preview"][:500],
+        "context_count": len(state.filtered_preview),
+        "preview": stats["preview"][:RAW_PREVIEW_LINES],
+        "view_total": state.view_total,
         "per_filter": stats["per_filter"],
         "operations": operation_journal.payload(state),
         "annotations": state.log_annotations,

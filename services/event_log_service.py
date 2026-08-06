@@ -14,22 +14,17 @@ pywin32 (``win32evtlog``) is imported lazily: the whole app must still run on a
 machine without it — get_paged_events just returns an ``error`` the panel shows
 instead of crashing at import time.
 
-Note on time: events are stored UTC-naive; this port does NOT apply
-IntelAvatar's full DST-aware timezone_utils resolution (IANA zone lookup,
-manual-override sidecar, Taiwan-ETL-decode frame, etc. — see
-wireless_ce_avatar/utils/timezone_utils.py). It DOES read the same
-systeminfo.txt/system_info.txt "Time Zone" field IntelAvatar does and applies
-its FIXED (UTC±HH:MM) offset (see find_capture_utc_offset_minutes) — no DST
-adjustment, but enough to put the two timestamp sources in the same frame
-instead of comparing raw UTC against raw customer-local with no correction at
-all, which was silently landing the click-sync's "nearest" match on a
-plausible-looking but wrong line whenever the capture wasn't near UTC+0.
+Note on time: Event XML stores UTC. BT HCI text uses the captured customer's
+wall clock, so it is aligned with the offset in systeminfo.txt/system_info.txt.
+WiFi decoder/WPP text uses the analysing engineer's local wall clock, so it is
+aligned with the host OS's local offset at the event date. The raw UTC value is
+preserved and both the chosen basis and converted value are exposed in the UI.
 """
 import json
 import os
 import re
 import xml.etree.ElementTree as ET
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 
 # Sources always kept regardless of level (the BT/WiFi driver stack), plus the
 # groups the UI's Source dropdown maps to — mirrors IntelAvatar's constants so
@@ -99,7 +94,13 @@ def find_event_log_near(log_path: str) -> str:
 # IntelAvatar's timezone_utils uses as its own fallback for zone strings it
 # can't resolve to a named DST-aware zone — good enough here since this port
 # doesn't attempt DST resolution at all.
-_TZ_OFFSET_RE = re.compile(r'\(UTC([+-])(\d{2}):(\d{2})\)', re.IGNORECASE)
+# IntelAvatar captures are not consistent about this field's spelling.  The
+# older systeminfo.txt form normally contains ``(UTC-05:00)`` while the JSON
+# system_info.txt shipped by current WiFi collections can contain
+# ``Central Standard Time (GMT-0500)``.  Both describe the customer's
+# effective offset at capture time; accepting only the first shape silently
+# discarded the timezone in real captures.
+_TZ_OFFSET_RE = re.compile(r'\((?:UTC|GMT)([+-])(\d{2}):?(\d{2})\)', re.IGNORECASE)
 _SYSTEMINFO_FILENAMES = ("systeminfo.txt", "system_info.txt")
 _SYSTEMINFO_SEARCH_DEPTH = 4
 
@@ -148,6 +149,22 @@ def find_capture_utc_offset_minutes(log_path: str):
             break
         cur = parent
     return None
+
+
+def local_utc_offset_minutes(at_utc: datetime | None = None) -> int:
+    """Return the analysing machine's local UTC offset at ``at_utc``.
+
+    WiFi DDD/WPP text shown by Copycat is in the decoder/engineer's local
+    wall-clock frame, whereas BT HCI text is in the customer's frame.  Using
+    ``astimezone`` for the event date (rather than today's fixed offset) lets
+    the host OS apply its daylight-saving rule for historical captures.
+    """
+    if at_utc is None:
+        at_utc = datetime.now(timezone.utc)
+    elif at_utc.tzinfo is None:
+        at_utc = at_utc.replace(tzinfo=timezone.utc)
+    offset = at_utc.astimezone().utcoffset() or timedelta(0)
+    return int(offset.total_seconds() // 60)
 
 
 def _source_matches(source, source_filter):
@@ -248,15 +265,8 @@ def _get_cached_raw_rows(path):
     return events_list
 
 
-def peek_event_log_date(path):
-    """Read just the file's OWN earliest event to get a capture date — used to
-    anchor synthesized dates for time-only driver-log lines (BT's dateless HCI
-    export, WiFi's DDD export — see utils.helpers.read_log_file) onto the SAME
-    day the loaded System Event Log is stamped in, so the event panel's
-    click-sync lands on a meaningful date instead of guessing from the driver
-    log file's mtime. Cheap: reads a single event, not the whole file.
-    Returns a date, or None on any failure (missing pywin32, bad path, empty
-    log) — callers fall back to the driver log's own mtime."""
+def peek_event_log_utc_datetime(path):
+    """Read the file's earliest raw ``TimeCreated/@SystemTime`` as UTC."""
     if not path or not os.path.isfile(path):
         return None
     try:
@@ -276,9 +286,44 @@ def peek_event_log_date(path):
         if time_created is None:
             return None
         system_time = time_created.get('SystemTime', '')
-        return datetime.strptime(system_time[:10], "%Y-%m-%d").date()
+        parsed = datetime.fromisoformat(system_time.replace('Z', '+00:00'))
+        return parsed.astimezone(timezone.utc)
     except Exception:
         return None
+
+
+def peek_event_log_date(path, utc_offset_min: int = 0):
+    """Return the earliest event's date in the text log's wall-clock frame.
+
+    ``utc_offset_min`` matters when a raw UTC event crosses midnight after it
+    is converted to the WiFi engineer-local or BT customer-local frame.
+    """
+    event_utc = peek_event_log_utc_datetime(path)
+    if event_utc is None:
+        return None
+    return (event_utc + timedelta(minutes=utc_offset_min)).date()
+
+
+def resolve_event_time_alignment(driver_log_path: str, event_log_path: str, domain: str) -> dict:
+    """Choose the wall-clock frame used to align Event XML with the text log.
+
+    Event XML is UTC. WiFi decoder/WPP text is in the analysing engineer's
+    local timezone; BT ``.hci.txt`` is in the captured customer's timezone.
+    This metadata is session/UI state only and never changes Avatar skill YAML.
+    """
+    customer_offset = find_capture_utc_offset_minutes(driver_log_path)
+    if (domain or '').lower() == 'wifi':
+        event_utc = peek_event_log_utc_datetime(event_log_path)
+        return {
+            'offset_min': local_utc_offset_minutes(event_utc),
+            'basis': 'engineer_local',
+            'customer_offset_min': customer_offset,
+        }
+    return {
+        'offset_min': customer_offset,
+        'basis': 'customer' if customer_offset is not None else 'customer_unknown',
+        'customer_offset_min': customer_offset,
+    }
 
 
 def detect_default_source_filter(raw_events, domain=None):

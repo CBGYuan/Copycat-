@@ -17,28 +17,31 @@ def _skill_pool(domain: str) -> dict:
     against or saved into each other's pool. This is the FULL merged view
     (shared corp baseline + this engineer's contribution + local) — used only
     for READ-ONLY context (the interview's "don't re-ask what's already
-    covered" prior-knowledge display). It must NEVER be used to pick a Phase 2
-    merge target — see _local_skill_pool below."""
+    covered" prior-knowledge display and loaded-parent relationship check).
+    It is never an in-place merge target during Export."""
     return app_config.bt_skills if domain == "bt" else app_config.skills
 
 
-def _local_skill_pool(domain: str) -> dict:
-    """The skills THIS engineer's own copycat instance has actually saved
-    locally — i.e. genuinely copycat-originated skills, never a skill that
-    only exists via the shared corp drive / a teammate's contribution file.
-    This is what route_draft's Tier 0 (continuity) and Tier 1 (retrieval)
-    merge-target search must use instead of _skill_pool's full merged view:
-    the shared library is read-only reference material (see skill_service's
-    module docstring — "we only ever READ from here"), so it must never be
-    silently treated as something a synthesized draft can be merged into.
-    Only a skill this engineer's own session has already created can receive
-    new rules; a shared skill that happens to look similar just means the new
-    teaching becomes its own new copycat-owned skill instead."""
-    return skill_service.load_all_skills(domain)
+def _selected_skill_keys(state, domain: str) -> list:
+    """Validated, same-domain document selection for Load skills.
+
+    The explicit list is authoritative. The two fallbacks only preserve
+    compatibility with an already-running pre-picker session or an older API
+    caller that set `prior_knowledge=True`: prefer its loaded parent, else the
+    historical all-skills behaviour.
+    """
+    pool = _skill_pool(domain)
+    chosen = [key for key in state.selected_skill_keys if key in pool]
+    if chosen or not state.prior_knowledge:
+        return chosen
+    if state.active_skill_key in pool:
+        return [state.active_skill_key]
+    return list(pool)
 
 
-def _other_skill_descriptions(exclude_key: str = "", domain: str = "wifi") -> list:
-    """name/description/keywords of the OTHER already-saved skills IN THE
+def _other_skill_descriptions(exclude_key: str = "", domain: str = "wifi",
+                              selected_keys=None) -> list:
+    """Read-only documents for the OTHER already-saved skills IN THE
     SAME DOMAIN — fed to the LLM so it can (a) keep a new skill's description
     mutually exclusive from them, the way Avatar's SKILL_DESCRIPTIONS map
     keeps each skill's scope distinct, and (b) spot literal keyword overlap
@@ -46,10 +49,24 @@ def _other_skill_descriptions(exclude_key: str = "", domain: str = "wifi") -> li
     duplicating it. Scoped to `domain` so a WiFi log is never compared
     against (or routed to extend) a Bluetooth skill, or vice versa."""
     out = []
+    selected = set(selected_keys) if selected_keys is not None else None
     for key, sk in _skill_pool(domain).items():
         if key == exclude_key:
             continue
-        out.append({"key": key, "name": sk.name, "description": sk.description, "keywords": sk.keywords})
+        if selected is not None and key not in selected:
+            continue
+        out.append({
+            "key": key,
+            "name": sk.name,
+            "description": sk.description,
+            "triggers": list(sk.triggers or []),
+            "keywords": list(sk.keywords or []),
+            "exclusive": list(sk.exclusive or []),
+            "expert_rules": sk.expert_rules or "",
+            "version": sk.version,
+            "parent": sk.parent,
+            "lineage": list(sk.lineage or []),
+        })
     return out
 
 
@@ -231,14 +248,23 @@ def _context_from_state(state, exclude_skill_key: str = "", include_existing: bo
         # False so no prior skill is consulted at all (the "no prior knowledge"
         # button), keeping that path token-cheap and guaranteeing it never
         # compares against anything already saved.
-        "existing_skills": _other_skill_descriptions(exclude_skill_key, domain) if include_existing else [],
+        "existing_skills": _other_skill_descriptions(
+            exclude_skill_key, domain, _selected_skill_keys(state, domain)
+        ) if include_existing else [],
         "baseline_skill": {
             "key": state.active_skill_key,
             "name": baseline_skill.name,
             "description": baseline_skill.description,
             "triggers": list(baseline_skill.triggers or []),
+            "keywords": list(baseline_skill.keywords or []),
+            "exclusive": list(baseline_skill.exclusive or []),
+            "expert_rules": baseline_skill.expert_rules or "",
+            "version": baseline_skill.version,
+            "parent": baseline_skill.parent,
+            "lineage": list(baseline_skill.lineage or []),
         } if baseline_skill else None,
         "sample_lines": _sample_lines(state.filtered_preview, limit=40),
+        "case_summary": state.case_summary,
         "log_annotations": state.log_annotations,
         "chat_history": state.chat_history,
     }
@@ -257,7 +283,7 @@ def log_round():
 
     The request body's `use_prior_knowledge` (which of the two Log Round
     buttons was clicked) sets the SESSION-STICKY conversation mode: FRESH
-    teaches from scratch, PRIOR shows the same-domain existing skills so the
+    teaches from scratch, PRIOR shows the selected same-domain skill docs so the
     interview only probes what's NEW beyond them (never re-asking covered
     knowledge). Once set it governs the per-answer assess + the final export
     too, so the whole conversation stays consistently in one mode."""
@@ -276,7 +302,7 @@ def log_round():
     state.prior_knowledge = bool(data.get("use_prior_knowledge"))
 
     state.round_count += 1
-    # PRIOR mode shows the same-domain existing skills to the interview so it
+    # PRIOR mode shows the selected same-domain skill docs to the interview so it
     # can steer around them; FRESH omits them entirely.
     context = _context_from_state(state, exclude_skill_key="", include_existing=state.prior_knowledge)
     try:
@@ -440,6 +466,15 @@ def baseline():
         return jsonify({"success": False, "message": "Run the filter first so there's something to read."}), 400
 
     data = request.get_json(silent=True) or {}
+    if "case_summary" in data:
+        state.case_summary = str(data.get("case_summary") or "").strip()[:4000]
+    if "selected_skill_keys" in data and isinstance(data.get("selected_skill_keys"), list):
+        domain = (state.log_domain or "wifi").lower()
+        pool = _skill_pool(domain)
+        state.selected_skill_keys = list(dict.fromkeys(
+            str(key) for key in data["selected_skill_keys"] if str(key) in pool
+        ))
+        state.prior_knowledge = bool(state.selected_skill_keys)
     signature = _filter_signature(state)
     if state.baseline and state.baseline_filter_sig == signature and not data.get("force"):
         return jsonify({
@@ -453,7 +488,7 @@ def baseline():
         else {}
     )
 
-    # The header toggle is the explicit boundary for prerequisite knowledge.
+    # The checked document set is the explicit boundary for prerequisite knowledge.
     # OFF: commit to the LLM's own evidence-based first read. ON: include
     # loaded/existing same-domain skills so the baseline records what was
     # already known before the engineer teaches anything new.
@@ -675,8 +710,27 @@ def set_mode():
     Log Round. No LLM call — just stores the flag."""
     data = request.get_json(silent=True) or {}
     state = session_store.get_state()
+    domain = (state.log_domain or "wifi").lower()
+    if "selected_skill_keys" in data:
+        requested = data.get("selected_skill_keys") or []
+        if not isinstance(requested, list):
+            return jsonify({"success": False, "message": "selected_skill_keys must be a list"}), 400
+        pool = _skill_pool(domain)
+        # Preserve UI order, drop duplicates, and never allow WiFi documents
+        # into a BT case (or vice versa).
+        state.selected_skill_keys = list(dict.fromkeys(
+            str(key) for key in requested if str(key) in pool
+        ))
+        state.prior_knowledge = bool(state.selected_skill_keys)
+    if "case_summary" in data:
+        # Long enough for a useful customer symptom/timeline summary, bounded
+        # so this compact field cannot accidentally become a second log dump.
+        state.case_summary = str(data.get("case_summary") or "").strip()[:4000]
     if "use_prior_knowledge" in data:
-        state.prior_knowledge = bool(data.get("use_prior_knowledge"))
+        requested_prior = bool(data.get("use_prior_knowledge"))
+        state.prior_knowledge = requested_prior and bool(
+            _selected_skill_keys(state, domain)
+        )
     if "interview_mode" in data:
         # No retroactive re-flagging of open items here any more: `blocking`
         # is now a property of the question itself (see decision_ledger.
@@ -686,6 +740,8 @@ def set_mode():
     return jsonify({
         "success": True,
         "prior_knowledge": state.prior_knowledge,
+        "case_summary": state.case_summary,
+        "selected_skill_keys": _selected_skill_keys(state, domain),
         "interview_mode": state.interview_mode,
         "decision_ledger": decision_ledger.payload(state),
     })
@@ -702,6 +758,63 @@ def defer_decision():
     if not item:
         return jsonify({"success": False, "message": "Unknown decision"}), 404
     return jsonify({"success": True, "decision_ledger": decision_ledger.payload(state)})
+
+
+def _step_annotations(state, op: dict) -> list:
+    """E/X lines attributable to exactly one filter-edit Step.
+
+    E and X are mutually exclusive on a single source line (annotate_line
+    replaces the line's previous label). Different lines may legitimately
+    fall on opposite sides of the same keyword; retaining both is what lets
+    the interview elicit the boundary instead of erasing a counterexample.
+    """
+    if op.get("action") in {"load_skill", "load_tat"}:
+        return []
+    target = str(op.get("text") or "").strip().casefold()
+    excluding = bool(op.get("excluding"))
+    if not target:
+        return []
+    return [
+        dict(item)
+        for item in state.log_annotations
+        if any(
+            isinstance(keyword, dict)
+            and bool(keyword.get("excluding")) == excluding
+            and str(keyword.get("text") or "").strip().casefold() == target
+            for keyword in (item.get("matched_keywords") or [])
+        )
+    ]
+
+
+def _step_question_history(state, seq: int) -> list:
+    return [
+        {"question": item.get("question", ""), "answer": item.get("answer", "")}
+        for item in state.decision_ledger
+        if item.get("step") == seq
+        and item.get("source") == "step"
+        and item.get("status") == "resolved"
+        and item.get("answer")
+    ]
+
+
+def _step_op_context(state, op: dict, *, continuing: bool = False) -> dict:
+    domain = (state.log_domain or "wifi").lower()
+    return {
+        "domain": domain,
+        "verb": operation_journal._ACTION_VERB.get(op["action"], op["action"]),
+        "target": op.get("label") or op["text"],
+        "excluding": op["excluding"],
+        "effect_phrase": operation_journal._effect_phrase(op),
+        "reason": op.get("reason") or "",
+        "existing_skills": _other_skill_descriptions(
+            "", domain, _selected_skill_keys(state, domain)
+        ) if state.prior_knowledge else [],
+        "case_summary": state.case_summary,
+        "sample_lines": _sample_lines(state.filtered_preview, limit=24),
+        "step_annotations": _step_annotations(state, op),
+        "answered_questions": _step_question_history(state, op["seq"]),
+        "continuing": continuing,
+    }
 
 
 @learning_bp.route("/confirm_step", methods=["POST"])
@@ -749,15 +862,7 @@ def confirm_step():
             "operations": operation_journal.payload(state),
         })
 
-    domain = (state.log_domain or "wifi").lower()
-    op_context = {
-        "domain": domain,
-        "verb": operation_journal._ACTION_VERB.get(op["action"], op["action"]),
-        "target": op.get("label") or op["text"],
-        "excluding": op["excluding"],
-        "effect_phrase": operation_journal._effect_phrase(op),
-        "existing_skills": _other_skill_descriptions("", domain) if state.prior_knowledge else [],
-    }
+    op_context = _step_op_context(state, op)
     try:
         result = learning_service.confirm_step_knowledge(
             llm_helper, op_context, explanation, state.prior_knowledge)
@@ -825,22 +930,27 @@ def ask_step():
     if not isinstance(seq, int) or not op:
         return jsonify({"success": False, "message": "Unknown operation"}), 400
 
-    domain = (state.log_domain or "wifi").lower()
-    op_context = {
-        "domain": domain,
-        "verb": operation_journal._ACTION_VERB.get(op["action"], op["action"]),
-        "target": op.get("label") or op["text"],
-        "excluding": op["excluding"],
-        "effect_phrase": operation_journal._effect_phrase(op),
-        "reason": op["reason"],
-        "existing_skills": _other_skill_descriptions("", domain) if state.prior_knowledge else [],
-    }
+    answered = _step_question_history(state, seq)
+    if len(answered) >= 4:
+        return jsonify({
+            "success": True, "seq": seq, "question": None,
+            "no_question": True,
+            "message": "This step already has enough answered refinement questions.",
+            "decision_ledger": decision_ledger.payload(state),
+        })
+    op_context = _step_op_context(state, op, continuing=bool(answered))
     try:
         question = learning_service.ask_step_question(llm_helper, op_context, state.prior_knowledge)
     except Exception as e:
         return jsonify({"success": False, "message": f"LLM call failed: {e}"}), 500
     if not question:
-        return jsonify({"success": False, "message": "Couldn't generate a question — try again."}), 500
+        return jsonify({
+            "success": True, "seq": seq, "question": None,
+            "no_question": True,
+            "message": "No remaining question would materially change this skill.",
+            "decision_ledger": decision_ledger.payload(state),
+            "usage": {"last": llm_helper.last_usage, "session": llm_helper.session_usage},
+        })
 
     decision = decision_ledger.record_question(
         state,
@@ -858,6 +968,7 @@ def ask_step():
         "success": True,
         "seq": seq,
         "question": question,
+        "question_number": len(answered) + 1,
         "decision_id": decision["id"] if decision else "",
         "decision_ledger": decision_ledger.payload(state),
         "usage": {"last": llm_helper.last_usage, "session": llm_helper.session_usage},
@@ -866,12 +977,11 @@ def ask_step():
 
 @learning_bp.route("/answer_step_question", methods=["POST"])
 def answer_step_question():
-    """Answer to a /learning/ask_step question. No LLM call — just records
-    the Q&A into chat_history tagged to this step, and ONLY sets the
-    operation's `reason` if it doesn't already have one (the 🎓 user-led
-    explain box is the authoritative place for that; this shouldn't silently
-    clobber a carefully-written explanation with a short answer to a
-    secondary follow-up)."""
+    """Record one Step answer, then optionally generate the next high-value
+    question. Only one card is ever returned. The chain stops when the model
+    finds no remaining skill-changing gap, after four answered questions as a
+    runaway guard, or immediately when the UI uses Skip (which calls defer
+    instead of this route)."""
     data = request.get_json(silent=True) or {}
     seq = data.get("seq")
     question = (data.get("question") or "").strip()
@@ -886,14 +996,55 @@ def answer_step_question():
     decision_ledger.resolve(state, data.get("decision_id"), answer)
     if not op["reason"]:
         operation_journal.annotate_reason(state, seq, answer)
-    if question:
-        state.chat_history.append({"role": "assistant", "content": f"❓ {question}", "step": seq})
     state.chat_history.append({"role": "user", "content": answer, "step": seq})
+
+    next_question = None
+    next_decision = None
+    answered = _step_question_history(state, seq)
+    llm_helper = app_config.llm_helper
+    if (data.get("continue_chain") is True and len(answered) < 4
+            and llm_helper and llm_helper.is_ready):
+        try:
+            next_question = learning_service.ask_step_question(
+                llm_helper,
+                _step_op_context(state, op, continuing=True),
+                state.prior_knowledge,
+            )
+        except Exception:
+            # The submitted answer is already safely recorded. A failed
+            # optional continuation must never turn that successful action
+            # into an error or make the user submit twice.
+            next_question = None
+        if next_question:
+            next_decision = decision_ledger.record_question(
+                state,
+                source="step",
+                question=next_question["question"],
+                qtype=next_question.get("type"),
+                options=next_question.get("options"),
+                recommended_answer=next_question.get("recommended_answer"),
+                recommendation_reason=next_question.get("recommendation_reason"),
+                step=seq,
+                source_key=f"step:{seq}:{next_question['question']}",
+            )
+            state.chat_history.append({
+                "role": "assistant",
+                "content": f"❓ {next_question['question']}",
+                "step": seq,
+            })
     return jsonify({
         "success": True,
         "seq": seq,
         "operations": operation_journal.payload(state),
         "decision_ledger": decision_ledger.payload(state),
+        "next_question": next_question,
+        "next_decision_id": next_decision["id"] if next_decision else "",
+        "question_number": len(answered) + 1 if next_question else len(answered),
+        "chain_complete": not bool(next_question),
+        "usage": {
+            "last": llm_helper.last_usage if llm_helper and next_question else None,
+            "session": llm_helper.session_usage if llm_helper else None,
+        },
     })
 
 
@@ -901,7 +1052,7 @@ def answer_step_question():
 def assess():
     """Lightweight re-assessment after each chat answer, so the readiness
     badge + 防呆 details panel update live instead of only on Log Round. The
-    request may carry the header toggle's current `use_prior_knowledge`; if
+    request may carry the picker-derived `use_prior_knowledge`; if
     absent it falls back to whatever mode is already stored."""
     llm_helper = app_config.llm_helper
     if not llm_helper or not llm_helper.is_ready:
@@ -917,7 +1068,7 @@ def assess():
     if "use_prior_knowledge" in data:
         state.prior_knowledge = bool(data["use_prior_knowledge"])
 
-    # Same conversation mode the header toggle set — so live re-scoring after
+    # Same conversation mode the document picker set — so live re-scoring after
     # each answer counts NEW-vs-existing knowledge the same way the round did,
     # and stays consistent with what the interview is probing.
     context = _context_from_state(state, exclude_skill_key="", include_existing=state.prior_knowledge)
@@ -942,53 +1093,27 @@ def assess():
 
 @learning_bp.route("/converge", methods=["POST"])
 def converge():
-    """Synthesize one or more skill drafts from the chat interview +
-    operation-pattern stats, then route EACH draft through the Phase 2
-    retrieval-assisted maintenance decision (learning_service.route_draft) —
-    add / merge / discard, advisory only. The whole back-and-forth in the
-    chat panel IS the interview, so no separate Q&A step — the chat history
-    is already folded into the context block that synthesize_skill_draft
-    reads.
+    """Synthesize one or more mutually-exclusive skill drafts from the chat,
+    chronological log evidence, and operation-pattern stats. The whole chat
+    panel is the interview; no separate Q&A export step is needed.
 
     It follows the conversation mode from the header prior-knowledge toggle
     (sent as `use_prior_knowledge`, falling back to the stored
     state.prior_knowledge):
-      • FRESH — no prior-knowledge base is consulted during SYNTHESIS. The
-        conversation is split into drafts purely by the distinct knowledge
-        domains it covers.
-      • PRIOR — the SAME-domain (WiFi vs BT, from state.log_domain) existing
-        skills are shown to synthesis ONLY so drafts stay mutually exclusive
-        from them.
+      • FRESH — no existing skill is consulted during synthesis OR routing.
+        Every split draft remains standalone and contains only this session's
+        log/operation/user teaching.
+      • PRIOR — same-domain skills are read-only documents. Each split draft
+        is independently classified against the explicitly loaded skill:
+        additive same-capability knowledge becomes a NEW flattened child;
+        unrelated domains remain standalone; fully covered knowledge is
+        flagged instead of creating a duplicate child.
     Either mode may split the conversation into several drafts.
 
-    Independently of that toggle, EVERY draft (FRESH or PRIOR) is then routed
-    through route_draft(), which decides per-draft whether it should become a
-    new skill or fold into an existing one. Critically, "existing" here means
-    a LOCAL, copycat-owned skill ONLY (see _local_skill_pool) — a skill that
-    only exists via the shared corp drive / a teammate's contribution file is
-    never a valid merge target, no matter how similar. The shared library
-    stays purely read-only reference material; new teaching can only ever
-    extend a skill THIS copycat instance already created, never the shared
-    original. (This is a separate concern from the PRIOR-mode toggle above:
-    PRIOR only shapes what gets asked/extracted during the interview so it
-    doesn't re-cover ground the shared skills already know; it has no bearing
-    on where the resulting draft gets filed.)
-      - Tier 0 (continuity): state.active_skill_key — the ONE skill the
-        engineer explicitly loaded this session — is checked FIRST, in
-        isolation, but only if it's itself a local skill; a shared-origin
-        active_skill_key is silently skipped (falls through to Tier 1, which
-        will also only ever find local skills). Even when applicable, it
-        still has to pass a real similarity/judge gate before a merge is
-        suggested.
-      - Tier 1 (retrieval): the general local-pool-only search, used whenever
-        Tier 0 doesn't apply or doesn't clear its own bar.
-    route_draft also grounds BOTH the judge and any merge in this session's
-    actual filter_stats (unique_hits/dropped per keyword — see
-    learning_service.keyword_quality_map) — a newly-merged keyword/exclude
-    term that measured zero marginal contribution this run is held back into
-    `low_value_keywords`/`low_value_exclusive` on the draft instead of being
-    silently unioned in, so a merge only ever adds keywords actually earning
-    their place, not just anything that sounded plausible in conversation.
+    Export never updates an existing skill in place. Shared/team/local skills
+    all remain read-only during synthesis: the explicitly loaded one can be
+    ancestry for a new self-contained child, while every other split stays a
+    new standalone entry. Each relation is shown before Save.
 
     The route's decision (`judge`) is attached to each draft for the frontend
     to display — it never writes anything by itself; the engineer still
@@ -1033,14 +1158,13 @@ def converge():
     use_prior = state.prior_knowledge
     domain = (state.log_domain or "wifi").lower()
 
-    # Resolve the parent BEFORE the LLM call, not after: if this export is
-    # going to inherit, the synthesis has to be told so while it is still
-    # writing the description (that description is the only thing that will
-    # distinguish parent from child downstream — see the BASELINE SKILL block
-    # in learning_service._build_context_block). Depth is checked here too, so
-    # a chain that has hit the cap doesn't get a prompt promising inheritance
-    # that then doesn't happen.
-    parent = _baseline_skill(state)
+    # Load skills is authoritative for BOTH halves of prior knowledge:
+    #   OFF -> no old skill enters synthesis, routing, or inheritance;
+    #   ON  -> existing skills are read-only documents, and the explicitly
+    #          loaded skill may become a parent for each RELATED draft.
+    # This used to resolve a parent regardless of use_prior, which meant a
+    # nominally FRESH export could still inherit old rules after synthesis.
+    parent = _baseline_skill(state) if use_prior else None
     depth = skill_dedup.lineage_depth_check(parent) if parent else None
     lineage_blocked = None
     if parent and not depth["allowed"]:
@@ -1059,8 +1183,10 @@ def converge():
         }
         parent = None
 
-    # FRESH: don't even load the existing-skills list into the prompt. PRIOR:
-    # include the same-domain skills so the synthesis can carve around them.
+    # FRESH: no existing skill enters the prompt. PRIOR: existing same-domain
+    # skills are read-only documents so synthesis can avoid duplicate scope;
+    # the loaded skill is a candidate parent, not a promise that every split
+    # draft will inherit it.
     context = _context_from_state(state, exclude_skill_key="", include_existing=use_prior,
                                   baseline_skill=parent if use_prior else None)
     try:
@@ -1070,21 +1196,7 @@ def converge():
         return jsonify({"success": False, "message": f"LLM call failed: {e}"}), 500
 
     raw_drafts = result.get("drafts") or []
-    # LOCAL-only pool — route_draft's judge may only pick a merge target this
-    # engineer's own copycat instance already created (see _local_skill_pool).
-    # A skill that only exists on the shared corp drive is never a valid
-    # merge target: even if state.active_skill_key points at one (loaded as
-    # this session's filter baseline) or Tier 1's retrieval finds one that
-    # looks similar, it simply won't be present in this pool, so the draft
-    # falls through to "add" — a fresh, copycat-owned skill — instead of
-    # silently shadowing the shared original.
-    pool = _local_skill_pool(domain)
-    # Only trust the continuity hint when the loaded skill actually belongs
-    # to THIS export's domain AND is itself a local (copycat-owned) skill —
-    # a WiFi active_skill_key must never be checked against a BT draft (or
-    # vice versa), and a shared-origin active_skill_key must never be
-    # checked at all (see `pool` above).
-    continuity_key = state.active_skill_key or None
+    domain_pool = _skill_pool(domain)
 
     drafts = []
     for draft in raw_drafts:
@@ -1092,33 +1204,87 @@ def converge():
         if state.tat_path:
             draft.setdefault("tat_path", state.tat_path)
         draft["teaching_evidence"] = learning_service.assess_teaching_evidence(draft, context)
-        routed = learning_service.route_draft(
-            llm_helper, draft, pool, continuity_key, filter_stats=state.filter_stats)
+        relationship = None
+        if parent:
+            relationship = learning_service.classify_loaded_parent(
+                llm_helper, draft, state.active_skill_key, parent, domain_pool,
+                filter_stats=state.filter_stats)
+            draft["parent_relationship"] = relationship
+
+        if not use_prior:
+            # Strict standalone path: no retrieval, no merge suggestion, and
+            # no parent metadata. The only knowledge source is this session.
+            routed = dict(draft)
+            routed["skill_key"] = None
+            routed["judge"] = {
+                "action": "add", "target_skill_key": None,
+                "target_skill_name": None, "target_skill_version": None,
+                "reason": "Load skills is off; built only from this session.",
+                "source": "fresh",
+            }
+        elif relationship and relationship["relationship"] == "extends":
+            # A related loaded skill becomes ancestry for a NEW child. Do not
+            # route this into an in-place local merge: parent stays immutable.
+            routed = dict(draft)
+            routed["skill_key"] = None
+            routed["judge"] = {
+                "action": "add", "target_skill_key": None,
+                "target_skill_name": None, "target_skill_version": None,
+                "reason": relationship["reason"], "source": "loaded_parent",
+            }
+        elif relationship and relationship["relationship"] == "covered":
+            # Fully covered knowledge is still reviewable, but must not create
+            # a content-identical child merely to display a lineage arrow.
+            routed = dict(draft)
+            routed["skill_key"] = None
+            routed["judge"] = {
+                "action": "discard", "target_skill_key": None,
+                "target_skill_name": parent.name,
+                "target_skill_version": parent.version,
+                "reason": relationship["reason"], "source": "loaded_parent",
+            }
+        else:
+            # PRIOR knowledge shapes questions, scope and deduplication, but
+            # Export still creates a NEW entry. Only a verified relationship
+            # to the explicitly loaded parent creates ancestry; otherwise the
+            # split draft is standalone rather than silently updating some
+            # other local skill found by retrieval.
+            routed = dict(draft)
+            routed["skill_key"] = None
+            routed["judge"] = {
+                "action": "add", "target_skill_key": None,
+                "target_skill_name": None, "target_skill_version": None,
+                "reason": (
+                    relationship["reason"] if relationship else
+                    "Prior skill documents were considered; no loaded parent was selected."
+                ),
+                "source": "prior",
+            }
         routed["domain"] = domain
         drafts.append(routed)
 
-    # Whether a skill was LOADED decides the shape of the export, and it is
-    # the only thing that decides it — there is one Export button, not two.
+    # In PRIOR mode the related drafts inherit the loaded parent's complete
+    # body; unrelated domains remain standalone. This per-draft split matters
+    # when one conversation yields, for example, one roam skill that extends
+    # the loaded baseline and one unrelated DHCP skill.
     #
-    #   No skill loaded  -> nothing to be redundant against. Leave the drafts
-    #                       exactly as synthesized; the only structuring is
-    #                       the mutually-exclusive split route_draft/synthesis
-    #                       already did.
-    #   Skill loaded     -> that skill is the parent. Separate what merely
-    #                       repeats it from what is genuinely new (see
-    #                       utils.skill_dedup), and rebuild each draft on the
-    #                       parent's framework with the inheritance recorded.
-    #                       Fully resolved, never delta-only: Avatar's loader
-    #                       ignores the lineage keys, so a delta-only child
-    #                       would run there with a fraction of its keywords.
-    # Deterministic, no extra LLM call. `parent` was resolved (and depth-
-    # checked) before the synthesis call above.
+    # Related draft -> rebuild on the parent's complete framework and record
+    # lineage. Unrelated/covered draft -> preserve its standalone body. The
+    # related child is fully resolved, never delta-only: Avatar ignores the
+    # lineage keys, so a delta-only child would run with incomplete filters.
     if parent:
         rebuilt = []
         for d in drafts:
+            relation = d.get("parent_relationship") or {}
+            if relation.get("relationship") != "extends":
+                rebuilt.append(d)
+                continue
             diff = skill_dedup.diff_against_parent(d, parent)
             ext = skill_dedup.build_extension_skill(
                 d, parent, state.active_skill_key, diff)
+            # Inheritance always creates a NEW Copycat-owned child. A local
+            # parent must never be overwritten merely because routing found it.
+            ext["skill_key"] = None
             # What the modal needs to SHOW the separation rather than just
             # presenting a longer list: an unexplained merge reads as either
             # data loss or duplication depending on which way it went.
@@ -1151,6 +1317,8 @@ def converge():
             rebuilt.append(ext)
         drafts = rebuilt
 
+    inherited_count = sum(1 for d in drafts if d.get("parent"))
+
     # Review-only control plane. These fields never enter skill_service.Skill
     # and therefore never alter Avatar's YAML contract.
     for draft in drafts:
@@ -1163,7 +1331,14 @@ def converge():
     return jsonify({
         "success": True,
         "drafts": drafts,
-        "inherited_from": state.active_skill_key if parent else None,
+        "inherited_from": state.active_skill_key if inherited_count else None,
+        "inheritance_summary": {
+            "enabled": use_prior,
+            "parent_key": state.active_skill_key if parent else None,
+            "parent_name": parent.name if parent else None,
+            "inherited_drafts": inherited_count,
+            "standalone_drafts": len(drafts) - inherited_count,
+        },
         # Set only when a skill WAS loaded but the chain was already at max
         # depth, so the UI can say why this export came out standalone
         # instead of silently looking like nothing was loaded.
@@ -1226,6 +1401,9 @@ def save():
     set_up_app.reload_pools()
 
     state.active_skill_key = saved_key
+    if saved_key not in state.selected_skill_keys:
+        state.selected_skill_keys.append(saved_key)
+    state.prior_knowledge = True
     state.skill_draft = []
     state.learning_questions = []
     state.learning_answers = []

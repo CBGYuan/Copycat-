@@ -42,10 +42,12 @@
     options: {},
   };
 
+  // Quotes too: textContent -> innerHTML leaves them alone, and these strings
+  // also land inside double-quoted attributes.
   function escapeHtml(s) {
     const div = document.createElement("div");
     div.textContent = s == null ? "" : String(s);
-    return div.innerHTML;
+    return div.innerHTML.replace(/"/g, "&quot;").replace(/'/g, "&#39;");
   }
 
   // The boundary build_extension_skill writes between inherited rules and the

@@ -92,18 +92,46 @@ def _skill_pool(domain: str) -> dict:
     return app_config.bt_skills if domain == "bt" else app_config.skills
 
 
-def _other_skill_descriptions(active_key: str, domain: str = "wifi") -> str:
-    rows = [
-        f"  - {sk.name}: {sk.description}"
-        for key, sk in _skill_pool(domain).items() if key != active_key
-    ]
-    return "\n".join(rows)
+def _selected_skill_documents(state, domain: str = "wifi") -> str:
+    """Full read-only docs chosen in the Question context picker."""
+    pool = _skill_pool(domain)
+    keys = [key for key in state.selected_skill_keys if key in pool]
+    if not keys and state.prior_knowledge:  # legacy session/API compatibility
+        keys = [state.active_skill_key] if state.active_skill_key in pool else list(pool)
+    rows = []
+    for key in keys:
+        sk = pool[key]
+        rules = str(sk.expert_rules or "").strip()
+        if len(rules) > 1800:
+            rules = rules[:1800].rstrip() + "\n  ... (document truncated)"
+        rows.append(
+            f"[SKILL DOC {key}] {sk.name}\n"
+            f"  Scope: {sk.description}\n"
+            f"  Triggers: {'; '.join(sk.triggers or []) or '(none)'}\n"
+            f"  Keywords: {', '.join(sk.keywords or []) or '(none)'}\n"
+            f"  Rules:\n{rules or '  (none)'}"
+        )
+    return "\n\n".join(rows)
+
+
+def _chronological_sample(lines: list, limit: int = 60) -> list:
+    """Bounded head+tail context that never changes the source order."""
+    if len(lines) <= limit:
+        return lines
+    head_n = limit * 2 // 3
+    return lines[:head_n] + ["... (chronological middle omitted) ..."] + lines[-(limit - head_n):]
 
 
 def _build_system_prompt(state) -> str:
     domain = (state.log_domain or "wifi").lower()
     parts = [BASE_SYS_PROMPT]
-    skill = _skill_pool(domain).get(state.active_skill_key) if state.active_skill_key else None
+    if state.case_summary:
+        parts.append(
+            "=== ENGINEER-PROVIDED CASE SUMMARY ===\n"
+            + state.case_summary
+            + "\nUse this to orient the case, but verify it against the chronological "
+              "log evidence. If summary and log disagree, ask about that difference."
+        )
     if state.has_current_baseline():
         baseline = state.baseline or {}
         key_rows = "\n".join(
@@ -140,28 +168,28 @@ def _build_system_prompt(state) -> str:
                 "ask a follow-up question. Missing decisions stay passive."
             )
 
-    # The toggle is authoritative: OFF means the conversation is compared
-    # only with the model's own baseline; ON adds loaded/existing skills as
-    # prior professional knowledge.
+    # The picker is authoritative: zero documents means session-only; checked
+    # documents are the exact prior professional knowledge allowed here.
     if state.prior_knowledge:
-        others = _other_skill_descriptions(state.active_skill_key, domain)
-        if others:
-            parts.append("=== Existing skills (keep any new skill's scope distinct from these) ===\n" + others)
-        if skill:
+        docs = _selected_skill_documents(state, domain)
+        if docs:
             parts.append(
-                f"=== Explicitly loaded prior skill: {skill.name} ===\n"
-                f"Description: {skill.description}\n"
-                f"Triggers: {'; '.join(skill.triggers or []) or '(none)'}\n"
-                f"Expert rules:\n{skill.expert_rules or '(none)'}"
+                "=== SELECTED READ-ONLY SKILL DOCUMENTS ===\n" + docs +
+                "\nThese documents are prior knowledge, not log evidence. Do not re-ask "
+                "what they already cover; use the current log and case summary to ask only "
+                "about a meaningful gap, conflict, boundary, or new rule."
             )
     stats_summary = _stats_summary(state)
     if stats_summary:
         parts.append("=== Operation pattern (tool-computed, not the raw log) ===\n" + stats_summary)
     if state.filtered_preview:
-        sample = "\n".join(state.filtered_preview[:200])
-        parts.append(f"=== Filtered Log Excerpt (first 200 surviving lines) ===\n{sample}")
+        sample = "\n".join(_chronological_sample(state.filtered_preview))
+        parts.append(
+            "=== CHRONOLOGICAL FILTERED LOG EVIDENCE (bounded head + tail) ===\n"
+            + sample
+        )
     # Mirrors the Log Round / Teach-Step conversation mode (the "Load skills"
-    # header toggle, or auto-enabled when a named skill is loaded — see
+    # document picker, or auto-enabled when a named skill is loaded — see
     # log_viewer_routes.load_skill) — without this, a natural follow-up typed
     # here after answering a teach-step question could re-ask about knowledge
     # an existing skill above already covers, defeating the whole point of
@@ -169,7 +197,7 @@ def _build_system_prompt(state) -> str:
     if state.prior_knowledge:
         parts.append(
             "CONVERSATION MODE — WITH PRIOR KNOWLEDGE: treat everything the "
-            "existing skills above already cover as GIVEN — do not ask the "
+            "selected skill documents above already cover as GIVEN — do not ask the "
             "engineer to re-explain it. Only ask about knowledge that's "
             "genuinely NEW beyond what those skills already hold."
         )

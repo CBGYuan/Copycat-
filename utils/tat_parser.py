@@ -32,12 +32,22 @@ def _to_bool(val: Optional[str]) -> bool:
     return (val or "").strip().lower() == "y"
 
 
+_HEX_COLOR_RE = re.compile(r"^#?[0-9a-fA-F]{6}$")
+
+
 def _color(hex6: Optional[str]) -> Optional[str]:
-    """Normalize a TAT color attribute ("ff0000") to CSS ("#ff0000")."""
+    """Normalize a TAT color attribute ("ff0000") to CSS ("#ff0000").
+
+    Anything that is not a plain 6-digit hex is dropped: the frontend renders
+    this straight into a style="..." attribute, so an arbitrary value from a
+    .tat file would otherwise be an HTML-injection vector.
+    """
     if not hex6:
         return None
     hex6 = hex6.strip()
-    return f"#{hex6}" if not hex6.startswith("#") else hex6
+    if not _HEX_COLOR_RE.match(hex6):
+        return None
+    return hex6 if hex6.startswith("#") else f"#{hex6}"
 
 
 def parse_filter_file(filter_file_path: str) -> List[Dict]:
@@ -93,6 +103,15 @@ def _line_matcher(rule: Dict):
 
 # Leading timestamp, e.g. "10/28/2025-09:54:36.214 " or "04/14/2026-01:20:13.333 "
 _TS_RE = re.compile(r'^\s*(\d{2}/\d{2}/\d{4}-\d{2}:\d{2}:\d{2}\.\d{3})')
+
+# WiFi DDD exports keep a raw frame counter in front of the timestamp; it is
+# noise in the log pane and in the LLM context.
+_FRAME_COUNTER_RE = re.compile(r'^\d+\t')
+
+
+def clean_row_text(line: str) -> str:
+    """One raw log line as the log pane / LLM context should see it."""
+    return _FRAME_COUNTER_RE.sub("", line).rstrip("\n")
 
 
 def _leading_timestamp(line: str):
@@ -248,6 +267,12 @@ def compute_filter_stats(log_lines: List[str], filters: List[Dict],
     pair_counts: Dict[tuple, int] = {}
     overlap_count = 0
     surviving_preview = []
+    # (line_no, matched include-filter indices) for EVERY survivor, not just
+    # the previewed ones. Two ints and a small tuple per row -- cheap next to
+    # the line strings themselves, which the caller already has cached -- and
+    # it is what lets the log pane page through the whole result instead of
+    # only ever seeing `preview_limit` rows (see /log_viewer/preview_page).
+    survivor_rows: List[tuple] = []
     # Separate LLM context tail. The visible preview intentionally remains a
     # chronological prefix for the log table, but questions also need to see
     # how a long scenario ends. A bounded deque captures that without keeping
@@ -301,6 +326,7 @@ def compute_filter_stats(log_lines: List[str], filters: List[Dict],
         if len(include_hits) == 1:
             unique_hits[include_hits[0]] += 1
         surviving_count += 1
+        survivor_rows.append((line_no, tuple(include_hits)))
         ts = _leading_timestamp(line)
         if ts:
             if first_ts is None:
@@ -308,7 +334,7 @@ def compute_filter_stats(log_lines: List[str], filters: List[Dict],
             last_ts = ts
         if len(surviving_preview) < preview_limit:
             first = filters[include_hits[0]]
-            cleaned = re.sub(r"^\d+\t", "", line).rstrip("\n")
+            cleaned = clean_row_text(line)
             surviving_preview.append({
                 "line_no": line_no,
                 "text": cleaned,
@@ -319,7 +345,7 @@ def compute_filter_stats(log_lines: List[str], filters: List[Dict],
         # Keep the true end even after the visible preview cap was reached.
         context_tail.append({
             "line_no": line_no,
-            "text": re.sub(r"^\d+\t", "", line).rstrip("\n"),
+            "text": clean_row_text(line),
         })
 
     per_filter = [{
@@ -363,6 +389,7 @@ def compute_filter_stats(log_lines: List[str], filters: List[Dict],
         "time_span": {"first": first_ts, "last": last_ts},
         "surviving_count": surviving_count,
         "preview": surviving_preview,
+        "survivor_rows": survivor_rows,
         "context_preview": context_preview,
         "total_lines": len(log_lines),
     }

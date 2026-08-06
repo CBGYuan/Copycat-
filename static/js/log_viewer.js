@@ -120,10 +120,13 @@ function setBusy(v) {
 // cards) tag their own messages directly with that step's seq, ignoring this.
 let currentStepTag = 'all';
 
+// textContent -> innerHTML escapes < > &, but NOT quotes -- and several call
+// sites interpolate into a double-quoted attribute (data-raw-text, title),
+// where a quote inside a log line would break out of that attribute.
 function escapeHtml(s) {
     const div = document.createElement('div');
     div.textContent = s;
-    return div.innerHTML;
+    return div.innerHTML.replace(/"/g, '&quot;').replace(/'/g, '&#39;');
 }
 
 // Parse the leading timestamp + up to 4 consecutive [bracketed] fields into
@@ -530,15 +533,77 @@ function refreshSkillList(domain) {
 // Render the log (raw, before any filter — or filtered, once one has run)
 // as TAT-style rows: sticky line-number gutter + column-aligned, optionally
 // colored text.
-function renderLogRows(preview, emptyMessage) {
+// ---- Virtual log pane -----------------------------------------------------
+// A real capture is six figures of lines and every rendered row is ~9 DOM
+// nodes, so putting a whole result on the page costs ~1M nodes and seconds of
+// layout — which is why the pane used to be hard-capped at the first 500 rows.
+// Instead only the rows in (and just outside) the viewport are ever in the
+// DOM: two spacer divs stand in for the rest so the scrollbar still represents
+// the full result, and pages are pulled from /log_viewer/preview_page as they
+// scroll into range. Rows are single-line (white-space:nowrap), so one
+// measured row height describes every row.
+const vlog = {
+    gen: 0,             // bumped per view; page responses from an older view are dropped
+    total: 0,
+    rows: [],           // sparse, indexed by view position
+    rowH: 0,
+    pageSize: 500,      // matches the server's own page size
+    pending: new Set(),
+    emptyMessage: '',
+    first: -1,
+    last: -1,
+    maxLineNo: 0,
+    minWidth: 0,        // widest content seen, so scrolling can't shrink the pane
+    highlightIndex: null,
+};
+
+function logRowHtml(p) {
+    let style = '';
+    if (p.back_color) style += `background:${p.back_color};`;
+    if (p.fore_color) style += `color:${p.fore_color};`;
+    // data-ms = the row's timestamp as epoch ms (or empty) — lets the event
+    // panel jump to the nearest log line by time, and lets a log-row click
+    // find the nearest event.
+    const ms = parseLogTimeMs(p.text);
+    const annotation = annotationData.find(item => item.line_no === p.line_no);
+    const annotationClass = annotation ? ` is-annotated annotation-${annotation.label}` : '';
+    const activeCls = (label) => (annotation && annotation.label === label) ? ' is-active' : '';
+    const matchedArr = '[' + (p.matched || []).join(',') + ']';
+    const annotationButtons = p.line_no == null ? '' : `<span class="log-annotation-tools">
+        <button type="button" data-label="evidence" aria-label="Mark as supporting evidence" aria-pressed="${!!annotation && annotation.label === 'evidence'}" class="${activeCls('evidence').trim()}" title="Evidence — this line supports the scenario or rule" onclick="annotateLogLine(event, ${p.line_no}, 'evidence', ${matchedArr})">E</button>
+        <button type="button" data-label="counterexample" aria-label="Mark as counterexample" aria-pressed="${!!annotation && annotation.label === 'counterexample'}" class="${activeCls('counterexample').trim()}" title="Counterexample — this line is an exception or challenges the rule" onclick="annotateLogLine(event, ${p.line_no}, 'counterexample', ${matchedArr})">X</button>
+    </span>`;
+    return `<div class="tat-log-row${annotationClass}" data-line-no="${p.line_no == null ? '' : p.line_no}" data-raw-text="${escapeHtml(p.text)}"${ms != null ? ` data-ms="${ms}"` : ''}>` +
+        `<span class="tat-log-lineno">${p.line_no != null ? p.line_no : ''}</span>` +
+        `<span class="tat-log-text" style="${style}">${formatLogLine(p.text)}</span>` +
+        annotationButtons +
+        `</div>`;
+}
+
+function logPlaceholderRowHtml() {
+    return '<div class="tat-log-row tat-log-row-loading">' +
+        '<span class="tat-log-lineno"></span><span class="tat-log-text">…</span></div>';
+}
+
+// Start a NEW view: `preview` is its first page, `total` the number of rows
+// the whole view has (defaults to the page itself, for callers with no total).
+function renderLogRows(preview, emptyMessage, total) {
     const box = document.getElementById('previewBox');
-    // Size the line-number gutter to the WIDEST line number in this preview so
-    // every row's gutter is identical and the timestamp column starts at the
-    // same x on every line (4- vs 5- vs 6-digit numbers no longer drift the
-    // row). +0.5ch of slack, floored at 4ch so short files still look right.
-    const maxDigits = preview.reduce(
-        (m, p) => Math.max(m, p.line_no != null ? String(p.line_no).length : 0), 0);
-    box.style.setProperty('--lineno-w', Math.max(4, maxDigits + 0.5) + 'ch');
+    const rows = preview || [];
+    vlog.gen++;
+    vlog.rows = [];
+    vlog.pending.clear();
+    vlog.total = (total == null) ? rows.length : Math.max(total, rows.length);
+    vlog.emptyMessage = emptyMessage || 'Empty file';
+    vlog.first = vlog.last = -1;
+    vlog.maxLineNo = 0;
+    vlog.minWidth = 0;
+    vlog.highlightIndex = null;
+    rows.forEach((p, i) => { vlog.rows[i] = p; });
+    if (!vlog.total) {
+        box.innerHTML = `<div class="tat-log-empty">${escapeHtml(vlog.emptyMessage)}</div>`;
+        return;
+    }
     // Rows sit inside .tat-log-inner (display:inline-block) instead of
     // directly in the scroll container — an inline-block shrink-wraps to
     // whatever the WIDEST row's content actually needs, and every row inside
@@ -548,32 +613,95 @@ function renderLogRows(preview, emptyMessage) {
     // nothing wide to grow into and its color band stopped right where the
     // text did — full-length color bars only ever appeared for the single
     // longest line on screen.
-    const rowsHtml = preview.map(p => {
-        let style = '';
-        if (p.back_color) style += `background:${p.back_color};`;
-        if (p.fore_color) style += `color:${p.fore_color};`;
-        // data-ms = the row's timestamp as epoch ms (or empty) — lets the event
-        // panel jump to the nearest log line by time, and lets a log-row click
-        // find the nearest event.
-        const ms = parseLogTimeMs(p.text);
-         const annotation = annotationData.find(item => item.line_no === p.line_no);
-         const annotationClass = annotation ? ` is-annotated annotation-${annotation.label}` : '';
-         const activeCls = (label) => (annotation && annotation.label === label) ? ' is-active' : '';
-         const matchedArr = '[' + (p.matched || []).join(',') + ']';
-         const annotationButtons = p.line_no == null ? '' : `<span class="log-annotation-tools">
-             <button type="button" data-label="evidence" aria-label="Mark as supporting evidence" aria-pressed="${!!annotation && annotation.label === 'evidence'}" class="${activeCls('evidence').trim()}" title="Evidence — this line supports the scenario or rule" onclick="annotateLogLine(event, ${p.line_no}, 'evidence', ${matchedArr})">E</button>
-             <button type="button" data-label="counterexample" aria-label="Mark as counterexample" aria-pressed="${!!annotation && annotation.label === 'counterexample'}" class="${activeCls('counterexample').trim()}" title="Counterexample — this line is an exception or challenges the rule" onclick="annotateLogLine(event, ${p.line_no}, 'counterexample', ${matchedArr})">X</button>
-         </span>`;
-         return `<div class="tat-log-row${annotationClass}" data-line-no="${p.line_no == null ? '' : p.line_no}" data-raw-text="${escapeHtml(p.text)}"${ms != null ? ` data-ms="${ms}"` : ''}>` +
-               `<span class="tat-log-lineno">${p.line_no != null ? p.line_no : ''}</span>` +
-               `<span class="tat-log-text" style="${style}">${formatLogLine(p.text)}</span>` +
-             annotationButtons +
-               `</div>`;
-    }).join('');
-    box.innerHTML = rowsHtml
-        ? `<div class="tat-log-inner">${rowsHtml}</div>`
-        : `<div class="tat-log-empty">${emptyMessage || 'Empty file'}</div>`;
+    box.innerHTML = '<div class="tat-log-inner">'
+        + '<div class="tat-log-pad"></div><div class="tat-log-body"></div><div class="tat-log-pad"></div>'
+        + '</div>';
+    box.scrollTop = 0;
+    renderVisibleLogRows(true);
 }
+
+function renderVisibleLogRows(force) {
+    const box = document.getElementById('previewBox');
+    const inner = box.querySelector('.tat-log-inner');
+    if (!inner) return;
+    const pads = inner.querySelectorAll('.tat-log-pad');
+    const body = inner.querySelector('.tat-log-body');
+    if (!vlog.rowH) {
+        body.innerHTML = logRowHtml(vlog.rows[0] || {line_no: 1, text: ' '});
+        vlog.rowH = (body.firstElementChild && body.firstElementChild.offsetHeight) || 15;
+    }
+    const overscan = 25;
+    const first = Math.max(0, Math.floor(box.scrollTop / vlog.rowH) - overscan);
+    const last = Math.min(vlog.total, first + Math.ceil(box.clientHeight / vlog.rowH) + overscan * 2);
+    if (!force && first === vlog.first && last === vlog.last) return;
+    vlog.first = first;
+    vlog.last = last;
+
+    let html = '';
+    let hasGap = false;
+    for (let i = first; i < last; i++) {
+        const row = vlog.rows[i];
+        if (!row) { html += logPlaceholderRowHtml(); hasGap = true; continue; }
+        if (row.line_no > vlog.maxLineNo) vlog.maxLineNo = row.line_no;
+        html += logRowHtml(row);
+    }
+    // Size the line-number gutter to the widest line number SEEN SO FAR, never
+    // shrinking it — re-deriving it per window would shift the timestamp column
+    // sideways every time scrolling crossed a digit boundary.
+    box.style.setProperty('--lineno-w', Math.max(4, String(vlog.maxLineNo).length + 0.5) + 'ch');
+    pads[0].style.height = (first * vlog.rowH) + 'px';
+    pads[1].style.height = (Math.max(0, vlog.total - last) * vlog.rowH) + 'px';
+    body.innerHTML = html;
+    // Same reasoning as the gutter: the inline-block shrink-wraps to the widest
+    // row currently rendered, so without a floor the horizontal scroll range
+    // would jump around as rows enter and leave the window.
+    inner.style.minWidth = '';
+    vlog.minWidth = Math.max(vlog.minWidth, inner.scrollWidth);
+    if (vlog.minWidth > box.clientWidth) inner.style.minWidth = vlog.minWidth + 'px';
+    highlightLogIndex();
+    if (hasGap) requestLogPages(first, last);
+}
+
+function requestLogPages(first, last) {
+    const gen = vlog.gen;
+    const firstPage = Math.floor(first / vlog.pageSize);
+    const lastPage = Math.floor(Math.max(first, last - 1) / vlog.pageSize);
+    for (let p = firstPage; p <= lastPage; p++) {
+        const offset = p * vlog.pageSize;
+        if (vlog.pending.has(p) || vlog.rows[offset] !== undefined) continue;
+        vlog.pending.add(p);
+        fetch(LV.url.log_viewer_preview_page, {
+            method: 'POST', headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({offset: offset, limit: vlog.pageSize}),
+        }).then(r => r.json()).then(d => {
+            if (gen !== vlog.gen) return;  // the view was replaced mid-flight
+            vlog.pending.delete(p);
+            if (!d || !d.success || !d.rows) return;
+            d.rows.forEach((row, k) => { vlog.rows[d.offset + k] = row; });
+            renderVisibleLogRows(true);
+        }).catch(() => { if (gen === vlog.gen) vlog.pending.delete(p); });
+    }
+}
+
+// Centre view row `index` in the pane and flash it. The row may not be loaded
+// yet; the highlight is re-applied on every render until the view changes.
+function scrollLogToIndex(index) {
+    const box = document.getElementById('previewBox');
+    if (index == null || !vlog.rowH) return;
+    vlog.highlightIndex = index;
+    box.scrollTop = Math.max(0, index * vlog.rowH - box.clientHeight / 2 + vlog.rowH / 2);
+    renderVisibleLogRows(true);
+}
+
+function highlightLogIndex() {
+    const box = document.getElementById('previewBox');
+    box.querySelectorAll('.tat-log-row.is-time-hit').forEach(r => r.classList.remove('is-time-hit'));
+    if (vlog.highlightIndex == null) return;
+    const body = box.querySelector('.tat-log-body');
+    const el = body && body.children[vlog.highlightIndex - vlog.first];
+    if (el) el.classList.add('is-time-hit');
+}
+
 
 // ---- Select-a-token-in-a-line -> make it a filter -------------------------
 // The lightest gesture in the interactive-log-parsing literature: instead of
@@ -695,6 +823,7 @@ function pickLog() {
         .then(d => {
             if (d.success) {
                 baselineDone = false;
+                baselineEverDone = false;   // new capture = new case, nothing left to export
                 contextLineCount = 0;
                 contextTimeSpan = {};
                 // A new capture is a new case — drop the previous framing and
@@ -709,14 +838,11 @@ function pickLog() {
                 // Show the log immediately — don't make the engineer wait
                 // for a .tat/skill to be loaded just to see the file.
                 document.getElementById('logPaneTitle').textContent = 'Log';
-                lastMatchCount = d.preview.length;
-            document.getElementById('matchCount').textContent = d.preview.length;
+                lastMatchCount = d.view_total;
+                document.getElementById('matchCount').textContent = d.view_total;
                 document.getElementById('totalLines').textContent = d.total_lines;
-                document.getElementById('statsSummary').textContent =
-                    d.total_lines > d.preview.length
-                        ? `no filter applied yet — first ${d.preview.length} of ${d.total_lines} lines`
-                        : 'no filter applied yet';
-                renderLogRows(d.preview);
+                document.getElementById('statsSummary').textContent = 'no filter applied yet';
+                renderLogRows(d.preview, null, d.view_total);
                 // A new log always clears any focus window server-side (see
                 // /pick_log) — an issue time from the OLD file's frame could
                 // silently slice this one down to zero lines. Reset the UI too.
@@ -768,14 +894,11 @@ function showAllLog() {
         .then(d => {
             if (!d.success) { alert(d.message); return; }
             document.getElementById('logPaneTitle').textContent = 'Log';
-            lastMatchCount = d.preview.length;
-            document.getElementById('matchCount').textContent = d.preview.length;
+            lastMatchCount = d.view_total;
+            document.getElementById('matchCount').textContent = d.view_total;
             document.getElementById('totalLines').textContent = d.total_lines;
-            document.getElementById('statsSummary').textContent =
-                d.total_lines > d.preview.length
-                    ? `no filter applied — first ${d.preview.length} of ${d.total_lines} lines`
-                    : '';
-            renderLogRows(d.preview);
+            document.getElementById('statsSummary').textContent = '';
+            renderLogRows(d.preview, null, d.view_total);
             // /show_all always clears any active focus window server-side —
             // mirror that in the UI so the Focus controls don't lie about state.
             setFocusUiState(null);
@@ -822,7 +945,7 @@ function toggleFocusPopover(force) {
         // empty picker is fiddly to fill from scratch.
         let seed = document.getElementById('focusTimeInput').value;
         if (!seed) {
-            const first = document.querySelector('#previewBox .tat-log-text');
+            const first = document.querySelector('#previewBox .tat-log-row:not(.tat-log-row-loading) .tat-log-text');
             const m = first && first.textContent.match(/(\d{2}):(\d{2}):(\d{2})/);
             if (m) seed = `${m[1]}:${m[2]}:${m[3]}`;
         }
@@ -928,7 +1051,7 @@ function closeTimeWheel() {
 // The "Use visible line's time" shortcut inside the picker — re-seeds without
 // closing the popover, for re-centering after scrolling the log.
 function seedTimeWheelFromLog() {
-    const first = document.querySelector('#previewBox .tat-log-text');
+    const first = document.querySelector('#previewBox .tat-log-row:not(.tat-log-row-loading) .tat-log-text');
     const m = first && first.textContent.match(/(\d{2}):(\d{2}):(\d{2})/);
     if (!m) return;
     initTimeWheel(`${m[1]}:${m[2]}:${m[3]}`);
@@ -965,10 +1088,10 @@ function focusLogTime() {
                 applyFilter();
             } else {
                 document.getElementById('logPaneTitle').textContent = 'Log';
-                lastMatchCount = d.preview.length;
-            document.getElementById('matchCount').textContent = d.preview.length;
+                lastMatchCount = d.view_total;
+                document.getElementById('matchCount').textContent = d.view_total;
                 document.getElementById('totalLines').textContent = d.total_lines;
-                renderLogRows(d.preview);
+                renderLogRows(d.preview, null, d.view_total);
             }
         });
 }
@@ -1178,7 +1301,7 @@ function _evtRenderTable(timeHeader) {
     const body = document.getElementById('evtBody');
     if (!_evtData.length) { body.innerHTML = '<p class="evt-msg">No matching events.</p>'; document.getElementById('evtCount').textContent = ''; return; }
     let html = `<table class="evt-table"><colgroup>
-        <col style="width:150px;"><col style="width:26px;"><col style="width:90px;"><col style="width:48px;">
+        <col style="width:212px;"><col style="width:26px;"><col style="width:90px;"><col style="width:48px;">
       </colgroup><thead><tr>
         <th>${escapeHtml(timeHeader)}</th><th>Lv</th><th>Source</th><th>ID</th>
       </tr></thead><tbody>`;
@@ -1188,7 +1311,7 @@ function _evtRenderTable(timeHeader) {
             : ev.level === 'Warning' ? '🟡' : '🟢';
         const localLabel = _evtLocalTimeLabel(ev.time);
         html += `<tr data-evt-idx="${i}">
-            <td>${escapeHtml(ev.time)}${localLabel ? `<span class="evt-time-local" title="${escapeHtml(localLabel)} (${escapeHtml(_eventFrameLabel())})">·${escapeHtml(localLabel.replace(/^\d+\/\d+-/, ''))}</span>` : ''}</td>
+            <td>${escapeHtml(ev.time)}${localLabel ? `<span class="evt-time-local" title="${escapeHtml(localLabel)} (${escapeHtml(_eventFrameLabel())})">·${escapeHtml(localLabel)}</span>` : ''}</td>
             <td style="text-align:center;">${dot}</td>
             <td>${escapeHtml(ev.source)}</td>
             <td>${escapeHtml(ev.event_id)}</td>
@@ -1221,20 +1344,16 @@ function _onEvtRowClick(e) {
 }
 
 // Find the driver-log row whose timestamp is closest to `ms`, scroll it into
-// view within the log pane, and flash it. Returns that row (or null).
+// view within the log pane, and flash it. Resolved server-side: the pane only
+// renders the rows on screen, so the nearest row is usually not in the DOM.
 function jumpLogToMs(ms) {
-    const box = document.getElementById('previewBox');
-    let best = null, bestDiff = Infinity;
-    box.querySelectorAll('.tat-log-row[data-ms]').forEach(function (row) {
-        const diff = Math.abs(+row.dataset.ms - ms);
-        if (diff < bestDiff) { bestDiff = diff; best = row; }
-    });
-    if (!best) return null;
-    // Scroll within the pane only (not the whole page).
-    box.scrollTop = best.offsetTop - box.clientHeight / 2 + best.offsetHeight / 2;
-    box.querySelectorAll('.tat-log-row.is-time-hit').forEach(r => r.classList.remove('is-time-hit'));
-    best.classList.add('is-time-hit');
-    return best;
+    fetch(LV.url.log_viewer_nearest_row, {
+        method: 'POST', headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({ms: ms}),
+    })
+        .then(r => r.json())
+        .then(d => { if (d && d.success) scrollLogToIndex(d.index); })
+        .catch(() => {});
 }
 
 function _onEvtRowEnter(e) {
@@ -1490,7 +1609,7 @@ function applyFilter() {
             syncOps(d); // effects for prior edits are now measured
 
             annotationData = d.annotations || annotationData;
-            renderLogRows(d.preview, 'No lines matched');
+            renderLogRows(d.preview, 'No lines matched', d.view_total);
             // Last, so a clarifying question never delays the filter result
             // the engineer is actually waiting to look at.
             maybeClarify();
@@ -1996,6 +2115,9 @@ function resetChat() {
         operationData = [];
         caseSummaryText = '';
         _caseIntakeOpen = false;
+        baselineDone = false;
+        baselineEverDone = false;   // the conversation WAS the export basis
+        setBaselineGate();
         updateQuestionContextStatus();
         decisionLedger = {mode: interviewMode, items: [], open: 0, resolved: 0, deferred: 0, blocking: 0};
         updateDecisionLedger(decisionLedger);
@@ -2516,6 +2638,12 @@ function appendRecommendation(card, q) {
 // something, glowing once it can be pressed, and the knowledge-feeding
 // actions (teaching a step, exporting) stay locked until it has run.
 let baselineDone = LV.boot.hasBaseline || false;
+// baselineDone goes back to false whenever the thing a baseline was taken
+// against changes (filter set, reference docs, framing) so the button asks for
+// a re-read. Export must NOT follow it back down: once a read exists there IS
+// something to diverge from, and re-locking the export mid-session just to
+// re-run an LLM call the engineer didn't ask for is what made it feel stuck.
+let baselineEverDone = baselineDone;
 let lastMatchCount = 0;
 
 function setBaselineGate() {
@@ -2568,8 +2696,8 @@ function setTeachingLocks() {
     });
     const exportBtn = document.getElementById('exportSkillBtn');
     if (exportBtn) {
-        exportBtn.disabled = !baselineDone || isBusy();
-        exportBtn.title = baselineDone
+        exportBtn.disabled = !baselineEverDone || isBusy();
+        exportBtn.title = baselineEverDone
             ? 'Turn the baseline, teaching, and observations into reusable skill(s).'
             : why;
     }
@@ -2624,6 +2752,7 @@ function requestBaseline(attempt, forceRefresh) {
                 return;
             }
             baselineDone = true;
+            baselineEverDone = true;
             setBusy(false);
             if (d.cached) return;                 // already read, nothing new to show
             if (d.usage) updateTokenBadge(d.usage.session);
@@ -3429,6 +3558,12 @@ document.getElementById('previewBox').addEventListener('click', function (e) {
     if (!row) return;
     jumpEvtToMs(+row.dataset.ms);
 });
+// The log pane only holds the rows on screen — scrolling (or resizing the
+// pane) is what brings the rest in. See renderVisibleLogRows.
+document.getElementById('previewBox').addEventListener('scroll', function () {
+    renderVisibleLogRows(false);
+});
+window.addEventListener('resize', function () { renderVisibleLogRows(true); });
 // Restore the stable Question context. Skill options arrive from the
 // domain-scoped /skills/list request above. caseSummaryText is already seeded
 // from LV.boot at declaration; a RELOAD mid-session must not re-interrogate

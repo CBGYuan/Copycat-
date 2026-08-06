@@ -32,6 +32,8 @@ def _enable_dpi_awareness() -> None:
 
 _enable_dpi_awareness()
 
+_DIALOG_LOCK = threading.Lock()
+
 
 def _run_dialog(title: str, filetypes: list, result: dict):
     root = tk.Tk()
@@ -50,11 +52,20 @@ def _run_dialog(title: str, filetypes: list, result: dict):
 
 
 def pick_file(title: str, filetypes: list, timeout: int = 120) -> str:
-    result = {"path": ""}
-    t = threading.Thread(target=_run_dialog, args=(title, filetypes, result))
-    t.start()
-    t.join(timeout=timeout)
-    return result["path"]
+    # tkinter is not thread-safe and two live Tk roots is undefined behavior:
+    # double-clicking a browse button (or two tabs browsing at once) used to
+    # start a second dialog thread on top of the first. Only one at a time;
+    # a caller that arrives while a dialog is open gets "" (same as cancel).
+    if not _DIALOG_LOCK.acquire(blocking=False):
+        return ""
+    try:
+        result = {"path": ""}
+        t = threading.Thread(target=_run_dialog, args=(title, filetypes, result))
+        t.start()
+        t.join(timeout=timeout)
+        return result["path"]
+    finally:
+        _DIALOG_LOCK.release()
 
 
 def pick_log_file() -> str:

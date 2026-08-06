@@ -21,14 +21,14 @@ class WorkingState:
         # chosen manually. Drives the collapsible event panel above the log,
         # whose rows click-sync to the nearest driver-log line by timestamp.
         self.event_log_path: str = ""
-        # Fixed UTC offset (minutes) of the machine that captured the current
-        # BT log, read from a systeminfo.txt/system_info.txt near it (see
-        # event_log_service.find_capture_utc_offset_minutes) — the driver log
-        # is customer-local while the System Event Log's timestamps are UTC;
-        # without this the event<->log click-sync just compared the two raw,
-        # landing on a plausible-looking but wrong "nearest" line whenever the
-        # capture wasn't near UTC+0. None when nothing was found (no correction).
-        self.capture_utc_offset_min = None
+        # System Event XML is UTC, but the text-log wall-clock frame depends on
+        # domain: WiFi is analysing-engineer local; BT HCI is customer local.
+        # These fields describe the domain-specific conversion used by the
+        # event<->log click-sync. They are session-only UI state and never enter
+        # Avatar's flat skill YAML.
+        self.event_sync_offset_min = None
+        self.event_sync_basis: str = ""  # engineer_local | customer | customer_unknown
+        self.customer_utc_offset_min = None
         # ISO date (YYYY-MM-DD) used to synthesize a date for dateless BT HCI
         # / WiFi DDD log lines (see utils.helpers.read_log_file's
         # `fallback_date`) — computed once in /pick_log (from the loaded
@@ -103,6 +103,20 @@ class WorkingState:
         self.prev_focus_sig: str = ""
         self.filtered_preview: list = []   # plain-text surviving lines, chronological order (for LLM context)
         self.filter_stats: dict = {}       # last compute_filter_stats() result (per-filter hits, overlap, colored preview)
+        # Backing description of whatever the log pane is currently showing,
+        # so any window of it can be rebuilt on demand for the virtual
+        # scroller (see /log_viewer/preview_page). The browser only ever
+        # holds the rows it can see; this is what the rest are rebuilt from.
+        #   view_mode      "raw" | "filtered"
+        #   view_start_idx 0-based index into the cached log lines of view row
+        #                  0 -- non-zero only under a focus window (raw only)
+        #   view_rows      [(line_no, (matched filter indices, ...)), ...],
+        #                  filtered mode only, one entry per surviving line
+        #   view_total     number of rows in the view
+        self.view_mode: str = "raw"
+        self.view_start_idx: int = 0
+        self.view_rows: list = []
+        self.view_total: int = 0
         # Operation journal: the ordered sequence of filter edits the engineer
         # made this session (add/remove/toggle/load), each annotated with its
         # marginal effect once a filter run follows it. This captures the
@@ -112,6 +126,11 @@ class WorkingState:
         self.operations: list = []
         self.prev_survivors = None         # surviving_count from the previous apply, for effect diffing
         self.chat_history: list = []       # [{"role": "user"/"assistant", "content": str}]
+        # Stable user-authored description of the case. Unlike an ordinary
+        # chat message this is always included in question/synthesis context,
+        # even after the rolling chat window has moved past the message that
+        # originally described the symptom.
+        self.case_summary: str = ""
         self.learning_questions: list = []
         self.learning_answers: list = []
         # Interview policy — one axis only: "ask" interrupts for meaningful
@@ -148,6 +167,11 @@ class WorkingState:
         # knowledge (same-domain existing skills shown so the interview only
         # probes what's NEW beyond them and never re-asks covered knowledge).
         self.prior_knowledge: bool = False
+        # Explicit read-only skill documents selected by the engineer. An
+        # empty list means FRESH mode; selecting one or more turns Load skills
+        # on. `active_skill_key` remains the single possible inheritance
+        # parent and is deliberately separate from this document set.
+        self.selected_skill_keys: list = []
         # Latest assessment (updated by BOTH analyze_round on Log Round and
         # assess_readiness on every chat answer) — drives the live readiness
         # badge + the readiness/防呆 details panel in the workbench.
@@ -194,6 +218,8 @@ class WorkingState:
         return (
             f"{self.log_path}\x01{self.tat_path}\x01{self.filter_skill_key}"
             f"\x01prior={int(bool(self.prior_knowledge))}"
+            f"\x01docs={','.join(sorted(str(k) for k in self.selected_skill_keys))}"
+            f"\x01summary={self.case_summary.strip()}"
         )
 
     def has_current_baseline(self) -> bool:
@@ -226,6 +252,7 @@ class WorkingState:
         # Line labels belong to the prior teaching case and must not leak
         # into the next one.
         self.log_annotations = []
+        self.case_summary = ""
         # Which divergences have already been put to the engineer belongs to
         # the CONVERSATION, not to the filter set (unlike self.baseline, which
         # deliberately survives) — starting the teaching over should let the

@@ -256,6 +256,10 @@ def activate(skill_key):
         return jsonify({"success": False, "message": "Skill not found"}), 404
     state = session_store.get_state()
     state.active_skill_key = skill_key or ""
+    if skill_key and skill_key not in state.selected_skill_keys:
+        state.selected_skill_keys.append(skill_key)
+    if skill_key:
+        state.prior_knowledge = True
     skill = (app_config.skills.get(state.active_skill_key)
              or app_config.bt_skills.get(state.active_skill_key))
     return jsonify({"success": True, "active_key": state.active_skill_key,
@@ -278,7 +282,10 @@ def list_skills():
     Bluetooth skill sets after a log is picked and its domain auto-detected."""
     domain = (request.args.get("domain") or "wifi").lower()
     pool = app_config.bt_skills if domain == "bt" else app_config.skills
-    items = [{"key": key, "name": sk.name} for key, sk in pool.items()]
+    items = [
+        {"key": key, "name": sk.name, "description": sk.description}
+        for key, sk in pool.items()
+    ]
     return jsonify({"success": True, "domain": domain, "skills": items})
 
 

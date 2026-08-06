@@ -14,7 +14,8 @@ The "teach the system" learning loop:
      — round_count keeps incrementing, each round's delta is relative to the
      loaded baseline skill, same as before.
   4. When ready (readiness score is a hint, not a gate), the engineer clicks
-     one of the two Export buttons. Both synthesize the whole conversation
+     Export. The Load-skills toggle determines whether existing knowledge is
+     consulted while synthesizing the whole conversation
      into ONE OR MORE BRAND-NEW skill entries matching wireless_ce_avatar/
      IntelAvatar's Skill schema (name / description / keywords / exclusive /
      expert_rules), aiming at three things the engineer's expertise supplies
@@ -22,17 +23,17 @@ The "teach the system" learning loop:
        a. key domain knowledge & hard rules (-> expert_rules),
        b. a description that is mutually exclusive with the other skills,
        c. the most minimal "key" filter set that still isolates the scenario.
-     The two buttons differ only in whether the prior-knowledge base is
-     consulted (see synthesize_skill_draft's `use_prior_knowledge`):
+     The two modes differ in whether the prior-knowledge base is consulted
+     (see synthesize_skill_draft's `use_prior_knowledge`):
        • FRESH — no existing skill is looked at; the conversation is split
          into skills purely by the distinct knowledge domains it covers.
        • PRIOR — the SAME-domain (WiFi vs BT — see _other_skill_descriptions'
          `domain` param) existing skills are shown ONLY so the new skills stay
          mutually exclusive from them.
-     Neither mode ever edits/extends an existing skill or annotates "add rule
-     X to skill Y" — every draft is a fresh entry. Both still split into
-     multiple entries when the conversation genuinely covers more than one
-     distinct, mutually-exclusive scenario.
+     Neither mode ever edits an existing skill. FRESH drafts remain standalone;
+     PRIOR drafts that genuinely extend the explicitly loaded skill are saved
+     as new flattened children with parent/lineage metadata. Both still split
+     multiple mutually-exclusive knowledge domains into separate entries.
   5. Engineer reviews/edits each draft in the Edit Skill popup, then saves it.
 """
 import json
@@ -40,6 +41,7 @@ import re
 from typing import Dict, List, Optional, Tuple
 
 from utils.json_utils import parse_json_loose
+from utils import skill_dedup
 from . import skill_retrieval
 from .skill_service import Skill
 
@@ -355,9 +357,10 @@ Produce one or more BRAND-NEW skill entries matching this exact JSON schema
   ]
 }
 
-Every entry is a NEW, standalone skill. Do NOT try to edit, merge into, or
-add rules onto any pre-existing skill — this flow only ever creates fresh
-skills.
+Every entry you emit is a clean NEW candidate draft. Do NOT edit or rewrite a
+pre-existing skill inside the JSON. Copycat performs the later relationship
+check: an additive draft related to the explicitly loaded skill may become a
+new flattened child; unrelated drafts remain standalone.
 
 `triggers` is the set of conditions that must hold for this skill to be the
 right one to reach for — platform, firmware/driver branch, power state or
@@ -424,7 +427,7 @@ itself covers.
 """ + _STYLE_EXEMPLAR + """
 """
 
-# PRIOR mode: existing same-domain skills shown for mutual-exclusion only.
+# PRIOR mode: existing same-domain skills are read-only documentation.
 SYNTHESIS_SYS_PROMPT_PRIOR = """\
 You are a senior Wi-Fi/BT debug expert. Using the operation pattern, the
 engineer's answers, and the OTHER existing skills of THIS SAME domain (name +
@@ -432,14 +435,16 @@ description + keywords), """ + _SYNTHESIS_SCHEMA + """
 
 """ + _SKILL_GOALS + """
 
-You are shown the existing skills of this domain ONLY so the NEW skills you
-emit stay mutually exclusive from them — carve the new skill's scope around
-what the existing skills already cover so it is genuinely additive knowledge,
-never a duplicate. Do NOT propose editing or extending any of them; if the
-whole conversation only re-covers ground an existing skill already owns, say
-so in that entry's `note` and still emit it as a clearly-distinct new skill (or
-omit it). Each `description` must be mutually exclusive from every skill in
-"Existing skills" AND from every other entry in `skills`.
+You are shown existing skills as read-only professional documentation. Treat
+their encoded knowledge as already known, avoid asking the engineer to teach
+it again, and carve every genuinely new scope so it is mutually exclusive.
+Do not rewrite an existing skill in your JSON. When the explicitly loaded
+baseline is the same capability plus new knowledge, write a narrower candidate
+that Copycat can later classify as its child. When the conversation contains a
+different knowledge domain, emit a separate standalone candidate. Every
+`description` must remain mutually exclusive from the other entries in
+`skills`; standalone entries must also be mutually exclusive from existing
+skills.
 
 """ + _SYNTHESIS_SPLIT_AND_FIELDS + """
 
@@ -676,6 +681,13 @@ def _build_context_block(context: Dict) -> str:
         f"Enabled include-keywords: {', '.join(context.get('keywords') or []) or '(none)'}",
         f"Enabled exclude/noise terms: {', '.join(context.get('excluding_terms') or []) or '(none)'}",
     ]
+    case_summary = str(context.get("case_summary") or "").strip()
+    if case_summary:
+        lines.append(
+            "Engineer-provided case summary (use it to orient the timeline, "
+            "but verify claims against the chronological log evidence below; "
+            "if they disagree, ask about the disagreement):\n" + case_summary
+        )
 
     # The operation delta vs. whatever baseline skill is loaded — this is the
     # single most token-efficient signal available, and it's completely
@@ -780,6 +792,29 @@ def _build_context_block(context: Dict) -> str:
             "Existing skills, same domain as this log (decide overlap/extend-vs-new "
             "against these; keep any new description mutually exclusive from them):\n" + rows
         )
+        # In Load-skills mode the prior skills are documentation, not just a
+        # name index. Include bounded rule excerpts so questions can avoid
+        # re-asking knowledge already encoded there without allowing one large
+        # legacy skill to consume the entire prompt.
+        doc_rows = []
+        for skill_doc in existing:
+            rules = str(skill_doc.get("expert_rules") or "").strip()
+            if len(rules) > 1400:
+                rules = rules[:1400].rstrip() + "\n  ... (rule document truncated)"
+            triggers = "; ".join(skill_doc.get("triggers") or []) or "(none)"
+            ancestry = " → ".join(skill_doc.get("lineage") or [])
+            lineage_note = f" | lineage: {ancestry}" if ancestry else ""
+            doc_rows.append(
+                f"[SKILL DOC {skill_doc['key']}] {skill_doc['name']} "
+                f"v{skill_doc.get('version') or '?'}{lineage_note}\n"
+                f"  Scope: {skill_doc['description']}\n"
+                f"  Triggers: {triggers}\n"
+                f"  Rules:\n{rules or '  (none)'}"
+            )
+        lines.append(
+            "Read-only prior skill documents (already-known professional knowledge; "
+            "do not ask the engineer to teach these again):\n" + "\n\n".join(doc_rows)
+        )
 
     # The LOADED skill, called out separately from the list above. It is not
     # just one more skill to stay clear of: the export will physically copy all
@@ -793,17 +828,22 @@ def _build_context_block(context: Dict) -> str:
         trg = baseline.get("triggers") or []
         trg_line = ("\n  Baseline applies when: " + "; ".join(trg)) if trg else \
                    "\n  The baseline declares no trigger conditions."
+        baseline_rules = str(baseline.get("expert_rules") or "").strip()
+        if len(baseline_rules) > 3000:
+            baseline_rules = baseline_rules[:3000].rstrip() + "\n  ... (parent rules truncated)"
         lines.append(
             f"BASELINE SKILL (currently loaded): {baseline['name']} "
-            f"(key: {baseline['key']}) — {baseline['description']}" + trg_line + "\n"
-            "  The skill you emit will INHERIT every keyword of this baseline, so a "
-            "downstream agent choosing between them sees two entries with the same "
-            "filters and can only go by the description. Write this skill's "
-            "`description` so it names the narrower situation THIS session is about, "
-            "and never restate or lightly reword the baseline's description. Its "
-            "`triggers` are the strongest tool you have here: a condition the "
-            "baseline does NOT declare is what actually separates the two. Only "
-            "state conditions this session gives evidence for."
+            f"(key: {baseline['key']}, version {baseline.get('version') or '?'}) — "
+            f"{baseline['description']}" + trg_line + "\n"
+            f"  Parent expert rules (read-only document):\n{baseline_rules or '  (none)'}\n"
+            "  Treat this as a candidate parent, not a forced parent for every entry. "
+            "For each skill you emit: if it is the SAME diagnostic capability plus "
+            "new knowledge, write it as a narrower extension whose description and "
+            "triggers distinguish it from the baseline; Copycat will later flatten "
+            "the parent's complete body into that related child for Avatar. If a "
+            "different knowledge domain is present, emit it as a separate standalone "
+            "entry and do not bend its description toward this baseline. Only state "
+            "trigger conditions this session gives evidence for."
         )
 
     annotations = context.get("log_annotations") or []
@@ -1146,12 +1186,56 @@ Output ONLY this JSON object, no markdown fences, no extra prose:
 """
 
 
+def _step_annotation_context(op_context: Dict) -> str:
+    annotations = op_context.get("step_annotations") or []
+    if not annotations:
+        return ""
+    evidence = [item for item in annotations if item.get("label") == "evidence"]
+    counterexamples = [item for item in annotations if item.get("label") == "counterexample"]
+    rows = [
+        f"  - [{'EVIDENCE' if item.get('label') == 'evidence' else 'COUNTEREXAMPLE'}] "
+        f"line {item.get('line_no')}: {str(item.get('text') or '').strip()}"
+        for item in annotations[:20]
+    ]
+    policy = []
+    if evidence and not counterexamples:
+        policy.append(
+            "Only E is present: accept that these lines support the Step. Do not ask whether "
+            "supporting evidence exists; ask only for a still-missing rule, boundary, or implication."
+        )
+    elif counterexamples and not evidence:
+        policy.append(
+            "Only X is present: prioritize whether the match is noise, a legitimate exception, "
+            "or proof that the keyword/scope is too broad."
+        )
+    elif evidence and counterexamples:
+        policy.append(
+            "E and X occur on DIFFERENT source lines. Ask for the observable boundary that makes "
+            "one line supporting evidence and the other an exception/over-match. Never describe "
+            "a single line as both E and X; line labels are mutually exclusive."
+        )
+    return (
+        f"Exact user labels for this Step ({len(evidence)} E, {len(counterexamples)} X):\n"
+        + "\n".join(rows + policy)
+    )
+
+
 def _build_confirm_step_context_block(op_context: Dict, user_explanation: str) -> str:
     lines = [
         f"Domain: {(op_context.get('domain') or 'wifi').upper()}.",
         f"The edit: {op_context['verb']} \"{op_context['target']}\""
         + (" (an EXCLUDE/noise filter)" if op_context.get("excluding") else " (an INCLUDE/keyword filter)"),
     ]
+    if op_context.get("case_summary"):
+        lines.append(f"Case summary: {op_context['case_summary']}")
+    if op_context.get("sample_lines"):
+        lines.append(
+            "Chronological log evidence (sample):\n" +
+            "\n".join(op_context["sample_lines"])
+        )
+    annotation_context = _step_annotation_context(op_context)
+    if annotation_context:
+        lines.append(annotation_context)
     if op_context.get("effect_phrase"):
         lines.append(f"Measured effect: {op_context['effect_phrase']}")
     existing = op_context.get("existing_skills") or []
@@ -1159,6 +1243,7 @@ def _build_confirm_step_context_block(op_context: Dict, user_explanation: str) -
         rows = "\n".join(
             f"  - {s['name']}: {s['description']}"
             + (f" | keywords: {', '.join(s['keywords'][:10])}" if s.get('keywords') else "")
+            + (f" | rule doc: {str(s.get('expert_rules') or '')[:800]}" if s.get('expert_rules') else "")
             for s in existing
         )
         lines.append(
@@ -1213,10 +1298,18 @@ def confirm_step_knowledge(llm_helper, op_context: Dict, user_explanation: str,
 # Deliberately ONE question, always skippable client-side, never the primary
 # interaction — see log_viewer.html's askStepQuestion/renderStepAskCard.
 ASK_STEP_SYS_PROMPT = """\
-You are a senior Wi-Fi/BT debug expert. Ask ONE short, specific question about
-ONE filter edit the engineer just made — grounded in its measured effect —
-that draws out exactly WHY they made it and what domain knowledge justifies
-it. Nothing else: no analysis, no assessment, no second question.
+You are a senior Wi-Fi/BT debug expert refining one reusable skill. Return AT
+MOST ONE short, specific question about ONE filter edit. Ask only when its
+answer could materially change the skill's scope, trigger, keyword/exclusion,
+sequence/threshold, exception boundary, or expert rule. Ground it in the
+exact Step evidence, measured effect, ordered log, case summary, prior answers,
+and selected skill documents supplied below. Never ask for facts those sources
+already establish.
+
+If no material gap remains, return the same JSON shape with "question": "".
+This is especially important during a continuation: do not invent another
+question merely to keep the interview going. Never repeat or paraphrase an
+answered question.
 
 The question is EITHER "open" (genuinely open-ended) or "choice" (give 2-4
 concrete options in the engineer's own domain vocabulary — never add an
@@ -1248,11 +1341,40 @@ def _build_ask_step_context_block(op_context: Dict) -> str:
         )
     else:
         lines.append("No reason recorded yet for this edit.")
+    if op_context.get("case_summary"):
+        lines.append(
+            "Engineer-provided case summary (orientation, not a substitute for log evidence): "
+            + op_context["case_summary"]
+        )
+    if op_context.get("sample_lines"):
+        lines.append(
+            "Chronological log evidence (head + tail sample, order preserved):\n" +
+            "\n".join(op_context["sample_lines"])
+        )
+    annotation_context = _step_annotation_context(op_context)
+    if annotation_context:
+        lines.append(annotation_context)
+    answered = op_context.get("answered_questions") or []
+    if answered:
+        lines.append(
+            "Questions already answered for this Step (do not repeat; use the answers to decide "
+            "whether one further skill-changing gap remains):\n" +
+            "\n".join(
+                f"  - Q: {item.get('question')}\n    A: {item.get('answer')}"
+                for item in answered
+            )
+        )
+    if op_context.get("continuing"):
+        lines.append(
+            "Continuation decision: emit one next question only if the latest answer exposes a "
+            "remaining high-information branch. Otherwise emit an empty question and stop."
+        )
     existing = op_context.get("existing_skills") or []
     if existing:
         rows = "\n".join(
             f"  - {s['name']}: {s['description']}"
             + (f" | keywords: {', '.join(s['keywords'][:10])}" if s.get('keywords') else "")
+            + (f" | rule doc: {str(s.get('expert_rules') or '')[:800]}" if s.get('expert_rules') else "")
             for s in existing
         )
         lines.append(
@@ -1618,13 +1740,20 @@ def judge_candidate(llm_helper, draft: Dict, neighbors: List[Tuple[str, Skill, f
     valid_keys = {key for key, _sk, _sc in neighbors}
     existing_for_llm = [
         {"key": key, "name": sk.name, "description": sk.description,
-         "keywords": sk.keywords, "exclusive": sk.exclusive, "similarity": sc}
+         "triggers": list(getattr(sk, "triggers", []) or []),
+         "keywords": sk.keywords, "exclusive": sk.exclusive,
+         # Treat a skill as a compact read-only document, not merely a title
+         # and keyword bag. The expert rules are the professional knowledge
+         # needed to tell a genuine extension from superficial word overlap.
+         "expert_rules": sk.expert_rules, "similarity": sc}
         for key, sk, sc in neighbors
     ]
     payload = {
         "candidate": {
             "name": draft.get("name"), "description": draft.get("description"),
+            "triggers": draft.get("triggers") or [],
             "keywords": draft.get("keywords"), "exclusive": draft.get("exclusive"),
+            "expert_rules": draft.get("expert_rules") or "",
         },
         "existing_skills": existing_for_llm,
     }
@@ -1799,6 +1928,72 @@ _CONTINUITY_FORCE_SCORE = 0.55  # above this, skip the extra judge call entirely
 # Tier 1 (general retrieval) floor — a neighbor below this is noise, not
 # worth spending a judge call on.
 _RETRIEVAL_MIN_SCORE = 0.12
+
+
+def classify_loaded_parent(llm_helper, draft: Dict, parent_key: str, parent: Skill,
+                           domain_pool: Dict[str, Skill],
+                           filter_stats: Optional[Dict] = None) -> Dict:
+    """Classify ONE synthesized draft against the explicitly loaded skill.
+
+    This is deliberately separate from :func:`route_draft`: routing may only
+    merge into a local Copycat-owned skill, while an explicitly loaded parent
+    may come from the read-only Avatar/team library. In PRIOR mode that skill
+    is still valid documentation and ancestry for a NEW child; it is simply
+    never edited in place.
+
+    Returns ``relationship`` as:
+      - ``extends``: same capability plus additive knowledge -> inherit;
+      - ``covered``: parent already covers it -> do not create a duplicate
+        inheritance chain (the draft remains reviewable with a warning);
+      - ``unrelated``: keep the draft standalone.
+
+    The explicit load is strong intent, so moderate/low lexical similarity is
+    still sent to the document-aware judge. Only a very high deterministic
+    score skips that extra call.
+    """
+    pool = dict(domain_pool or {})
+    pool[parent_key] = parent
+    score = skill_retrieval.score_against(
+        draft, parent, skill_retrieval.build_idf(pool))
+    quality = keyword_quality_map(filter_stats)
+    diff = skill_dedup.diff_against_parent(draft, parent)
+    additive = any([
+        diff["keywords"]["new"], diff["keywords"]["widens"], diff["keywords"]["near"],
+        diff["exclusive"]["new"], diff["exclusive"]["widens"], diff["exclusive"]["near"],
+        diff["expert_rules"]["new"], diff["expert_rules"]["near"],
+    ])
+    scope_conflict = skill_dedup.description_conflict(
+        draft.get("description", ""), parent, draft.get("triggers"))
+
+    if score >= _CONTINUITY_FORCE_SCORE or scope_conflict["too_similar"]:
+        decision = {
+            "action": "merge" if additive else "discard",
+            "target_skill_key": parent_key if additive else None,
+            "reason": (
+                f"Extends the loaded skill with additive knowledge (similarity {score:.2f})."
+                if additive else
+                "The loaded skill already covers this draft; no additive knowledge found."
+            ),
+        }
+    else:
+        decision = judge_candidate(
+            llm_helper, draft, [(parent_key, parent, score)], quality)
+
+    action = decision.get("action")
+    target = decision.get("target_skill_key")
+    if action == "merge" and target == parent_key:
+        relationship = "extends"
+    elif action == "discard":
+        relationship = "covered"
+    else:
+        relationship = "unrelated"
+    return {
+        "relationship": relationship,
+        "parent_key": parent_key,
+        "parent_name": parent.name,
+        "similarity": score,
+        "reason": decision.get("reason") or "",
+    }
 
 
 def route_draft(llm_helper, draft: Dict, pool: Dict[str, Skill],

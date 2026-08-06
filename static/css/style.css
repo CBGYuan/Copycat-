@@ -369,6 +369,10 @@ a.btn-primary {
    so every .tat-log-row below (width:100%) shares that SAME width instead
    of each one only ever getting 100% of the (narrower) viewport. */
 .tat-log-inner { display: inline-block; min-width: 100%; }
+/* Stand-ins for the rows the virtual pane isn't currently rendering, so the
+   scrollbar still represents the whole result. See renderVisibleLogRows(). */
+.tat-log-pad { width: 0; }
+.tat-log-row-loading .tat-log-text { color: var(--text-muted); }
 .tat-log-row { display: flex; width: 100%; white-space: nowrap; }
 .log-annotation-tools {
   position: sticky;
