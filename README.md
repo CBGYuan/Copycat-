@@ -528,8 +528,8 @@ static/js/
                                 re-rendered page. Reads server values only
                                 through the `LV` object the template defines.
   skill_editor.js             The shared Edit-Skill modal
-tests/                          Unit tests for the learning pipeline
-                                  (see Tests below)
+tests/                          Unit tests for the learning pipeline. Local
+                                  only, not checked in (see Tests below)
 data/skills/
   local/                        THIS engineer's own copycat-originated
                                   skills — the only files the app writes to
@@ -584,6 +584,9 @@ as a future direction, so this list doesn't overclaim:
   τ-bench note above) — that stays in `wireless_ce_avatar`'s scope.
 
 ## Tests
+
+The suite is each engineer's own local verification material and is not
+checked in, so a fresh clone won't have `tests/`.
 
 ```powershell
 python -m unittest discover -s tests -v

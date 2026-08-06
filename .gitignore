@@ -19,3 +19,8 @@ data/skills/
 data/*.pdf
 .vscode/
 .claude/
+# Local-only verification material: the pytest suite and the hand-written
+# scenario notes are each engineer's own scratch work, not a deliverable.
+tests/
+docs/test_scenario_*.md
+.pytest_cache/
