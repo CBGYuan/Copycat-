@@ -344,7 +344,7 @@ function showRedFlagCard(seq, question, opts) {
     customBox.appendChild(dismissBtn);
     card.appendChild(customBox);
     box.appendChild(card);
-    box.scrollTop = box.scrollHeight;
+    scrollChatToBottom();
 }
 
 // Same as syncOps but skips re-triggering red-flag surfacing / step render —
@@ -450,7 +450,7 @@ function jumpToStep(fromIdx, toIdx) {
     const kids = box.children;
     if (fromIdx >= kids.length) {
         // Nothing was said yet at this point — scroll to end so it's obvious.
-        box.scrollTop = box.scrollHeight;
+        scrollChatToBottom();
         return;
     }
     const end = Math.min(toIdx, kids.length);
@@ -1657,6 +1657,28 @@ function renderStepKnowledgeBubble(contentEl, content) {
 // in a primary-tinted bubble; assistant bubbles sit left-aligned, white with
 // a border — the two-color/side split makes "who said this" unmistakable at
 // a glance instead of relying on a small "You:"/"AI:" text prefix alone.
+// Park the conversation at the bottom so whatever was just added is the thing
+// you're looking at. Setting scrollTop once, synchronously, is not enough: a
+// question card's final height isn't known at append time (the markdown body,
+// the RECOMMENDED block and the option rows all lay out after), so the scroll
+// landed short and the new card opened part-way up the pane with its answer
+// controls below the fold — which reads as "the new question went above the
+// old one". Re-running it on the next frame, once layout has settled, puts it
+// where it belongs.
+// Both follow-ups are deliberate, not redundant: requestAnimationFrame lands
+// right after layout on a VISIBLE tab (no flicker), but it does not fire at
+// all while the tab is hidden or backgrounded — which is exactly when a slow
+// answer arrives and the engineer comes back to a half-scrolled pane. The
+// timeout is the fallback that runs either way.
+function scrollChatToBottom() {
+    const box = document.getElementById('chatBox');
+    if (!box) return;
+    const toBottom = () => { box.scrollTop = box.scrollHeight; };
+    toBottom();
+    requestAnimationFrame(toBottom);
+    setTimeout(toBottom, 0);
+}
+
 function appendMsg(role, content, stepTag) {
     const box = document.getElementById('chatBox');
     const isUser = (role === 'user');
@@ -1687,7 +1709,7 @@ function appendMsg(role, content, stepTag) {
     bubble.appendChild(contentEl);
     row.appendChild(bubble);
     box.appendChild(row);
-    box.scrollTop = box.scrollHeight;
+    scrollChatToBottom();
     chatHistoryMirror.push({role, content, step: tag});
     return row;
 }
@@ -1944,7 +1966,7 @@ function renderProactiveClarification(q, stepTag) {
     customBox.appendChild(skip);
     card.appendChild(customBox);
     box.appendChild(card);
-    box.scrollTop = box.scrollHeight;
+    scrollChatToBottom();
 }
 
 // Live re-assessment after each chat answer: updates the readiness badge +
@@ -2362,18 +2384,17 @@ function renderCaseIntakeCard(opts) {
     };
 
     box.appendChild(card);
-    box.scrollTop = box.scrollHeight;
+    scrollChatToBottom();
     textarea.focus();
 }
 
 // The permanent transcript entry for what was collected, with the one way
 // back in. Replaces any earlier copy so the log shows the CURRENT framing
 // once, not a trail of superseded ones.
-function appendCaseContextNote() {
+function appendCaseContextNote(opts) {
     const box = document.getElementById('chatBox');
     if (!box) return;
     const prev = document.getElementById('caseContextNote');
-    if (prev) prev.remove();
 
     const note = el('div', 'case-context-note mb-2');
     note.id = 'caseContextNote';
@@ -2400,8 +2421,18 @@ function appendCaseContextNote() {
     }
     note.appendChild(body);
 
+    // Update IN PLACE when a note is already in the transcript. Re-appending
+    // it would teleport an old entry past everything said since — including
+    // below a question that was asked after it — which is exactly the "why is
+    // this above that?" confusion the transcript is supposed to avoid. Only a
+    // deliberate re-post (the fresh one before a baseline read) moves it.
+    if (prev && !(opts && opts.moveToEnd)) {
+        prev.replaceWith(note);
+        return;
+    }
+    if (prev) prev.remove();
     box.appendChild(note);
-    box.scrollTop = box.scrollHeight;
+    scrollChatToBottom();
 }
 
 function caseContextChip(icon, text, ready) {
@@ -2600,8 +2631,9 @@ function requestBaseline(attempt, forceRefresh) {
             // Restate what this read was actually given — case description,
             // reference docs, and the now-known context size — immediately
             // before the analysis it produced, so the transcript records the
-            // inputs next to the output instead of only the output.
-            appendCaseContextNote();
+            // inputs next to the output instead of only the output. This is
+            // the one place the note deliberately moves to the end.
+            appendCaseContextNote({moveToEnd: true});
             appendMsg('assistant', d.message || `# Baseline analysis\n\n${d.baseline.analysis}`, 'all');
         })
         .catch(() => {
@@ -2656,7 +2688,7 @@ function openStepExplainBox(seq, anchorBtn) {
     card.appendChild(textarea);
     card.appendChild(actions);
     box.appendChild(card);
-    box.scrollTop = box.scrollHeight;
+    scrollChatToBottom();
     textarea.focus();
 }
 
@@ -2789,7 +2821,7 @@ function renderStepConfirmCard(seq, knowledgeCore, expertNote, followUp, decisio
     }
 
     box.appendChild(card);
-    box.scrollTop = box.scrollHeight;
+    scrollChatToBottom();
 }
 
 // "Ask about this step" — the LLM-LED counterpart to 🎓's user-led explain
@@ -2938,7 +2970,7 @@ function renderClarifyCard(d) {
         card.appendChild(skipRow);
     }
     box.appendChild(card);
-    box.scrollTop = box.scrollHeight;
+    scrollChatToBottom();
 }
 
 function renderStepAskCard(seq, q, decisionId, questionNumber) {
@@ -3003,7 +3035,7 @@ function renderStepAskCard(seq, q, decisionId, questionNumber) {
     }
 
     box.appendChild(card);
-    box.scrollTop = box.scrollHeight;
+    scrollChatToBottom();
 }
 
 function submitStepAnswer(seq, question, answer, card, decisionId, continueChain) {
@@ -3137,7 +3169,7 @@ function showNextQuestionCard(queue, doneCount, total) {
     }
 
     box.appendChild(card);
-    box.scrollTop = box.scrollHeight;
+    scrollChatToBottom();
 }
 
 // ---- Export a skill from the rounds/chat gathered so far, open the Edit Skill modal ----
