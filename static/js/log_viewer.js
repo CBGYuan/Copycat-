@@ -32,12 +32,18 @@ let activeSkillName = LV.boot.baselineSkillName;
 let currentQuestions = [];
 let currentDraft = null;
 let decisionLedger = LV.boot.decisionLedger || {mode: 'ask', items: [], open: 0, resolved: 0, deferred: 0, blocking: 0};
-let interviewMode = LV.boot.interviewMode || 'ask';
-// Fixed UTC offset (minutes) of the machine that captured the current BT log
-// (see event_log_service.find_capture_utc_offset_minutes) — null means none
-// was found, so the event<->log click-sync applies no correction. Updated
-// whenever a log or event log is (re)picked — see pickLog()/pickEventLog().
-let captureUtcOffsetMin = LV.boot.captureUtcOffsetMin;
+let interviewMode = 'ask';
+let selectedSkillKeys = Array.isArray(LV.boot.selectedSkillKeys) ? [...LV.boot.selectedSkillKeys] : [];
+let availableSkillDocs = [];
+let currentLogDomain = LV.boot.logDomain || 'wifi';
+let contextLineCount = Number(LV.boot.contextLineCount || 0);
+let contextTimeSpan = LV.boot.contextTimeSpan || {};
+// Domain-specific UTC -> text-log conversion. WiFi text is stamped in the
+// analysing engineer's local frame; BT HCI text is customer-local. Keep the
+// basis visible so a plausible-looking nearest-time jump is never ambiguous.
+let eventSyncOffsetMin = LV.boot.eventSyncOffsetMin;
+let eventSyncBasis = LV.boot.eventSyncBasis || '';
+let customerUtcOffsetMin = LV.boot.customerUtcOffsetMin;
 
 // The LLM key.py read (UNC corp share, no timeout of its own) now happens on
 // a background thread AFTER the server starts listening (see configs.
@@ -483,6 +489,7 @@ function copyPath(inputId, btn) {
 // Repopulate the skill <select> for the given domain ('wifi' | 'bt') and
 // show a small badge so it's clear which skill set is in play.
 function refreshSkillList(domain) {
+    currentLogDomain = domain || 'wifi';
     fetch(`/skills/list?domain=${domain}`).then(r => r.json()).then(d => {
         if (!d.success) return;
         const sel = document.getElementById('skillSelect');
@@ -490,11 +497,23 @@ function refreshSkillList(domain) {
         sel.innerHTML = '<option value="">-- or load a learned skill --</option>' +
             d.skills.map(s => `<option value="${s.key}">${escapeHtml(s.name)}</option>`).join('');
         if (d.skills.some(s => s.key === current)) sel.value = current;
+        availableSkillDocs = d.skills || [];
+        // A domain change makes documents from the old domain invalid. The
+        // server applies the same validation; doing it here keeps the picker
+        // honest before that round trip finishes.
+        const valid = new Set(availableSkillDocs.map(s => s.key));
+        const filteredSelection = selectedSkillKeys.filter(key => valid.has(key));
+        if (filteredSelection.length !== selectedSkillKeys.length) {
+            selectedSkillKeys = filteredSelection;
+            persistQuestionContext({selected_skill_keys: selectedSkillKeys});
+        }
+        renderSkillDocPicker();
 
         const badge = document.getElementById('domainBadge');
         badge.textContent = domain === 'bt' ? 'BT' : 'WiFi';
         badge.className = 'domain-badge ' + (domain === 'bt' ? 'domain-bt' : 'domain-wifi');
         badge.style.display = 'inline-block';
+        updateQuestionContextStatus();
     });
 }
 
@@ -650,17 +669,13 @@ function parseLogTimeMs(text) {
 }
 
 // Parse an event-log "YYYY-MM-DD HH:MM:SS" (UTC) timestamp into epoch ms,
-// SHIFTED by captureUtcOffsetMin so it lands in the same frame as
-// parseLogTimeMs()'s customer-local driver-log timestamps (e.g. +480 for a
-// UTC+08:00 capture) — without this shift the two were compared as raw
-// numbers despite being genuinely different moments, silently landing
-// "nearest" on a plausible-looking but wrong line. null offset (not found)
-// applies no correction, same as before.
+// SHIFTED by the domain-specific offset so it lands in the same wall-clock
+// frame as parseLogTimeMs(): engineer-local for WiFi, customer-local for BT.
 function parseEvtTimeMs(text) {
     const m = String(text).match(/^(\d{4})-(\d{1,2})-(\d{1,2})[ T](\d{1,2}):(\d{2}):(\d{2})/);
-    if (!m) return null;
+    if (!m || typeof eventSyncOffsetMin !== 'number') return null;
     let ms = new Date(+m[1], +m[2] - 1, +m[3], +m[4], +m[5], +m[6]).getTime();
-    if (typeof captureUtcOffsetMin === 'number') ms += captureUtcOffsetMin * 60000;
+    ms += eventSyncOffsetMin * 60000;
     return ms;
 }
 
@@ -670,6 +685,13 @@ function pickLog() {
         .then(d => {
             if (d.success) {
                 baselineDone = false;
+                contextLineCount = 0;
+                contextTimeSpan = {};
+                if (_caseSummaryTimer) clearTimeout(_caseSummaryTimer);
+                _caseSummaryTimer = null;
+                const caseField = document.getElementById('caseSummary');
+                if (caseField) caseField.value = '';
+                updateQuestionContextStatus();
                 document.getElementById('logPathInput').value = d.log_path;
                 showPathStatus('logStatus', '✔ Log loaded', 'ok');
                 if (d.domain) refreshSkillList(d.domain);
@@ -692,7 +714,9 @@ function pickLog() {
                 setFocusUiState(null);
                 // BT capture → reveal the event panel (auto-discovered file
                 // enables it; WiFi/none hides it). Reset any open state first.
-                captureUtcOffsetMin = d.capture_utc_offset_min;
+                eventSyncOffsetMin = d.event_sync_offset_min;
+                eventSyncBasis = d.event_sync_basis || '';
+                customerUtcOffsetMin = d.customer_utc_offset_min;
                 updateEvtSection(d.domain, d.event_log_available, d.event_log_path);
                 // This log's own lines had no date (dateless BT HCI export /
                 // WiFi DDD export) — the DATE component shown is an estimate
@@ -1003,34 +1027,44 @@ function updateEvtSection(domain, available, path) {
     if (_evtOpen && !available) _closeEvtPanel();
 }
 
-// Reflects whether the event<->log click-sync has a UTC-offset correction
-// (see captureUtcOffsetMin / parseEvtTimeMs) — makes it visible when the
-// "nearest" jump can actually be trusted vs. when it's an uncorrected raw
-// comparison between UTC and customer-local time.
+function _utcOffsetLabel(offsetMin) {
+    if (typeof offsetMin !== 'number') return 'unknown';
+    const sign = offsetMin >= 0 ? '+' : '-';
+    const abs = Math.abs(offsetMin);
+    return `UTC${sign}${String(Math.floor(abs / 60)).padStart(2, '0')}:${String(abs % 60).padStart(2, '0')}`;
+}
+
+function _eventFrameLabel() {
+    if (eventSyncBasis === 'engineer_local') return 'engineer local';
+    if (eventSyncBasis === 'customer') return 'customer local';
+    return 'local';
+}
+
+// Make both the raw Event XML basis and the chosen text-log frame explicit.
 function updateEvtTzBadge() {
     const badge = document.getElementById('evtTzBadge');
     if (!badge) return;
-    if (typeof captureUtcOffsetMin === 'number') {
-        const sign = captureUtcOffsetMin >= 0 ? '+' : '-';
-        const abs = Math.abs(captureUtcOffsetMin);
-        const hhmm = `${String(Math.floor(abs / 60)).padStart(2, '0')}:${String(abs % 60).padStart(2, '0')}`;
-        badge.textContent = `🌐 synced UTC${sign}${hhmm}`;
-        badge.title =
-            `Event times are UTC (Windows stores TimeCreated/@SystemTime in UTC regardless of `
-            + `what Event Viewer displays). They are shifted by the capture machine's own fixed `
-            + `offset UTC${sign}${hhmm}, read from systeminfo.txt beside the log, which puts them `
-            + `in the same frame as the driver log's timestamps.
-
-`
-            + `Assumption: the driver log carries CAPTURE-MACHINE local time. That is established `
-            + `for BT captures. For WiFi it is currently assumed, not verified — if a WiFi log `
-            + `turns out to be in the analysing engineer's timezone instead, the jump will be off `
-            + `by the difference between the two machines.`;
+    if (typeof eventSyncOffsetMin === 'number') {
+        const offset = _utcOffsetLabel(eventSyncOffsetMin);
+        const frame = _eventFrameLabel();
+        badge.textContent = `🌐 ${frame} · ${offset}`;
+        if (eventSyncBasis === 'engineer_local') {
+            const customer = _utcOffsetLabel(customerUtcOffsetMin);
+            badge.title =
+                `Raw Event XML time is UTC. WiFi text-log time is generated in the analysing `
+                + `engineer's local timezone, so events are converted to ${frame} (${offset}) `
+                + `before syncing. Customer System Info reports ${customer}; that offset is shown `
+                + `for reference but is not used to align this WiFi log.`;
+        } else {
+            badge.title =
+                `Raw Event XML time is UTC. BT HCI text-log time is in the customer's timezone, `
+                + `so events are converted to ${frame} (${offset}) using System Info before syncing.`;
+        }
         badge.classList.add('evt-tz-ok');
         badge.classList.remove('evt-tz');
     } else {
-        badge.textContent = '⚠ times are UTC';
-        badge.title = 'Event times are UTC; the driver log below is customer-local and no capture timezone was found (no systeminfo.txt near the log), so the jump lands on the nearest line with no offset correction and may be off.';
+        badge.textContent = '⚠ customer timezone unknown';
+        badge.title = 'Raw Event XML time is UTC. This BT text log is customer-local, but no usable timezone was found in System Info, so event-to-log time sync is disabled.';
         badge.classList.add('evt-tz');
         badge.classList.remove('evt-tz-ok');
     }
@@ -1051,7 +1085,9 @@ function pickEventLog() {
             const btn = document.getElementById('evtToggleBtn');
             btn.disabled = false;
             document.getElementById('evtPathInput').value = d.event_log_path || '';
-            captureUtcOffsetMin = d.capture_utc_offset_min;
+            eventSyncOffsetMin = d.event_sync_offset_min;
+            eventSyncBasis = d.event_sync_basis || '';
+            customerUtcOffsetMin = d.customer_utc_offset_min;
             updateEvtTzBadge();
             _evtLoaded = false; _evtData = []; _evtOffset = 0; _evtAutoPending = true;
             if (!_evtOpen) toggleEvtPanel(); else _evtResetAndFetch();
@@ -1116,7 +1152,7 @@ function _evtFetchPage() {
 // MM/DD/YYYY-HH:MM:SS.mmm rows instead of having to do the offset math
 // themselves to tell whether a sync landed somewhere reasonable.
 function _evtLocalTimeLabel(text) {
-    if (typeof captureUtcOffsetMin !== 'number') return '';
+    if (typeof eventSyncOffsetMin !== 'number') return '';
     const ms = parseEvtTimeMs(text);
     if (ms == null) return '';
     const d = new Date(ms);
@@ -1138,7 +1174,7 @@ function _evtRenderTable(timeHeader) {
             : ev.level === 'Warning' ? '🟡' : '🟢';
         const localLabel = _evtLocalTimeLabel(ev.time);
         html += `<tr data-evt-idx="${i}">
-            <td>${escapeHtml(ev.time)}${localLabel ? `<div class="evt-time-local">→ ${escapeHtml(localLabel)} local</div>` : ''}</td>
+            <td>${escapeHtml(ev.time)}${localLabel ? `<span class="evt-time-local" title="${escapeHtml(localLabel)} (${escapeHtml(_eventFrameLabel())})">·${escapeHtml(localLabel.replace(/^\d+\/\d+-/, ''))}</span>` : ''}</td>
             <td style="text-align:center;">${dot}</td>
             <td>${escapeHtml(ev.source)}</td>
             <td>${escapeHtml(ev.event_id)}</td>
@@ -1196,7 +1232,7 @@ function _onEvtRowEnter(e) {
     const localLabel = _evtLocalTimeLabel(ev.time);
     let h = '<table>';
     h += `<tr><th>Time</th><td>${escapeHtml(ev.time)} (UTC)</td></tr>`;
-    if (localLabel) h += `<tr><th>Local</th><td>${escapeHtml(localLabel)} — capture machine / driver-log frame</td></tr>`;
+    if (localLabel) h += `<tr><th>Aligned</th><td>${escapeHtml(localLabel)} — ${escapeHtml(_eventFrameLabel())} / text-log frame</td></tr>`;
     h += `<tr><th>Level</th><td style="color:${lvColor};font-weight:600;">${escapeHtml(ev.level)}</td></tr>`;
     h += `<tr><th>Source</th><td>${escapeHtml(ev.source)}</td></tr>`;
     h += `<tr><th>ID</th><td>${escapeHtml(ev.event_id)}</td></tr>`;
@@ -1324,12 +1360,13 @@ function loadSkill(key) {
             renderExportBaselineBadge();
             // Loading a named skill auto-switches the conversation into
             // PRIOR-knowledge mode server-side (see log_viewer_routes.
-            // load_skill) — sync the header toggle so the UI matches, and the
+            // load_skill) — sync the document picker so the UI matches, and the
             // engineer sees why the interview stops asking about content this
             // skill already covers.
             if (d.prior_knowledge) {
-                const t = document.getElementById('priorToggle');
-                if (t && !t.checked) t.checked = true;
+                selectedSkillKeys = d.selected_skill_keys || Array.from(new Set([...selectedSkillKeys, key]));
+                renderSkillDocPicker();
+                updateQuestionContextStatus();
             }
             if (document.getElementById('logPathInput').value.trim()) applyFilter().then(() => setBaselineGate());
         } else showPathStatus('tatStatus', d.message, 'err');
@@ -1414,6 +1451,9 @@ function applyFilter() {
                 `${d.overlap_count} lines matched 2+ keywords` +
                 (d.focus ? ` — scanned ${d.total_lines} of ${d.full_total_lines} lines in file` : '');
             setFocusUiState(d.focus);
+            contextLineCount = Number(d.context_count || d.preview_count || 0);
+            contextTimeSpan = d.time_span || {};
+            updateQuestionContextStatus();
 
             // Merge hit counts into the filter table (that IS the stats display now).
             // Index-based, not text-based: per_filter is now returned for
@@ -1889,6 +1929,8 @@ function resetChat() {
         // — mirror that here so the Steps panel doesn't go stale against
         // filter edits that no longer exist server-side.
         operationData = [];
+        document.getElementById('caseSummary').value = '';
+        updateQuestionContextStatus();
         decisionLedger = {mode: interviewMode, items: [], open: 0, resolved: 0, deferred: 0, blocking: 0};
         updateDecisionLedger(decisionLedger);
         renderStepPanel();
@@ -2085,52 +2127,123 @@ function el(tag, cls, text) {
 // and click again to log another round, or just keep typing in the chat box
 // without clicking anything — both feed the same chat_history the eventual
 // Export Skill step reads from.
-// The header toggle is the single source of truth for the conversation mode:
-// checked = load the existing WiFi/BT skills as prior knowledge (interview only
-// probes what's NEW beyond them; export stays non-overlapping); unchecked =
-// teach from scratch. Every LLM-triggering call (log round, live assess,
-// export) sends this value so the whole conversation stays in one mode.
+// The selected document set is the single source of truth for prior mode:
+// one or more checked skills = use only those as read-only professional docs;
+// zero = teach from this session alone. Every LLM-triggering call follows it.
 function priorMode() {
-    const t = document.getElementById('priorToggle');
-    return !!(t && t.checked);
+    return selectedSkillKeys.length > 0;
 }
 
-// When the toggle flips mid-conversation, tell the server right away so the
-// auto-fired background assess (and a page reload) reflect the new mode even
-// before the next analysis.
-function onPriorToggle() {
-    // Switching prerequisite-knowledge mode changes what the baseline is
-    // allowed to know. Require one fresh read against that new comparison
-    // basis; the button returns to its one-time glow until pressed.
+function persistQuestionContext(payload) {
+    return fetch(LV.url.learning_set_mode, {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify(payload),
+    }).then(r => r.json()).then(d => {
+        if (!d.success) throw new Error(d.message || 'Could not save question context');
+        selectedSkillKeys = d.selected_skill_keys || selectedSkillKeys;
+        if (d.decision_ledger) updateDecisionLedger(d.decision_ledger);
+        renderSkillDocPicker();
+        updateQuestionContextStatus();
+        return d;
+    });
+}
+
+function toggleSkillDocPicker(force) {
+    const menu = document.getElementById('skillDocPickerMenu');
+    const button = document.getElementById('skillDocPickerToggle');
+    if (!menu || !button) return;
+    const open = force !== undefined ? force : menu.hidden;
+    menu.hidden = !open;
+    button.setAttribute('aria-expanded', String(open));
+}
+
+function renderSkillDocPicker() {
+    const list = document.getElementById('skillDocPickerList');
+    if (!list) return;
+    const selected = new Set(selectedSkillKeys);
+    if (!availableSkillDocs.length) {
+        list.innerHTML = '<div class="skill-doc-picker-empty">Load a WiFi or BT log to choose matching skill documents.</div>';
+    } else {
+        list.innerHTML = availableSkillDocs.map(skill => `
+            <label class="skill-doc-option">
+              <input type="checkbox" value="${escapeHtml(skill.key)}" ${selected.has(skill.key) ? 'checked' : ''}
+                     onchange="onSkillDocSelectionChange()">
+              <span><b>${escapeHtml(skill.name)}</b><small>${escapeHtml(skill.description || 'No description')}</small></span>
+            </label>`).join('');
+    }
+    const count = selectedSkillKeys.length;
+    const countEl = document.getElementById('skillDocCount');
+    const button = document.getElementById('skillDocPickerToggle');
+    if (countEl) countEl.textContent = count;
+    if (button) button.classList.toggle('has-docs', count > 0);
+}
+
+function onSkillDocSelectionChange() {
+    selectedSkillKeys = Array.from(
+        document.querySelectorAll('#skillDocPickerList input[type="checkbox"]:checked')
+    ).map(input => input.value);
     baselineDone = false;
     setBaselineGate();
-    fetch(LV.url.learning_set_mode, {
-        method: 'POST',
-        headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({use_prior_knowledge: priorMode()}),
-    }).catch(() => {});
+    updateQuestionContextStatus();
+    persistQuestionContext({selected_skill_keys: selectedSkillKeys}).catch(e => alert(e.message));
 }
 
-function onInterviewModeChange() {
-    const select = document.getElementById('interviewMode');
-    interviewMode = select ? select.value : 'ask';
+function clearSelectedSkillDocs() {
+    selectedSkillKeys = [];
+    baselineDone = false;
+    setBaselineGate();
+    renderSkillDocPicker();
+    updateQuestionContextStatus();
+    persistQuestionContext({selected_skill_keys: []}).catch(e => alert(e.message));
+}
+
+let _caseSummaryTimer = null;
+function onCaseSummaryInput() {
+    updateQuestionContextStatus();
+    baselineDone = false;
+    setBaselineGate();
+    if (_caseSummaryTimer) clearTimeout(_caseSummaryTimer);
+    _caseSummaryTimer = setTimeout(() => {
+        persistCaseSummaryNow();
+    }, 450);
+}
+
+function persistCaseSummaryNow() {
+    if (_caseSummaryTimer) clearTimeout(_caseSummaryTimer);
+    _caseSummaryTimer = null;
+    const field = document.getElementById('caseSummary');
+    return persistQuestionContext({case_summary: field ? field.value : ''}).catch(e => alert(e.message));
+}
+
+function updateQuestionContextStatus() {
+    const field = document.getElementById('caseSummary');
+    const summaryText = field ? field.value : '';
+    const timeline = document.getElementById('contextTimelineChip');
+    const summary = document.getElementById('contextSummaryChip');
+    const docs = document.getElementById('contextDocsChip');
+    if (timeline) {
+        const span = contextTimeSpan && contextTimeSpan.first
+            ? ` · ${contextTimeSpan.first} → ${contextTimeSpan.last || contextTimeSpan.first}` : '';
+        timeline.innerHTML = `<i class="fas fa-stream"></i> ${contextLineCount ? contextLineCount + ' context lines' + escapeHtml(span) : 'No timeline'}`;
+        timeline.classList.toggle('is-ready', contextLineCount > 0);
+    }
+    if (summary) {
+        summary.innerHTML = `<i class="fas fa-align-left"></i> ${summaryText.trim() ? 'Summary added' : 'No summary'}`;
+        summary.classList.toggle('is-ready', !!summaryText.trim());
+    }
+    if (docs) {
+        docs.innerHTML = `<i class="fas fa-book"></i> ${selectedSkillKeys.length} docs`;
+        docs.classList.toggle('is-ready', selectedSkillKeys.length > 0);
+    }
+    renderSkillDocPicker();
     updateChatRefinementSummary();
-    fetch(LV.url.learning_set_mode, {
-        method: 'POST',
-        headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({interview_mode: interviewMode}),
-    })
-        .then(r => r.json())
-        .then(d => { if (d.decision_ledger) updateDecisionLedger(d.decision_ledger); })
-        .catch(() => {});
 }
 
 function updateDecisionLedger(data) {
     if (!data) return;
     decisionLedger = data;
-    interviewMode = data.mode || interviewMode;
-    const select = document.getElementById('interviewMode');
-    if (select) select.value = interviewMode;
+    interviewMode = 'ask';
     const badge = document.getElementById('decisionBadgeText');
     if (badge) {
         const total = (data.items || []).length;
@@ -2145,8 +2258,13 @@ function updateChatRefinementSummary() {
     const summary = document.getElementById('chatRefinementSummary');
     if (!summary) return;
     const total = (decisionLedger.items || []).length;
-    const modeLabel = interviewMode.charAt(0).toUpperCase() + interviewMode.slice(1);
-    summary.textContent = `${modeLabel} · ${decisionLedger.resolved || 0}/${total}`;
+    summary.textContent = `Context · ${decisionLedger.resolved || 0}/${total}`;
+    const badge = document.getElementById('chatRefinementDocBadge');
+    if (badge) {
+        const n = selectedSkillKeys.length;
+        badge.textContent = n;
+        badge.style.display = n ? '' : 'none';
+    }
 }
 
 function toggleChatRefinement(force) {
@@ -2314,7 +2432,11 @@ function requestBaseline(attempt, forceRefresh) {
     fetch(LV.url.learning_baseline, {
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({force: !!forceRefresh}),
+        body: JSON.stringify({
+            force: !!forceRefresh,
+            case_summary: document.getElementById('caseSummary').value,
+            selected_skill_keys: selectedSkillKeys,
+        }),
     })
         .then(r => r.status === 503 ? {retry: true} : r.json())
         .then(d => {
@@ -2558,16 +2680,19 @@ function askStepQuestion(seq, btn) {
             if (!d.success) { alert(d.message); return; }
             if (d.usage) updateTokenBadge(d.usage.session);
             if (d.decision_ledger) updateDecisionLedger(d.decision_ledger);
-            renderStepAskCard(seq, d.question, d.decision_id);
+            if (!d.question) {
+                appendMsg('assistant', d.message || 'No remaining question would materially change this step.', seq);
+                return;
+            }
+            renderStepAskCard(seq, d.question, d.decision_id, d.question_number || 1);
         })
         .catch(e => { setBusy(false); btn.innerHTML = label; alert('Failed: ' + e); });
 }
 
 // Renders the ❓ question with the SAME options/custom-answer shape as
-// showNextQuestionCard, plus an explicit Skip. Skipping is purely client-side
-// (dismiss, no backend call — nothing was asked "out loud" to the model to
-// walk back). Answering posts to /learning/answer_step_question, which tags
-// both messages with this step and only fills the reason if it's still empty.
+// showNextQuestionCard, plus an explicit Skip. Skip records a deferred
+// decision and stops this Step's chain. An answer may return exactly one next
+// high-value question; no next question means the chain is complete.
 // Offer ONE clarifying question when the engineer's last edit contradicted
 // the baseline read (see /learning/clarify). This does auto-fire an LLM call
 // off a filter action — the pattern this app deliberately removed once — but
@@ -2682,10 +2807,11 @@ function renderClarifyCard(d) {
     box.scrollTop = box.scrollHeight;
 }
 
-function renderStepAskCard(seq, q, decisionId) {
+function renderStepAskCard(seq, q, decisionId, questionNumber) {
     const box = document.getElementById('chatBox');
     const card = el('div', 'chat-question-card step-ask-card mb-2');
-    card.appendChild(el('div', 'chat-q-progress', `❓ Step #${seq}`));
+    const ordinal = questionNumber > 1 ? ` · Follow-up ${questionNumber}` : '';
+    card.appendChild(el('div', 'chat-q-progress', `❓ Step #${seq}${ordinal}`));
     card.appendChild(el('div', 'chat-q-text', q.question));
     appendRecommendation(card, q);
 
@@ -2696,7 +2822,7 @@ function renderStepAskCard(seq, q, decisionId) {
         q.options.forEach(opt => {
             const b = el('button', 'chat-q-opt', opt);
             b.type = 'button';
-            b.onclick = () => submitStepAnswer(seq, q.question, opt, card, decisionId);
+            b.onclick = () => submitStepAnswer(seq, q.question, opt, card, decisionId, true);
             optsBox.appendChild(b);
         });
         const otherBtn = el('button', 'chat-q-opt chat-q-opt-other', 'Other…');
@@ -2717,12 +2843,12 @@ function renderStepAskCard(seq, q, decisionId) {
     input.className = 'form-control form-control-sm';
     input.placeholder = 'Type your answer…';
     input.onkeypress = (e) => {
-        if (e.key === 'Enter' && input.value.trim()) submitStepAnswer(seq, q.question, input.value.trim(), card, decisionId);
+        if (e.key === 'Enter' && input.value.trim()) submitStepAnswer(seq, q.question, input.value.trim(), card, decisionId, true);
     };
     const sendBtn = el('button', 'btn btn-sm btn-primary');
     sendBtn.type = 'button';
     sendBtn.innerHTML = '<i class="fas fa-paper-plane"></i>';
-    sendBtn.onclick = () => { if (input.value.trim()) submitStepAnswer(seq, q.question, input.value.trim(), card, decisionId); };
+    sendBtn.onclick = () => { if (input.value.trim()) submitStepAnswer(seq, q.question, input.value.trim(), card, decisionId, true); };
     const skipBtn = el('button', 'btn btn-sm btn-outline-secondary', 'Skip');
     skipBtn.type = 'button';
     skipBtn.onclick = () => { deferDecision(decisionId); card.remove(); };
@@ -2746,13 +2872,16 @@ function renderStepAskCard(seq, q, decisionId) {
     box.scrollTop = box.scrollHeight;
 }
 
-function submitStepAnswer(seq, question, answer, card, decisionId) {
+function submitStepAnswer(seq, question, answer, card, decisionId, continueChain) {
     if (isBusy()) return;
     setBusy(true);
     fetch(LV.url.learning_answer_step_question, {
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({seq: seq, question: question, answer: answer, decision_id: decisionId || ''}),
+        body: JSON.stringify({
+            seq: seq, question: question, answer: answer,
+            decision_id: decisionId || '', continue_chain: continueChain === true,
+        }),
     })
         .then(r => r.json())
         .then(d => {
@@ -2761,8 +2890,15 @@ function submitStepAnswer(seq, question, answer, card, decisionId) {
             if (!d.success) { alert(d.message); return; }
             appendMsg('assistant', `❓ ${question}`, seq);
             appendMsg('user', answer, seq);
+            if (d.usage && d.usage.session) updateTokenBadge(d.usage.session);
             if (d.decision_ledger) updateDecisionLedger(d.decision_ledger);
             syncOpsQuiet(d); // updates the step's "✓ why" indicator (only if it was previously empty)
+            if (continueChain && d.next_question) {
+                renderStepAskCard(
+                    seq, d.next_question, d.next_decision_id,
+                    d.question_number || 2,
+                );
+            }
         })
         .catch(e => { setBusy(false); alert('Failed: ' + e); });
 }
@@ -2985,6 +3121,23 @@ function exportSkill() {
                           `family, edit "${lb.parent_name}" directly instead.`,
                 });
             }
+            const inheritance = d.inheritance_summary || null;
+            if (inheritance && inheritance.enabled && inheritance.parent_name && !d.lineage_blocked) {
+                if (inheritance.inherited_drafts > 0) {
+                    exportNotices.push({
+                        kind: 'info', icon: '🌿', title: `Related knowledge inherits from "${inheritance.parent_name}".`,
+                        body: `${inheritance.inherited_drafts} related draft(s) are new flattened children for Avatar; ` +
+                              `${inheritance.standalone_drafts} unrelated knowledge-domain draft(s) remain standalone. ` +
+                              'Each draft shows its own inherited-versus-new breakdown below.',
+                    });
+                } else {
+                    exportNotices.push({
+                        kind: 'info', icon: '↗️', title: `No draft inherited from "${inheritance.parent_name}".`,
+                        body: 'Load skills was enabled and its document was considered, but the exported knowledge ' +
+                              'was not an additive extension of that loaded skill, so it stays standalone.',
+                    });
+                }
+            }
             if (draftTotal > 1) {
                 exportNotices.push({
                     kind: 'info', icon: '🗂️', title: `${draftTotal} mutually-exclusive scenarios.`,
@@ -2997,7 +3150,7 @@ function exportSkill() {
 }
 
 // Pop the next queued draft into the Edit Skill modal. Every draft is a
-// brand-new skill (no extend/diff routing) — its `domain` (WiFi/BT) tells
+// brand-new skill (standalone or a new flattened child) — its `domain` (WiFi/BT) tells
 // /learning/save which local file to file it in. When the LLM split the
 // conversation into several distinct-domain skills, they're reviewed/saved
 // one at a time via draftQueue.
@@ -3090,12 +3243,14 @@ document.addEventListener('click', function(e) {
     if (dd && btn && !btn.contains(e.target) && !dd.contains(e.target)) {
         dd.style.display = 'none';
     }
+    const skillPicker = document.getElementById('skillDocPicker');
+    if (skillPicker && !skillPicker.contains(e.target)) toggleSkillDocPicker(false);
 });
 
 renderFilters();
 renderStepTagSelector();
 renderStepPanel(); // now a permanent card (left column), not a toggled overlay
-if (LV.boot.logDomain) refreshSkillList(LV.boot.logDomain);
+refreshSkillList(LV.boot.logDomain || 'wifi');
 // Restore the event-log panel from server state on reload (BT only).
 updateEvtSection(LV.boot.logDomain, LV.boot.hasEventLog);
 document.getElementById('dateSynthWarn').style.display = LV.boot.hasDateAnchor ? 'inline' : 'none';
@@ -3108,9 +3263,11 @@ document.getElementById('previewBox').addEventListener('click', function (e) {
     if (!row) return;
     jumpEvtToMs(+row.dataset.ms);
 });
-// Restore the prior-knowledge toggle from server state on reload.
-document.getElementById('priorToggle').checked = LV.boot.priorKnowledge;
-document.getElementById('interviewMode').value = interviewMode;
+// Restore the stable Question context. Skill options arrive from the
+// domain-scoped /skills/list request above.
+document.getElementById('caseSummary').value = LV.boot.caseSummary || '';
+renderSkillDocPicker();
+updateQuestionContextStatus();
 updateDecisionLedger(decisionLedger);
 // A baseline chosen in the Skill Library survives a reload, so the badge has
 // to be evaluated on load too, not only when it changes.

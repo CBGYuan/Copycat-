@@ -39,11 +39,11 @@
   <!-- Row 2: Filtered Log, full width so it has real room to scroll horizontally -->
   <div class="col-12">
     <div class="card">
-      <!-- Collapsible System Event Log (BT captures only) — sits ABOVE the log
+      <!-- Collapsible System Event Log (WiFi and BT) — sits ABOVE the log
            rows. Each event row click-syncs to the nearest driver-log line by
            timestamp (and clicking a log line highlights the nearest event).
-           Hidden entirely for WiFi/no-event-log; the "pick" button lets the
-           engineer load one manually when auto-discovery found nothing. -->
+           The "pick" button lets the engineer load one manually when
+           auto-discovery found nothing. -->
       <div id="evtSection" class="evt-section" style="display:none;">
         <div class="evt-head">
           <button id="evtToggleBtn" type="button" class="evt-toggle" onclick="toggleEvtPanel()" disabled
@@ -76,7 +76,7 @@
               <option value="information">Info</option>
             </select>
             <span id="evtCount" class="evt-count small text-muted"></span>
-            <span id="evtTzBadge" class="evt-tz small text-muted" title="Event times are UTC; the driver log below is customer-local, so the jump lands on the nearest line and may be offset by the capture's timezone.">⚠ times are UTC</span>
+            <span id="evtTzBadge" class="evt-tz small text-muted">Checking time basis…</span>
           </div>
           <div id="evtBody" class="evt-body"></div>
         </div>
@@ -319,21 +319,33 @@
       <div class="card-header py-1 chat-header">
         <div class="chat-header-primary">
           <span title="Skill-building chat"><i class="fas fa-comments"></i> Chat</span>
-        <!-- Conversation-mode toggle sits right next to the title now — ON =
-             load the existing WiFi/BT skills as prior knowledge, so the
-             interview + export only cover what's NEW beyond them (no
-             overlapping questions). OFF = teach from scratch, no prior skill
-             consulted. The Log Round button, the live assessment, and Export
-             all follow this switch. -->
-        <span class="form-check form-switch chat-mode-switch m-0" title="ON = load existing WiFi/BT skills as prior knowledge (the interview only asks about what's NEW beyond them, and export stays non-overlapping). OFF = teach from scratch, no prior skill consulted.">
-          <input class="form-check-input" type="checkbox" role="switch" id="priorToggle" onchange="onPriorToggle()">
-          <label class="form-check-label small text-muted" for="priorToggle" id="priorToggleLabel">Load skills</label>
-        </span>
+        <!-- Selected skills are read-only documents for grounded questions.
+             Zero selected = fresh/user-only knowledge; one or more selected =
+             prior-knowledge mode. Inheritance still has one separate parent. -->
+        <div class="skill-doc-picker" id="skillDocPicker">
+          <button type="button" id="skillDocPickerToggle" class="btn btn-sm skill-doc-picker-toggle"
+                  onclick="toggleSkillDocPicker()" aria-expanded="false"
+                  title="Choose the existing skill documents Copycat may use as prior knowledge">
+            <i class="fas fa-book"></i> Load skills <span id="skillDocCount" class="skill-doc-count">0</span>
+            <i class="fas fa-chevron-down"></i>
+          </button>
+          <div id="skillDocPickerMenu" class="skill-doc-picker-menu" hidden>
+            <div class="skill-doc-picker-head">
+              <div><b>Skill documents</b><small>Choose only what is relevant to this case.</small></div>
+              <button type="button" onclick="clearSelectedSkillDocs()">Clear</button>
+            </div>
+            <div id="skillDocPickerList" class="skill-doc-picker-list"></div>
+            <div class="skill-doc-picker-foot">
+              Selected documents guide questions; they never replace log evidence.
+              <button type="button" class="btn btn-sm btn-primary" onclick="toggleSkillDocPicker(false)">Done</button>
+            </div>
+          </div>
+        </div>
         <button type="button" id="chatRefinementToggle" class="btn btn-sm chat-refinement-toggle"
                 onclick="toggleChatRefinement()" aria-expanded="false"
                 aria-controls="chatRefinementRow" title="Show interview and specification controls">
           <i class="fas fa-sliders-h"></i>
-          <span id="chatRefinementSummary">Ask · 0/0</span>
+          <span id="chatRefinementSummary">Context · 0/0</span><span id="chatRefinementDocBadge" class="skill-doc-count" style="display:none;">0</span>
           <i id="chatRefinementChevron" class="fas fa-chevron-down chat-refinement-chevron"></i>
         </button>
         <!-- The one deliberate start of the teaching loop. The LLM's first
@@ -362,21 +374,29 @@
         </div>
         </div>
         <div id="chatRefinementRow" class="chat-refinement-row" hidden>
-          <span class="chat-refinement-kicker">
-            <i class="fas fa-magic"></i> Refinement
-          </span>
-          <label for="interviewMode" class="chat-refinement-label">Question style</label>
-          <select id="interviewMode" class="form-select form-select-sm interview-mode-select"
-                  onchange="onInterviewModeChange()"
-                  title="Ask: one high-impact question when something meaningfully diverges from the baseline. Quiet: never asks — also skips the question schema and the auto-clarify call, so it costs less. Either way, unresolved decisions are flagged before Export.">
-            <option value="ask">Ask</option>
-            <option value="quiet">Quiet</option>
-          </select>
-          <button type="button" id="decisionBadge" class="btn btn-sm decision-ledger-btn"
-                  onclick="openDecisionLedger()" title="Review specification decisions">
-            <i class="fas fa-code-branch"></i> <span id="decisionBadgeText">0/0 decisions</span>
-          </button>
-          <span class="chat-refinement-help">Controls how strongly Chat follows up on skill-changing differences.</span>
+          <div class="question-context-main">
+            <label for="caseSummary" class="question-context-label">
+              <i class="fas fa-align-left"></i> Case summary <span>optional</span>
+            </label>
+            <textarea id="caseSummary" class="form-control form-control-sm question-context-input"
+                      maxlength="4000" rows="2"
+                      placeholder="e.g. Roaming disconnects about 3 seconds after reassociation"
+                      oninput="onCaseSummaryInput()" onblur="persistCaseSummaryNow()"></textarea>
+          </div>
+          <div class="question-context-side">
+            <span class="chat-refinement-kicker"><i class="fas fa-project-diagram"></i> Question context</span>
+            <div class="question-context-chips">
+              <span id="contextTimelineChip" class="question-context-chip"><i class="fas fa-stream"></i> No timeline</span>
+              <span id="contextSummaryChip" class="question-context-chip"><i class="fas fa-align-left"></i> No summary</span>
+              <button type="button" id="contextDocsChip" class="question-context-chip question-context-chip-btn"
+                      onclick="toggleSkillDocPicker(true)"><i class="fas fa-book"></i> 0 docs</button>
+            </div>
+            <button type="button" id="decisionBadge" class="btn btn-sm decision-ledger-btn"
+                    onclick="openDecisionLedger()" title="Review specification decisions">
+              <i class="fas fa-code-branch"></i> <span id="decisionBadgeText">0/0 decisions</span>
+            </button>
+            <span class="chat-refinement-help">Copycat asks one high-value question from the ordered log, this summary, and selected docs.</span>
+          </div>
           <button type="button" class="btn btn-sm chat-refinement-collapse"
                   onclick="toggleChatRefinement(false)" aria-label="Collapse refinement controls">
             <i class="fas fa-chevron-up"></i>
@@ -507,7 +527,9 @@
     boot: {
       activeSkillKey: {{ (state.active_skill_key or '')|tojson }},
       baselineSkillName: {{ (baseline_skill_name or '')|tojson }},
-      captureUtcOffsetMin: {{ state.capture_utc_offset_min|tojson }},
+      eventSyncOffsetMin: {{ state.event_sync_offset_min|tojson }},
+      eventSyncBasis: {{ (state.event_sync_basis or '')|tojson }},
+      customerUtcOffsetMin: {{ state.customer_utc_offset_min|tojson }},
       chatHistory: {{ state.chat_history|tojson }},
       filters: {{ state.filters|tojson }},
       logDomain: {{ (state.log_domain or '')|tojson }},
@@ -518,7 +540,11 @@
       hasBaseline: {{ has_baseline|tojson }},
       logPath: {{ (state.log_path or '')|tojson }},
       priorKnowledge: {{ state.prior_knowledge|tojson }},
-      interviewMode: {{ state.interview_mode|tojson }},
+      interviewMode: "ask",
+      caseSummary: {{ (state.case_summary or '')|tojson }},
+      selectedSkillKeys: {{ (state.selected_skill_keys or [])|tojson }},
+      contextLineCount: {{ (state.filtered_preview or [])|length|tojson }},
+      contextTimeSpan: {{ ((state.filter_stats or {}).get('time_span') or {})|tojson }},
       decisionLedger: {{ (decision_ledger or {})|tojson }},
       sessionUsage: {{ session_usage|tojson }},
       lastReadiness: {{ (state.last_readiness or {})|tojson }},
