@@ -1,14 +1,18 @@
 import json
 import unittest
+from types import SimpleNamespace
+from unittest.mock import patch
 
-from blueprints.learning.learning_routes import _filter_signature, _baseline_delta
-from blueprints.chatbot.chatbot_routes import _parse_chat_response
+from blueprints.learning.learning_routes import (_filter_signature, _baseline_delta,
+                                                  _step_annotations)
+from blueprints.chatbot.chatbot_routes import _parse_chat_response, _chronological_sample
 from services.learning_service import (analyze_baseline, analyze_round, assess_teaching_evidence,
-                                       clarify_divergence)
+                                       clarify_divergence, _build_context_block,
+                                       _build_ask_step_context_block)
 from services.session_store import WorkingState
 from services import decision_ledger
 from utils import divergence, operation_journal
-from utils.tat_parser import matched_keywords_for_line
+from utils.tat_parser import matched_keywords_for_line, compute_filter_stats
 
 
 class FakeLlm:
@@ -25,6 +29,222 @@ class FakeLlm:
 
 
 class LearningPipelineTests(unittest.TestCase):
+    def test_question_context_keeps_summary_docs_and_log_evidence_distinct(self):
+        block = _build_context_block({
+            "domain": "wifi",
+            "case_summary": "Roaming disconnects three seconds after reassociation.",
+            "sample_lines": ["10:00 assoc", "10:03 disconnect"],
+            "existing_skills": [{
+                "key": "roam", "name": "Roam", "description": "Roam failures",
+                "keywords": ["assoc"], "triggers": [], "expert_rules": "Check status 17.",
+            }],
+        })
+        self.assertIn("Engineer-provided case summary", block)
+        self.assertIn("Roaming disconnects three seconds", block)
+        self.assertIn("[SKILL DOC roam]", block)
+        self.assertIn("10:00 assoc\n10:03 disconnect", block)
+
+    def test_step_question_is_grounded_in_summary_timeline_and_docs(self):
+        block = _build_ask_step_context_block({
+            "domain": "wifi", "verb": "added", "target": "disconnect",
+            "excluding": False, "effect_phrase": "kept 2 lines", "reason": "",
+            "case_summary": "Drop occurs after roam.",
+            "sample_lines": ["10:00 roam", "10:03 disconnect"],
+            "existing_skills": [{
+                "name": "Roam", "description": "Known roam flow", "keywords": ["roam"],
+                "expert_rules": "The normal flow completes within one second.",
+            }],
+        })
+        self.assertIn("Drop occurs after roam", block)
+        self.assertIn("10:00 roam\n10:03 disconnect", block)
+        self.assertIn("rule doc", block)
+
+    def test_step_question_uses_exact_evidence_and_counterexample_policy(self):
+        base = {
+            "domain": "wifi", "verb": "added", "target": "disconnect",
+            "excluding": False, "effect_phrase": "kept 2 lines", "reason": "",
+            "sample_lines": [], "existing_skills": [],
+        }
+        evidence_only = _build_ask_step_context_block(dict(base, step_annotations=[
+            {"line_no": 10, "label": "evidence", "text": "10:00 real disconnect"},
+        ]))
+        self.assertIn("Only E is present", evidence_only)
+        self.assertIn("Do not ask whether supporting evidence exists", evidence_only)
+
+        x_only = _build_ask_step_context_block(dict(base, step_annotations=[
+            {"line_no": 20, "label": "counterexample", "text": "10:05 benign disconnect"},
+        ]))
+        self.assertIn("Only X is present", x_only)
+        self.assertIn("noise, a legitimate exception", x_only)
+
+        continued = _build_ask_step_context_block(dict(
+            base,
+            continuing=True,
+            answered_questions=[{"question": "Is this global?", "answer": "Roam only"}],
+        ))
+        self.assertIn("Roam only", continued)
+        self.assertIn("emit an empty question and stop", continued)
+
+    def test_step_annotations_match_exact_keyword_and_role(self):
+        state = WorkingState()
+        state.log_annotations = [
+            {"line_no": 1, "label": "evidence", "text": "a",
+             "matched_keywords": [{"text": "Disconnect", "excluding": False}]},
+            {"line_no": 2, "label": "counterexample", "text": "b",
+             "matched_keywords": [{"text": "disconnect", "excluding": True}]},
+            {"line_no": 3, "label": "counterexample", "text": "c",
+             "matched_keywords": [{"text": "assoc", "excluding": False}]},
+        ]
+        matched = _step_annotations(state, {
+            "action": "add_include", "text": "disconnect", "excluding": False,
+        })
+        self.assertEqual([item["line_no"] for item in matched], [1])
+
+    def test_e_and_x_replace_each_other_on_the_same_log_line(self):
+        from app import create_app
+        from services import session_store
+
+        app = create_app()
+        client = app.test_client()
+        with client.session_transaction() as sess:
+            sess["wsid"] = "annotation-exclusive"
+        state = WorkingState()
+        state.filters = [{"text": "disconnect", "excluding": False}]
+        session_store._STORE["annotation-exclusive"] = state
+
+        first = client.post("/log_viewer/annotate_line", json={
+            "line_no": 7, "label": "evidence", "text": "disconnect", "matched_filters": [0],
+        })
+        second = client.post("/log_viewer/annotate_line", json={
+            "line_no": 7, "label": "counterexample", "text": "disconnect", "matched_filters": [0],
+        })
+        self.assertEqual(first.status_code, 200)
+        self.assertEqual(second.status_code, 200)
+        self.assertEqual(state.log_annotations, [{
+            "line_no": 7, "label": "counterexample", "text": "disconnect",
+            "matched_keywords": [{"text": "disconnect", "excluding": False}],
+        }])
+
+    def test_step_answers_adaptively_return_one_next_question_then_stop(self):
+        from app import create_app
+        from configs.global_configs import app_config
+        from services import session_store, learning_service
+
+        app = create_app()
+        client = app.test_client()
+        with client.session_transaction() as sess:
+            sess["wsid"] = "adaptive-step-chain"
+        state = WorkingState()
+        operation_journal.record(state, "add_include", text="disconnect")
+        state.operations[0]["effect"] = {"hits": 3, "unique_hits": 2}
+        state.operations[0]["pending"] = False
+        state.log_annotations = [{
+            "line_no": 8, "label": "counterexample", "text": "benign disconnect",
+            "matched_keywords": [{"text": "disconnect", "excluding": False}],
+        }]
+        session_store._STORE["adaptive-step-chain"] = state
+
+        q1 = {"question": "Is this noise or a real exception?", "type": "choice",
+              "options": ["Noise", "Exception"]}
+        q2 = {"question": "Which observable field separates it?", "type": "open", "options": []}
+        fake_helper = SimpleNamespace(is_ready=True, last_usage={}, session_usage={})
+        old_helper = app_config.llm_helper
+        app_config.llm_helper = fake_helper
+        try:
+            with patch.object(learning_service, "ask_step_question", side_effect=[q1, q2, None]) as ask:
+                first = client.post("/learning/ask_step", json={"seq": 1}).get_json()
+                self.assertEqual(first["question"], q1)
+                answer1 = client.post("/learning/answer_step_question", json={
+                    "seq": 1, "question": q1["question"], "answer": "Exception",
+                    "decision_id": first["decision_id"], "continue_chain": True,
+                }).get_json()
+                self.assertEqual(answer1["next_question"], q2)
+                self.assertFalse(answer1["chain_complete"])
+                answer2 = client.post("/learning/answer_step_question", json={
+                    "seq": 1, "question": q2["question"], "answer": "Reason code 17",
+                    "decision_id": answer1["next_decision_id"], "continue_chain": True,
+                }).get_json()
+                self.assertIsNone(answer2["next_question"])
+                self.assertTrue(answer2["chain_complete"])
+                self.assertEqual(ask.call_count, 3)
+                self.assertEqual(ask.call_args_list[0].args[1]["step_annotations"][0]["label"],
+                                 "counterexample")
+        finally:
+            app_config.llm_helper = old_helper
+
+    def test_chat_sample_preserves_the_end_of_a_long_timeline(self):
+        lines = [f"00:{i:02d}" for i in range(100)]
+        sample = _chronological_sample(lines, limit=10)
+        self.assertEqual(sample[:2], ["00:00", "00:01"])
+        self.assertEqual(sample[-1], "00:99")
+        self.assertIn("middle omitted", sample[6])
+
+    def test_filter_context_keeps_true_tail_beyond_visible_preview_cap(self):
+        lines = [f"10/01/2026-10:00:{i:02d}.000 hit {i}\n" for i in range(8)]
+        filters = [{
+            "text": "hit", "enabled": True, "excluding": False,
+            "case_sensitive": False, "regex": False,
+            "back_color": None, "fore_color": None,
+        }]
+        stats = compute_filter_stats(lines, filters, preview_limit=3)
+        self.assertEqual(len(stats["preview"]), 3)
+        self.assertEqual(stats["context_preview"][-1]["line_no"], 8)
+        self.assertTrue(any("middle omitted" in row["text"] for row in stats["context_preview"]))
+
+    def test_filter_matching_honors_every_rule_kind_after_the_hot_loop_rewrite(self):
+        """compute_filter_stats' inner loop no longer calls _line_matcher; it
+        sorts rules into case-insensitive / case-sensitive / regex buckets and
+        tests each ONCE per line (the previous shape tested every rule up to
+        three times, which is what made a checkbox toggle stall). The buckets
+        must stay semantically identical to _line_matcher, so pin down each
+        kind — including a disabled rule, which still owes a raw hit count,
+        and a malformed regex, which must match nothing instead of raising."""
+        lines = [
+            "10/01/2026-10:00:00.000 Disconnect reason=4\n",   # ci + CS-miss
+            "10/01/2026-10:00:01.000 DISCONNECT reason=7\n",   # ci + CS-hit
+            "10/01/2026-10:00:02.000 assoc ok code=0\n",       # regex only
+            "10/01/2026-10:00:03.000 nothing interesting\n",   # no rule at all
+        ]
+        rule = lambda **kw: {"text": "", "enabled": True, "excluding": False,
+                             "case_sensitive": False, "regex": False,
+                             "back_color": None, "fore_color": None, **kw}
+        filters = [
+            rule(text="disconnect"),                          # 0 case-insensitive
+            rule(text="DISCONNECT", case_sensitive=True),      # 1 case-sensitive
+            rule(text=r"code=\d+", regex=True),                # 2 regex
+            rule(text="reason", enabled=False),                # 3 disabled, still counted
+            rule(text="a(b", regex=True),                      # 4 malformed -> never matches
+        ]
+        stats = compute_filter_stats(lines, filters)
+        hits = {f["index"]: f["hits"] for f in stats["per_filter"]}
+        self.assertEqual(hits[0], 2, "case-insensitive must match both spellings")
+        self.assertEqual(hits[1], 1, "case-sensitive must match only the exact case")
+        self.assertEqual(hits[2], 1, "regex must still be applied")
+        self.assertEqual(hits[3], 2, "a DISABLED rule still reports its raw hit count")
+        self.assertEqual(hits[4], 0, "a malformed regex matches nothing, never raises")
+        # Survivors are include-matched lines only — the unmatched line is out,
+        # and the disabled rule never contributes one.
+        self.assertEqual([p["line_no"] for p in stats["preview"]], [1, 2, 3])
+
+    def test_filter_excludes_are_evaluated_from_the_same_single_pass(self):
+        """The exclude split reads the same per-line matched set the includes
+        do, rather than re-running the matchers. Prove an exclude still drops
+        the line and is still credited for the drop."""
+        lines = [
+            "10/01/2026-10:00:00.000 Disconnect real failure\n",
+            "10/01/2026-10:00:01.000 Disconnect housekeeping poll\n",
+        ]
+        rule = lambda **kw: {"text": "", "enabled": True, "excluding": False,
+                             "case_sensitive": False, "regex": False,
+                             "back_color": None, "fore_color": None, **kw}
+        stats = compute_filter_stats(
+            lines, [rule(text="Disconnect"), rule(text="housekeeping", excluding=True)])
+        self.assertEqual(stats["surviving_count"], 1)
+        self.assertEqual([p["line_no"] for p in stats["preview"]], [1])
+        per = {f["index"]: f for f in stats["per_filter"]}
+        self.assertEqual(per[0]["hits"], 2, "raw hits ignore the exclude")
+        self.assertEqual(per[1]["dropped"], 1, "the exclude is credited for the drop")
+
     def test_chat_divergence_parser_preserves_choice_questions(self):
         raw = json.dumps({
             "reply": "That is new expert knowledge.",
@@ -239,6 +459,17 @@ class InterviewModeTests(unittest.TestCase):
         self.assertEqual(decision_ledger.normalize_mode("smart"), "ask")
         self.assertEqual(decision_ledger.normalize_mode("grill"), "ask")
         self.assertEqual(decision_ledger.normalize_mode("GRILL"), "ask")
+
+    def test_question_context_is_part_of_the_baseline_identity(self):
+        state = WorkingState()
+        state.log_path = "case.log"
+        original = state.baseline_signature()
+        state.case_summary = "Disconnect after roam"
+        with_summary = state.baseline_signature()
+        state.selected_skill_keys = ["roam_doc"]
+        with_doc = state.baseline_signature()
+        self.assertNotEqual(original, with_summary)
+        self.assertNotEqual(with_summary, with_doc)
 
     def test_unknown_and_empty_modes_fall_back_to_ask(self):
         self.assertEqual(decision_ledger.normalize_mode("nonsense"), "ask")

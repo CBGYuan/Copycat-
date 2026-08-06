@@ -58,6 +58,24 @@ precisely (not overclaimed) in [Paper grounding](#paper-grounding) below.
   filter set is auto-assigned a color palette, alternating full-block and
   text-only treatments so a long filter list doesn't read as a wall of
   saturated color.
+- **Toggling a filter is meant to feel instant**, since it is the single most
+  repeated action in the workbench. Three things were costing it:
+  - The scan tested every rule up to *three* times per line (once for the raw
+    hit count, again for the include split, again for the exclude split), each
+    through a per-rule closure. Each line now resolves its matched set **once**
+    and the splits are set lookups — **~1.9× faster** on a 113k-line capture
+    (0.58s → 0.30s, byte-identical output). Tempting non-fix, measured and
+    rejected: gating each line behind one union regex of all patterns was
+    **2.9× slower**, because `needle in line` is a fast C substring search
+    while an alternation of ~17 literals puts Python's backtracking engine to
+    work at every position.
+  - Every click paid a flat 350 ms trailing debounce before the request even
+    left. The coalescing is now **leading-edge**: an isolated click (the
+    common case) fires immediately, and a burst still collapses into exactly
+    one follow-up run.
+  - Re-running replaced the log with "Running filter…", flashing the whole
+    pane away and back and discarding the scroll position. The previous rows
+    now stay put, dimmed, until the new ones arrive.
 - **Select a token in a log line, make it a filter.** Highlight any substring
   in the log pane and a small picker offers `+ Keyword` (keep lines containing
   it) or `− Noise` (drop them). Two actions rather than one because those mean
@@ -92,23 +110,22 @@ precisely (not overclaimed) in [Paper grounding](#paper-grounding) below.
   which has nothing to do with the domain.
 
   **Timezone alignment.** Windows stores `TimeCreated/@SystemTime` in **UTC**
-  (Event Viewer only *displays* local time), while the driver log carries the
-  capture machine's local time. Copycat reads that machine's fixed offset from a
-  `systeminfo.txt`/`system_info.txt` beside the log — the same field
-  IntelAvatar's own timezone resolver reads — and shifts the event times by it,
-  so both sources are compared in one frame:
+  (Event Viewer only *displays* local time). The text-log frame is domain
+  specific: WiFi decoder/WPP output uses the analysing engineer's local
+  timezone, while BT `.hci.txt` uses the customer's timezone from
+  `systeminfo.txt`/`system_info.txt`. Copycat shifts Event XML into that chosen
+  frame and labels it explicitly in the panel:
 
   ```
-  event 00:00:00 UTC  +  UTC+08:00 capture  =  08:00 local  ->  matches the log line at 08:00
-  without the shift:                                            8 hours off, silently
+  WiFi event 21:45 UTC + engineer UTC+08:00 = 05:45 next day -> matches WiFi text at 05:45
+  BT   event 21:45 UTC + customer UTC-05:00 = 16:45          -> matches HCI text at 16:45
   ```
 
-  Fixed offset only, no DST resolution. When no `systeminfo.txt` is found the
-  badge says so rather than pretending the jump is trustworthy. The badge also
-  states the standing **assumption**: the driver log carries *capture-machine*
-  local time — established for BT, currently assumed for WiFi. If a WiFi log
-  turns out to be in the analysing engineer's timezone instead, the jump is off
-  by the difference between the two machines.
+  WiFi uses the host OS's historical local offset for the event date (including
+  its DST rule). BT accepts both `(UTC-05:00)` and current IntelAvatar
+  `(GMT-0500)` System Info forms. If BT System Info has no usable timezone, the
+  badge says so and click-sync is disabled rather than pretending raw UTC is
+  customer-local.
 - A deterministic (zero-LLM-cost) **red-flag detector** notices a redundant
   keyword, a no-op exclude, a suspiciously large expansion/drop, or removing
   something load-bearing — and surfaces it as an inline question the instant
@@ -191,16 +208,27 @@ precisely (not overclaimed) in [Paper grounding](#paper-grounding) below.
   **delta from the previous read** — what newly counts as load-bearing or
   noise — so re-baselining after a big filter change is legible rather than a
   silent swap of one opinion for another.
-- **Interview mode** — an Ask / Quiet selector, tucked behind a collapsible
-  **Refinement** row under the chat header (a sliders icon showing a live
-  summary, e.g. "Ask · 2/5") rather than sitting permanently in the primary
-  toolbar — this is a strategy setting changed rarely, not a per-message
-  control. *Ask* is the behavior described above: at most one question, only
-  on measurable divergence, taking the highest-impact unresolved branch.
-  *Quiet* never interrupts automatically — useful when you'd rather filter
-  uninterrupted and answer everything at the end — and is also genuinely
-  cheaper, because it drops the structured-question schema from every chat
-  turn's system prompt *and* suppresses the auto-clarify call entirely.
+- **Case intake, asked in the conversation** — the case description ("what is
+  this capture about?") and the choice of reference documents are pure
+  up-front framing for the first read, so they are *asked for*, once, as the
+  first card in the chat when a log is loaded — not typed into a panel above
+  the conversation they belong to. Answering posts a compact **Question
+  context** note into the transcript (description, reference docs, context
+  size) with a **Rewrite** button that re-asks the same question; the note is
+  re-posted right before the baseline analysis, so the transcript records what
+  the read was *given* next to what it produced. An earlier design put both in
+  a collapsible "Refinement" row under the chat header, which meant the
+  framing lived in a panel the engineer had to know to open, and never
+  appeared in the transcript at all. The value still lands in the same
+  `state.case_summary` and is still fed to every later chat turn and question
+  prompt — only the way it is collected changed.
+- **Interview mode** — `ask` is the behavior described above: at most one
+  question, only on measurable divergence, taking the highest-impact
+  unresolved branch. A `quiet` mode (never interrupts automatically; also
+  genuinely cheaper, since it drops the structured-question schema from every
+  chat turn's system prompt *and* suppresses the auto-clarify call) still
+  exists in `decision_ledger.VALID_MODES` and is honored end-to-end, but
+  **has no selector in the UI at present** — the workbench runs `ask`.
   Whether an unresolved decision is flagged before Export is deliberately
   **not** part of this setting: that check is unconditional (see the decision
   ledger below), because whether a question was asked and whether an asked
@@ -210,7 +238,9 @@ precisely (not overclaimed) in [Paper grounding](#paper-grounding) below.
 - **Decision ledger** — every question the interview asks (baseline
   contradiction, per-step follow-up, clarification) is logged as one entry —
   open / resolved / deferred — in a session-only ledger, reachable from a
-  badge inside that same Refinement row ("resolved/total decisions"). It is
+  small branch icon in the chat header. The icon is deliberately quiet: it
+  carries no standing "0/0", and lights up with a count only when a decision
+  is actually still **open**. It is
   *never* written into the exported skill YAML; at Export time it is folded
   into a **review-only spec** (scope, triggers, required evidence, exclusions,
   resolved vs. still-open decisions) shown alongside the draft, so what you
@@ -559,8 +589,14 @@ as a future direction, so this list doesn't overclaim:
 python -m unittest discover -s tests -v
 ```
 
-99 tests, no LLM or network access required. They cover:
+136 tests, no LLM or network access required. They cover:
 
+- **Filter engine** — after the hot loop was rewritten to test each rule once
+  per line, every rule *kind* is pinned down against the old semantics:
+  case-insensitive vs case-sensitive spelling, regex, a **disabled** rule
+  still owing a raw hit count, a malformed regex matching nothing instead of
+  raising, and an exclude still dropping its line and being credited for the
+  drop — all read from the same single pass.
 - **Baseline + divergence** — contradictions vs omissions, materiality
   checked before opinion, pre-baseline edits excluded, an omission producing
   a non-blocking open elicitation question (never a blocking, discriminating

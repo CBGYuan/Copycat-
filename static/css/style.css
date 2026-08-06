@@ -1134,71 +1134,58 @@ a.btn-primary {
   display: flex; align-items: center; gap: 8px;
   min-width: 0;
 }
-.chat-refinement-toggle {
-  display: inline-flex; align-items: center; gap: 6px;
-  min-height: 29px; padding: 3px 8px;
-  border: 1px solid #d5dde5; border-radius: 8px;
-  background: #fff; color: #536173;
-  font-size: 0.69rem; font-weight: 700; white-space: nowrap;
+/* The "Chat" title must never be the thing that gives way. Without this it is
+   an ordinary flex item, so a crowded header squeezes it to a few pixels and
+   the word wraps under its own icon instead of the row staying one line. */
+.chat-header-title { flex: 0 0 auto; white-space: nowrap; }
+
+/* Re-running a filter dims the previous rows in place rather than clearing
+   them (see applyFilter) — no flash, and the scroll position survives. */
+#previewBox.is-refiltering { opacity: 0.55; transition: opacity 90ms linear; }
+#previewBox.is-refiltering .tat-log-row { cursor: progress; }
+/* Case intake + its transcript recap. These replace the old collapsible
+   "Context" row: the same two inputs (case description, reference docs) are
+   now asked for inside the conversation, and what was collected stays in the
+   transcript as a compact note instead of living in a panel above it. */
+.case-intake-card { border-left: 3px solid var(--primary); }
+.case-intake-input {
+  margin: 6px 0 8px; font-size: 0.78rem; resize: vertical;
 }
-.chat-refinement-toggle:hover,
-.chat-refinement-toggle.is-open {
-  border-color: var(--primary-light);
-  background: #f4f9fc; color: var(--primary-dark);
+.case-intake-docs {
+  display: flex; align-items: center; flex-wrap: wrap; gap: 8px; margin-bottom: 8px;
 }
-.chat-refinement-toggle > .fa-sliders-h { color: var(--primary); }
-.chat-refinement-chevron {
-  margin-left: 1px; color: #8a96a3; font-size: 0.55rem;
+.case-intake-docs .btn { font-size: 0.68rem; white-space: nowrap; }
+.case-intake-docs .btn.has-docs {
+  border-color: #abd1bd; background: #f0f9f4; color: #36714f; font-weight: 650;
 }
-.chat-refinement-row {
-  display: grid; grid-template-columns: minmax(220px, 1.15fr) minmax(250px, 1fr) 27px;
-  align-items: center; gap: 10px;
-  margin: 5px -4px -4px; padding: 7px 8px 6px;
-  border-top: 1px solid #e1e7ec;
-  border-radius: 0 0 8px 8px;
+.case-intake-hint { color: #8a96a2; font-size: 0.64rem; }
+
+.case-context-note {
+  padding: 7px 9px; border: 1px solid #dbe6ee; border-radius: 8px;
   background: linear-gradient(90deg, #f5f9fc 0%, #fafbfc 100%);
 }
-.chat-refinement-row[hidden] { display: none; }
-.chat-refinement-kicker {
-  display: inline-flex; align-items: center; gap: 5px;
+.case-context-head {
+  display: flex; align-items: center; gap: 6px; margin-bottom: 5px;
   color: var(--primary-dark);
   font-size: 0.65rem; font-weight: 750;
   letter-spacing: 0.03em; text-transform: uppercase;
 }
-.chat-refinement-label {
-  margin: 0 0 0 3px; color: #687786;
-  font-size: 0.65rem; font-weight: 650; white-space: nowrap;
+.case-context-edit {
+  margin-left: auto; padding: 1px 7px;
+  border: 1px solid #cfdae4; border-radius: 6px; background: #fff;
+  color: #62707e; font-size: 0.62rem; font-weight: 650;
+  letter-spacing: 0; text-transform: none;
 }
-.chat-refinement-help {
-  overflow: hidden; color: #7b8792;
-  font-size: 0.64rem; text-overflow: ellipsis; white-space: nowrap;
+.case-context-edit:hover { border-color: var(--primary-light); color: var(--primary-dark); }
+.case-context-body { display: flex; flex-wrap: wrap; gap: 5px; }
+.case-context-chip {
+  display: inline-flex; align-items: center; gap: 5px;
+  max-width: 100%; padding: 2px 7px;
+  border: 1px solid #dbe3ea; border-radius: 999px;
+  background: #fff; color: #6c7985; font-size: 0.61rem;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
-.chat-refinement-collapse {
-  display: inline-flex; align-items: center; justify-content: center;
-  width: 27px; min-width: 27px; height: 27px; margin-left: auto; padding: 0;
-  border: 0; background: transparent; color: #788693;
-}
-.chat-refinement-collapse:hover { background: #e8f0f5; color: var(--primary-dark); }
-.question-context-main { min-width: 0; }
-.question-context-label {
-  display: flex; align-items: center; gap: 5px; margin: 0 0 4px;
-  color: #526273; font-size: 0.66rem; font-weight: 750;
-}
-.question-context-label span { color: #8a96a2; font-weight: 500; }
-.question-context-input {
-  min-height: 46px; max-height: 92px; resize: vertical;
-  border-color: #d5dde5; background: rgba(255,255,255,0.9); font-size: 0.7rem;
-}
-.question-context-side { display: flex; min-width: 0; flex-wrap: wrap; align-items: center; gap: 6px; }
-.question-context-chips { display: flex; min-width: 0; flex-wrap: wrap; gap: 5px; }
-.question-context-chip {
-  display: inline-flex; align-items: center; gap: 4px; padding: 2px 7px;
-  border: 1px solid #dbe3e9; border-radius: 999px;
-  background: #fff; color: #6c7985; font-size: 0.61rem; white-space: nowrap;
-}
-.question-context-chip.is-ready { border-color: #abd1bd; background: #f0f9f4; color: #36714f; }
-.question-context-chip-btn { cursor: pointer; }
-.question-context-side .chat-refinement-help { flex-basis: 100%; white-space: normal; }
+.case-context-chip.is-ready { border-color: #abd1bd; background: #f0f9f4; color: #36714f; }
 
 /* Session token-usage counter — the "small place" surfacing what things like
    the operation-delta trimming and prompt caching actually save. */
@@ -1611,19 +1598,19 @@ a.btn-primary {
     font-weight: 700;
 }
 
-.decision-ledger-btn {
-    border: 1px solid #d8ddea;
-    background: #fff;
-    color: #59657a;
-    white-space: nowrap;
-    font-size: .72rem;
+/* Decision ledger as a header icon (it used to be a labelled button inside
+   the collapsible Context row). Quiet by default; only an UNRESOLVED decision
+   earns colour and a count, so the header carries no standing "0/0" noise. */
+.decision-ledger-icon { position: relative; }
+.decision-ledger-icon.has-open { color: #6746b7; }
+.decision-ledger-count {
+    position: absolute; top: -2px; right: -4px;
+    min-width: 14px; padding: 0 3px;
+    border-radius: 999px;
+    background: #6746b7; color: #fff;
+    font-size: .58rem; font-weight: 700; line-height: 14px; text-align: center;
 }
-
-.decision-ledger-btn.has-open {
-    border-color: #b9a7ee;
-    color: #6746b7;
-    background: #f8f5ff;
-}
+.decision-ledger-count[hidden] { display: none; }
 
 .question-recommendation {
     display: flex;
@@ -1751,10 +1738,7 @@ a.btn-primary {
 .skm-spec-foot { margin-top: 10px; padding-top: 7px; border-top: 1px solid #e4e7ef; color: #7a8494; font-size: .65rem; }
 
 @media (max-width: 1100px) {
-    .chat-refinement-help { display: none; }
-    .chat-refinement-row { grid-template-columns: 1fr 27px; }
-    .question-context-main, .question-context-side { grid-column: 1; }
-    .chat-refinement-collapse { grid-column: 2; grid-row: 1 / span 2; }
+    .case-intake-hint { display: none; }
 }
 
 @media (max-width: 600px) {

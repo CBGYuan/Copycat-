@@ -38,6 +38,16 @@ let availableSkillDocs = [];
 let currentLogDomain = LV.boot.logDomain || 'wifi';
 let contextLineCount = Number(LV.boot.contextLineCount || 0);
 let contextTimeSpan = LV.boot.contextTimeSpan || {};
+// The case summary used to live in a textarea inside a collapsible "Context"
+// row. It is now asked for IN THE CONVERSATION (renderCaseIntakeCard), so the
+// value has to survive as state rather than as a DOM node — the intake card is
+// removed from the chat log once answered. Server-side it is still the same
+// state.case_summary, still fed to every chat turn and every question prompt,
+// so nothing downstream changed.
+let caseSummaryText = LV.boot.caseSummary || '';
+// Whether the intake card is currently on screen, so a second trigger (log
+// reload racing the boot path) can't stack two of them.
+let _caseIntakeOpen = false;
 // Domain-specific UTC -> text-log conversion. WiFi text is stamped in the
 // analysing engineer's local frame; BT HCI text is customer-local. Keep the
 // basis visible so a plausible-looking nearest-time jump is never ambiguous.
@@ -687,10 +697,10 @@ function pickLog() {
                 baselineDone = false;
                 contextLineCount = 0;
                 contextTimeSpan = {};
-                if (_caseSummaryTimer) clearTimeout(_caseSummaryTimer);
-                _caseSummaryTimer = null;
-                const caseField = document.getElementById('caseSummary');
-                if (caseField) caseField.value = '';
+                // A new capture is a new case — drop the previous framing and
+                // ask for this one in the conversation (renderCaseIntakeCard
+                // below, once the log has actually rendered).
+                caseSummaryText = '';
                 updateQuestionContextStatus();
                 document.getElementById('logPathInput').value = d.log_path;
                 showPathStatus('logStatus', '✔ Log loaded', 'ok');
@@ -739,6 +749,10 @@ function pickLog() {
                     // raw view), then read the filter set against the NEW log.
                     applyFilter().then(() => setBaselineGate());
                 }
+                // Ask what the case is about, in the conversation, now that
+                // there is a capture to talk about. Answering it lights the
+                // baseline button (setBaselineGate) as the next step.
+                renderCaseIntakeCard();
             } else showPathStatus('logStatus', d.message, 'err');
         });
 }
@@ -1438,10 +1452,18 @@ function removeFilter(idx) {
 
 function applyFilter() {
     const box = document.getElementById('previewBox');
-    box.innerHTML = '<div class="tat-log-empty">Running filter…</div>';
+    // Keep the previous rows on screen, dimmed, instead of replacing them with
+    // "Running filter…". Blanking made every toggle flash the whole log away
+    // and back, which reads as much slower than it is — and it threw away the
+    // engineer's scroll position on a result that is usually nearly the same.
+    // Only an empty pane (very first run) gets the placeholder.
+    if (box.firstElementChild) box.classList.add('is-refiltering');
+    else box.innerHTML = '<div class="tat-log-empty">Running filter…</div>';
+    const done = () => box.classList.remove('is-refiltering');
     return fetch(LV.url.log_viewer_apply_filter, {method: 'POST'})
         .then(r => r.json())
         .then(d => {
+            done();
             if (!d.success) { box.innerHTML = ''; alert(d.message); return; }
             document.getElementById('logPaneTitle').textContent = 'Filtered Log';
             lastMatchCount = d.total_matched;
@@ -1472,16 +1494,37 @@ function applyFilter() {
             // Last, so a clarifying question never delays the filter result
             // the engineer is actually waiting to look at.
             maybeClarify();
-        });
+        })
+        .catch(err => { done(); throw err; });  // never leave the pane dimmed
 }
 
-// Debounce rapid successive toggles (e.g. clicking through several
-// checkboxes, or "All"/"None" which flips dozens at once) into a single re-run.
-let _filterDebounceTimer = null;
+// Coalesce rapid successive toggles into one re-run — but LEADING edge, not
+// trailing. A plain trailing debounce charged every single checkbox click a
+// flat 350ms of doing nothing before the request even left, which is most of
+// what made toggling feel slow: the isolated click is the common case, and it
+// was paying the price of a burst that usually never came. So the first
+// toggle fires immediately, and anything arriving while that run is in flight
+// (or within a short window after) collapses into exactly ONE follow-up run.
+let _filterCooldownTimer = null;
+let _filterRunInFlight = false;
+let _filterRerunQueued = false;
+
 function debounceApplyFilter() {
     if (!document.getElementById('logPathInput').value.trim()) return; // nothing to filter yet
-    if (_filterDebounceTimer) clearTimeout(_filterDebounceTimer);
-    _filterDebounceTimer = setTimeout(() => applyFilter(), 350);
+    if (_filterRunInFlight || _filterCooldownTimer) { _filterRerunQueued = true; return; }
+    _runFilterCoalesced();
+}
+
+function _runFilterCoalesced() {
+    _filterRunInFlight = true;
+    _filterRerunQueued = false;
+    applyFilter().catch(() => {}).then(() => {
+        _filterRunInFlight = false;
+        _filterCooldownTimer = setTimeout(() => {
+            _filterCooldownTimer = null;
+            if (_filterRerunQueued) _runFilterCoalesced();
+        }, 200);
+    });
 }
 
 // ---- Chat (reuses the same session-state filtered preview as system context) ----
@@ -1929,11 +1972,16 @@ function resetChat() {
         // — mirror that here so the Steps panel doesn't go stale against
         // filter edits that no longer exist server-side.
         operationData = [];
-        document.getElementById('caseSummary').value = '';
+        caseSummaryText = '';
+        _caseIntakeOpen = false;
         updateQuestionContextStatus();
         decisionLedger = {mode: interviewMode, items: [], open: 0, resolved: 0, deferred: 0, blocking: 0};
         updateDecisionLedger(decisionLedger);
         renderStepPanel();
+        // Clearing the conversation clears the framing with it — ask again,
+        // rather than silently carrying the old case description forward into
+        // a transcript that no longer shows it.
+        if (document.getElementById('logPathInput').value.trim()) renderCaseIntakeCard();
     });
 }
 
@@ -2198,88 +2246,169 @@ function clearSelectedSkillDocs() {
     persistQuestionContext({selected_skill_keys: []}).catch(e => alert(e.message));
 }
 
-let _caseSummaryTimer = null;
-function onCaseSummaryInput() {
-    updateQuestionContextStatus();
-    baselineDone = false;
-    setBaselineGate();
-    if (_caseSummaryTimer) clearTimeout(_caseSummaryTimer);
-    _caseSummaryTimer = setTimeout(() => {
-        persistCaseSummaryNow();
-    }, 450);
-}
-
 function persistCaseSummaryNow() {
-    if (_caseSummaryTimer) clearTimeout(_caseSummaryTimer);
-    _caseSummaryTimer = null;
-    const field = document.getElementById('caseSummary');
-    return persistQuestionContext({case_summary: field ? field.value : ''}).catch(e => alert(e.message));
+    return persistQuestionContext({case_summary: caseSummaryText}).catch(e => alert(e.message));
 }
 
 function updateQuestionContextStatus() {
-    const field = document.getElementById('caseSummary');
-    const summaryText = field ? field.value : '';
-    const timeline = document.getElementById('contextTimelineChip');
-    const summary = document.getElementById('contextSummaryChip');
-    const docs = document.getElementById('contextDocsChip');
-    if (timeline) {
-        const span = contextTimeSpan && contextTimeSpan.first
-            ? ` · ${contextTimeSpan.first} → ${contextTimeSpan.last || contextTimeSpan.first}` : '';
-        timeline.innerHTML = `<i class="fas fa-stream"></i> ${contextLineCount ? contextLineCount + ' context lines' + escapeHtml(span) : 'No timeline'}`;
-        timeline.classList.toggle('is-ready', contextLineCount > 0);
-    }
-    if (summary) {
-        summary.innerHTML = `<i class="fas fa-align-left"></i> ${summaryText.trim() ? 'Summary added' : 'No summary'}`;
-        summary.classList.toggle('is-ready', !!summaryText.trim());
-    }
-    if (docs) {
-        docs.innerHTML = `<i class="fas fa-book"></i> ${selectedSkillKeys.length} docs`;
-        docs.classList.toggle('is-ready', selectedSkillKeys.length > 0);
-    }
     renderSkillDocPicker();
-    updateChatRefinementSummary();
+    // The intake card and the transcript's recap note both show a doc count,
+    // and either can be on screen when the picker changes. Broadcasting lets
+    // them repaint without this function needing to know they exist.
+    document.querySelectorAll('#caseIntakeCard, #caseContextNote').forEach(node =>
+        node.dispatchEvent(new CustomEvent('copycat:docschanged')));
+    const note = document.getElementById('caseContextNote');
+    if (note) appendCaseContextNote();
 }
 
 function updateDecisionLedger(data) {
     if (!data) return;
     decisionLedger = data;
     interviewMode = 'ask';
-    const badge = document.getElementById('decisionBadgeText');
-    if (badge) {
-        const total = (data.items || []).length;
-        badge.textContent = `${data.resolved || 0}/${total} decisions`;
+    // An icon now, not a labelled button in the (removed) Context row: silent
+    // while nothing is unresolved, showing the OPEN count only when there is
+    // actually something to go and look at.
+    const open = Number(data.open || 0);
+    const total = (data.items || []).length;
+    const count = document.getElementById('decisionBadgeText');
+    if (count) {
+        count.textContent = open;
+        count.hidden = !open;
     }
     const button = document.getElementById('decisionBadge');
-    if (button) button.classList.toggle('has-open', !!data.open);
-    updateChatRefinementSummary();
+    if (button) {
+        button.classList.toggle('has-open', !!open);
+        button.title = total
+            ? `Specification decisions — ${data.resolved || 0} of ${total} resolved`
+            : 'No specification decisions yet';
+    }
 }
 
-function updateChatRefinementSummary() {
-    const summary = document.getElementById('chatRefinementSummary');
-    if (!summary) return;
-    const total = (decisionLedger.items || []).length;
-    summary.textContent = `Context · ${decisionLedger.resolved || 0}/${total}`;
-    const badge = document.getElementById('chatRefinementDocBadge');
-    if (badge) {
+// ---- Case intake, asked in the conversation ------------------------------
+// The case summary and the choice of reference documents used to be a
+// collapsible "Context" row above the chat: a panel the engineer had to know
+// to open, sitting next to the conversation it belonged in. Both are pure
+// up-front framing for the baseline read, so they are now ASKED FOR, once, as
+// the first thing in the chat — and the answer stays in the transcript, which
+// the panel could never do. The value still lands in the same
+// state.case_summary and is still fed to every later chat turn and question.
+function renderCaseIntakeCard(opts) {
+    opts = opts || {};
+    if (_caseIntakeOpen) return;
+    const box = document.getElementById('chatBox');
+    if (!box) return;
+    _caseIntakeOpen = true;
+
+    const card = el('div', 'chat-question-card case-intake-card mb-2');
+    card.id = 'caseIntakeCard';
+    card.appendChild(el('div', 'chat-q-progress', opts.rewrite
+        ? '📝 Rewriting the case description'
+        : '👋 Before the first read'));
+    card.appendChild(el('div', 'chat-q-text',
+        'What is this capture about? One line is enough — the symptom, and when it happens.'));
+
+    const textarea = document.createElement('textarea');
+    textarea.className = 'form-control form-control-sm case-intake-input';
+    textarea.rows = 2;
+    textarea.maxLength = 4000;
+    textarea.placeholder = 'e.g. Roaming disconnects about 3 seconds after reassociation';
+    textarea.value = caseSummaryText;
+    card.appendChild(textarea);
+
+    // Reference documents belong to the same "what should Copycat know before
+    // it reads?" question, so they are offered here rather than hidden behind
+    // a separate header control.
+    const docsRow = el('div', 'case-intake-docs');
+    const docsBtn = el('button', 'btn btn-sm btn-outline-secondary', '');
+    docsBtn.type = 'button';
+    const paintDocs = () => {
         const n = selectedSkillKeys.length;
-        badge.textContent = n;
-        badge.style.display = n ? '' : 'none';
-    }
+        docsBtn.innerHTML = `<i class="fas fa-book"></i> ${n ? `${n} reference doc${n > 1 ? 's' : ''}` : 'Add reference docs'}`;
+        docsBtn.classList.toggle('has-docs', n > 0);
+    };
+    paintDocs();
+    docsBtn.onclick = () => toggleSkillDocPicker(true);
+    card.addEventListener('copycat:docschanged', paintDocs);
+    docsRow.appendChild(docsBtn);
+    docsRow.appendChild(el('span', 'case-intake-hint',
+        'Optional. Selected docs guide questions; they never replace log evidence.'));
+    card.appendChild(docsRow);
+
+    const actions = el('div', 'step-explain-actions');
+    const saveBtn = el('button', 'btn btn-sm btn-primary', opts.rewrite ? 'Update' : 'Continue');
+    const skipBtn = el('button', 'btn btn-sm btn-outline-secondary', 'Skip');
+    saveBtn.type = 'button';
+    skipBtn.type = 'button';
+    actions.appendChild(saveBtn);
+    actions.appendChild(skipBtn);
+    card.appendChild(actions);
+
+    const close = () => { _caseIntakeOpen = false; card.remove(); };
+    const commit = (text) => {
+        caseSummaryText = (text || '').trim();
+        // A changed framing invalidates any baseline read taken under the old
+        // one — same rule the textarea's oninput used to enforce.
+        baselineDone = false;
+        persistCaseSummaryNow().then(() => {
+            close();
+            appendCaseContextNote();
+            setBaselineGate();
+        });
+    };
+    saveBtn.onclick = () => commit(textarea.value);
+    skipBtn.onclick = () => { close(); setBaselineGate(); };
+    textarea.onkeydown = (e) => {
+        if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); commit(textarea.value); }
+    };
+
+    box.appendChild(card);
+    box.scrollTop = box.scrollHeight;
+    textarea.focus();
 }
 
-function toggleChatRefinement(force) {
-    const row = document.getElementById('chatRefinementRow');
-    const toggle = document.getElementById('chatRefinementToggle');
-    const chevron = document.getElementById('chatRefinementChevron');
-    if (!row || !toggle) return;
-    const open = force !== undefined ? force : row.hidden;
-    row.hidden = !open;
-    toggle.setAttribute('aria-expanded', String(open));
-    toggle.classList.toggle('is-open', open);
-    if (chevron) {
-        chevron.classList.toggle('fa-chevron-down', !open);
-        chevron.classList.toggle('fa-chevron-up', open);
+// The permanent transcript entry for what was collected, with the one way
+// back in. Replaces any earlier copy so the log shows the CURRENT framing
+// once, not a trail of superseded ones.
+function appendCaseContextNote() {
+    const box = document.getElementById('chatBox');
+    if (!box) return;
+    const prev = document.getElementById('caseContextNote');
+    if (prev) prev.remove();
+
+    const note = el('div', 'case-context-note mb-2');
+    note.id = 'caseContextNote';
+    const head = el('div', 'case-context-head', '');
+    head.innerHTML = '<i class="fas fa-project-diagram"></i> Question context';
+    const edit = el('button', 'btn btn-sm case-context-edit', 'Rewrite');
+    edit.type = 'button';
+    edit.title = 'Ask for the case description again';
+    edit.onclick = () => renderCaseIntakeCard({rewrite: true});
+    head.appendChild(edit);
+    note.appendChild(head);
+
+    const body = el('div', 'case-context-body');
+    body.appendChild(caseContextChip('fa-align-left',
+        caseSummaryText ? caseSummaryText : 'No case description', !!caseSummaryText));
+    const n = selectedSkillKeys.length;
+    body.appendChild(caseContextChip('fa-book',
+        n ? `${n} reference doc${n > 1 ? 's' : ''}` : 'No reference docs', n > 0));
+    if (contextLineCount) {
+        const span = contextTimeSpan && contextTimeSpan.first
+            ? ` · ${contextTimeSpan.first} → ${contextTimeSpan.last || contextTimeSpan.first}` : '';
+        body.appendChild(caseContextChip('fa-stream',
+            `${contextLineCount} context lines${span}`, true));
     }
+    note.appendChild(body);
+
+    box.appendChild(note);
+    box.scrollTop = box.scrollHeight;
+}
+
+function caseContextChip(icon, text, ready) {
+    const chip = el('span', 'case-context-chip' + (ready ? ' is-ready' : ''), '');
+    chip.innerHTML = `<i class="fas ${icon}"></i> `;
+    chip.appendChild(document.createTextNode(text));
+    return chip;
 }
 
 function openDecisionLedger() {
@@ -2434,7 +2563,7 @@ function requestBaseline(attempt, forceRefresh) {
         headers: {'Content-Type': 'application/json'},
         body: JSON.stringify({
             force: !!forceRefresh,
-            case_summary: document.getElementById('caseSummary').value,
+            case_summary: caseSummaryText,
             selected_skill_keys: selectedSkillKeys,
         }),
     })
@@ -2468,6 +2597,11 @@ function requestBaseline(attempt, forceRefresh) {
             if (d.cached) return;                 // already read, nothing new to show
             if (d.usage) updateTokenBadge(d.usage.session);
             if (d.assessment) applyAssessment(d.assessment);
+            // Restate what this read was actually given — case description,
+            // reference docs, and the now-known context size — immediately
+            // before the analysis it produced, so the transcript records the
+            // inputs next to the output instead of only the output.
+            appendCaseContextNote();
             appendMsg('assistant', d.message || `# Baseline analysis\n\n${d.baseline.analysis}`, 'all');
         })
         .catch(() => {
@@ -3264,11 +3398,18 @@ document.getElementById('previewBox').addEventListener('click', function (e) {
     jumpEvtToMs(+row.dataset.ms);
 });
 // Restore the stable Question context. Skill options arrive from the
-// domain-scoped /skills/list request above.
-document.getElementById('caseSummary').value = LV.boot.caseSummary || '';
+// domain-scoped /skills/list request above. caseSummaryText is already seeded
+// from LV.boot at declaration; a RELOAD mid-session must not re-interrogate
+// the engineer, so the intake card is only shown when there is a log but no
+// framing recorded yet. A session that already has one gets the recap note
+// instead, so the transcript still states what Copycat is working from.
 renderSkillDocPicker();
 updateQuestionContextStatus();
 updateDecisionLedger(decisionLedger);
+if (LV.boot.logPath) {
+    if (caseSummaryText) appendCaseContextNote();
+    else renderCaseIntakeCard();
+}
 // A baseline chosen in the Skill Library survives a reload, so the badge has
 // to be evaluated on load too, not only when it changes.
 renderExportBaselineBadge();

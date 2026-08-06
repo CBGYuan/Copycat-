@@ -22,6 +22,7 @@ subtract lines, not add them.
 """
 import bisect
 import re
+from collections import deque
 import xml.etree.ElementTree as ET
 from datetime import datetime, timedelta
 from typing import List, Dict, Optional, Tuple
@@ -193,7 +194,43 @@ def compute_filter_stats(log_lines: List[str], filters: List[Dict],
     # Matchers/hit_counts cover EVERY filter, not just enabled ones, so a
     # disabled pattern still gets a real raw hit count in per_filter below
     # instead of staying blank in the UI until the engineer checks it.
-    matchers = {i: _line_matcher(r) for i, r in enumerate(filters)}
+    #
+    # Two things used to make a single checkbox toggle stall for seconds on a
+    # real capture, both addressed here:
+    #   1. Every rule was tested up to THREE times per line — once for
+    #      hit_counts, again in the include_hits comprehension, again for
+    #      exclude_hits. Each line now resolves its matched set ONCE and the
+    #      three consumers read that set.
+    #   2. Each of those tests went through a per-rule closure (_line_matcher),
+    #      so a 20-rule .tat over a 113k-line log paid ~6.8M Python-level calls
+    #      per re-run. Plain substring rules — nearly all of a .tat file — are
+    #      now tested inline in tight per-bucket loops with no call at all.
+    # _line_matcher remains the single readable statement of what "matches"
+    # means for one rule; these buckets MUST stay semantically identical to it.
+    plain_ci: List[tuple] = []   # (index, lowered needle) tested against line_lower
+    plain_cs: List[tuple] = []   # (index, needle)         tested against line
+    regexes: List[tuple] = []    # (index, compiled)       tested against line
+    for i, r in enumerate(filters):
+        if r["regex"]:
+            try:
+                regexes.append((i, re.compile(
+                    r["text"], 0 if r["case_sensitive"] else re.IGNORECASE)))
+            except re.error:
+                # Malformed regex in the .tat file — same contract as
+                # _line_matcher: never matches, rather than crashing the run.
+                pass
+        elif r["case_sensitive"]:
+            plain_cs.append((i, r["text"]))
+        else:
+            plain_ci.append((i, r["text"].lower()))
+
+    # Deliberately NOT prefiltered by a union regex of every pattern. That
+    # looks like it should pay off (most lines match nothing, so one C-level
+    # call could replace N Python-level tests) but measured 2.9x SLOWER on a
+    # 113k-line capture: `needle in line` is a fast C substring search, while
+    # an alternation of ~17 literals makes Python's backtracking `re` engine
+    # try each branch at every position. Individual `in` tests win; don't
+    # "optimize" this back into an alternation.
     hit_counts = {i: 0 for i in range(len(filters))}
     # unique_hits[i] = surviving lines where include-filter i was the ONLY
     # including filter that matched — i.e. its *marginal* contribution to the
@@ -211,21 +248,44 @@ def compute_filter_stats(log_lines: List[str], filters: List[Dict],
     pair_counts: Dict[tuple, int] = {}
     overlap_count = 0
     surviving_preview = []
+    # Separate LLM context tail. The visible preview intentionally remains a
+    # chronological prefix for the log table, but questions also need to see
+    # how a long scenario ends. A bounded deque captures that without keeping
+    # the entire surviving result in memory.
+    context_tail = deque(maxlen=min(300, max(2, preview_limit // 3)))
     surviving_count = 0
     first_ts = None
     last_ts = None
 
+    including_idx = [i for i, _ in including]
+    excluding_idx = [i for i, _ in excluding]
+
     for line_no, line in enumerate(log_lines, start=start_line_no):
         line_lower = line.lower()
         # Raw match count for every pattern, enabled or not — independent of
-        # the include/exclude interplay below.
-        for i in range(len(filters)):
-            if matchers[i](line_lower, line):
+        # the include/exclude interplay below. Resolved once per line; the
+        # include/exclude splits below are set lookups, not re-tests.
+        matched = set()
+        for i, needle in plain_ci:
+            if needle in line_lower:
+                matched.add(i)
                 hit_counts[i] += 1
-        include_hits = [i for i, r in including if matchers[i](line_lower, line)]
+        for i, needle in plain_cs:
+            if needle in line:
+                matched.add(i)
+                hit_counts[i] += 1
+        for i, pattern in regexes:
+            if pattern.search(line) is not None:
+                matched.add(i)
+                hit_counts[i] += 1
+        # Nothing matched at all — by far the common case on a real capture,
+        # so it short-circuits before building any list.
+        if not matched:
+            continue
+        include_hits = [i for i in including_idx if i in matched]
         if not include_hits:
             continue
-        exclude_hits = [i for i, r in excluding if matchers[i](line_lower, line)]
+        exclude_hits = [i for i in excluding_idx if i in matched]
         if len(include_hits) >= 2:
             overlap_count += 1
             # Record every co-firing pair (order-independent) for the
@@ -256,6 +316,11 @@ def compute_filter_stats(log_lines: List[str], filters: List[Dict],
                 "back_color": first["back_color"],
                 "fore_color": first["fore_color"],
             })
+        # Keep the true end even after the visible preview cap was reached.
+        context_tail.append({
+            "line_no": line_no,
+            "text": re.sub(r"^\d+\t", "", line).rstrip("\n"),
+        })
 
     per_filter = [{
         "index": i,
@@ -279,6 +344,18 @@ def compute_filter_stats(log_lines: List[str], filters: List[Dict],
         for (a, b), c in sorted(pair_counts.items(), key=lambda kv: kv[1], reverse=True)[:8]
     ]
 
+    if surviving_count > preview_limit:
+        head_n = max(1, preview_limit - len(context_tail))
+        context_preview = [
+            {"line_no": row["line_no"], "text": row["text"]}
+            for row in surviving_preview[:head_n]
+        ] + [{"line_no": None, "text": "... (chronological middle omitted) ..."}] + list(context_tail)
+    else:
+        context_preview = [
+            {"line_no": row["line_no"], "text": row["text"]}
+            for row in surviving_preview
+        ]
+
     return {
         "per_filter": per_filter,
         "overlap_count": overlap_count,
@@ -286,6 +363,7 @@ def compute_filter_stats(log_lines: List[str], filters: List[Dict],
         "time_span": {"first": first_ts, "last": last_ts},
         "surviving_count": surviving_count,
         "preview": surviving_preview,
+        "context_preview": context_preview,
         "total_lines": len(log_lines),
     }
 
