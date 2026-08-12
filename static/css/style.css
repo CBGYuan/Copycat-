@@ -12,6 +12,20 @@
   --good: #1db869;
   --warn: #ffc107;
   --bad: #d94848;
+  /* One height for all three workbench columns (TAT Filter, Chat, Steps) so
+     their bottom edges line up — Chat/Steps used to carry this as a repeated
+     literal while the left column sized to content, which let them run past
+     the session menu ($ spend / Readiness) sitting under TAT Filter.
+     Shorter than the viewport-filling 74vh it used to be: now that the height
+     is fixed rather than content-driven, the panels no longer need headroom
+     for a long filter list — that scrolls inside the card instead. The floor
+     keeps the filter table usable on short laptop screens.
+     CLAMPED at both ends, not just floored. A plain vh grew these panels on
+     every larger screen, which starved the log pane above them — it sat at its
+     minimum on a 950px window while the workbench took 475px. Above the cap
+     the extra height goes to the log, which is the pane that can actually use
+     it (fitLogPaneToViewport). */
+  --workbench-panel-h: clamp(340px, 45vh, 400px);
 }
 
 * { font-family: 'Inter', 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; }
@@ -510,6 +524,55 @@ a.btn-primary {
    doing the offset math themselves. */
 .evt-time-local { font-size: 0.75em; color: var(--muted); margin-left: 0.25em; opacity: 0.65; white-space: nowrap; }
 
+/* This page fits itself to the window (fitLogPaneToViewport), so the generous
+   breathing room the scrolling pages use stops being breathing room — it is
+   height taken straight out of the log pane. Scoped to this page only, and
+   only in the side-by-side layout; stacked still scrolls normally. */
+@media (min-width: 992px) {
+  .page-log-workbench .app-navbar { margin-bottom: 0.6rem !important; }
+  .page-log-workbench > .container-fluid { padding-bottom: 0.5rem !important; }
+}
+
+/* ===== Collapsed file pickers (Log / System Event Log) =====
+   A picker that has already done its job shows only what it loaded. Kept
+   deliberately quiet — this is a status line you can click, not a control
+   competing for attention with the log it sits above. */
+.file-chip {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  width: 100%;
+  padding: 5px 10px;
+  border: 0;
+  background: transparent;
+  color: var(--text-muted);
+  font-size: 0.72rem;
+  text-align: left;
+  cursor: pointer;
+}
+.file-chip:hover { background: var(--bg-soft); color: var(--text-main); }
+.file-chip[hidden] { display: none; }
+.file-chip-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-weight: 600;
+  color: var(--text-main);
+}
+.file-chip-caret { flex: 0 0 auto; margin-left: auto; font-size: 0.6rem; opacity: 0.5; }
+/* The `hidden` property alone does not collapse these two: the log row carries
+   Bootstrap's .d-flex, whose display is !important and outranks the UA's
+   [hidden] rule, and the event row's .path-input-group display comes from this
+   stylesheet, which outranks the UA sheet regardless of specificity. Without
+   these the row stayed on screen at full height and the "collapse" only ever
+   added a chip above it. */
+#logBarFull[hidden] { display: none !important; }
+/* Inside the event strip it shares a row with the toggle, so it must not
+   claim the full width the standalone Log chip does. */
+.evt-path-chip { width: auto; max-width: 46%; margin-left: auto; }
+#evtPathGroup[hidden] { display: none; }
+
 /* ===== System Event Log panel (collapsible, above the driver log) ===== */
 .evt-section {
   border-bottom: 1px solid var(--border);
@@ -945,6 +1008,52 @@ a.btn-primary {
 .evt-hover-card th { text-align: left; color: var(--text-muted); font-weight: 600; padding: 2px 8px 2px 0; vertical-align: top; white-space: nowrap; }
 .evt-hover-card td { padding: 2px 0; word-break: break-word; }
 
+/* ===== The three workbench columns (TAT Filter | Chat | Steps) ===== */
+/* Chat and Steps used to carry a hard 74vh each while the left column sized
+   to its content, so they ran well past the session menu ($ spend /
+   Readiness) that closes the left column. Side by side, the LEFT column now
+   sets the row height (capped at --workbench-panel-h) and Chat/Steps just
+   fill it, so all three end on the same line. Stacked, each panel falls back
+   to the old fixed height. */
+.workbench-panel {
+  height: var(--workbench-panel-h);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+@media (min-width: 992px) {
+  /* A definite height, not max-height: with max-height the column still sized
+     to its content, so the TAT card's height tracked how many keywords the
+     loaded .tat happened to define — 4 filters left it stranded well above the
+     chat panel, 38 pushed it to the cap. Now the frame is constant and only
+     the filter list inside it scrolls. */
+  .workbench-col {
+    display: flex;
+    flex-direction: column;
+    height: var(--workbench-panel-h);
+  }
+  /* The TAT card takes whatever the session menu doesn't need. */
+  .tat-filter-card { flex: 1 1 auto; min-height: 0; overflow: hidden; }
+  /* The card body is the fixed frame, NOT a scroller: the path row, the
+     export-baseline badge and the add-keyword row hold their size, and the
+     filter table absorbs every bit of slack. Before this the body itself
+     scrolled, so the card's visible height tracked how many filters a .tat
+     happened to define — 38 keywords pushed the whole column past the chat
+     panel, 4 left it stranded halfway up. */
+  .tat-filter-card > .card-body {
+    display: flex;
+    flex-direction: column;
+    flex: 1 1 auto;
+    min-height: 0;
+    overflow: hidden;
+  }
+  .tat-filter-card > .card-body > * { flex: 0 0 auto; }
+  .tat-filter-card .tat-filter-table { flex: 1 1 auto; display: flex; flex-direction: column; min-height: 0; }
+  .tat-filter-card #filterList { flex: 1 1 auto; max-height: none; }
+  .workbench-col .session-menu { flex: 0 0 auto; }
+  .workbench-panel { height: 100%; }
+}
+
 /* ===== Compact TAT-style filter table (Modifiers | Pattern | Hits) ===== */
 .tat-filter-table {
   border: 1px solid var(--border);
@@ -1057,16 +1166,64 @@ a.btn-primary {
   line-height: 1.6;
 }
 
-/* "-- or load a learned skill --" dropdown — was width:auto, which sizes to
-   its widest option text and overflowed past the (now narrower) TAT Filter
-   card. Shrink it to fit and ellipsize instead. */
-.skill-select-narrow {
-  flex: 1 1 auto;
-  min-width: 0;
-  max-width: 100%;
-  font-size: 0.72rem;
-  text-overflow: ellipsis;
+/* ===== TAT Filter header: title, 🎓 skill picker, All/None, domain badge =====
+   Skill loading and the bulk toggles used to be a row inside the card body,
+   which permanently cost the filter table a slice of the card's fixed height.
+   The title never gives way; the badge sits hard right. */
+.tat-filter-header { display: flex; align-items: center; gap: 6px; }
+.tat-filter-title { flex: 0 0 auto; white-space: nowrap; }
+.tat-header-toggles { display: flex; gap: 4px; flex: 0 0 auto; }
+.tat-filter-header .domain-badge { margin-left: auto; }
+
+/* Sits at the head of the .tat path row — skill and .tat file are the two
+   ways filters get in, so they read as one choice on one line. */
+.skill-load-picker { position: relative; flex: 0 0 auto; }
+.skill-load-toggle {
+  display: inline-flex; align-items: center; gap: 5px;
+  height: 100%; min-height: 31px; padding: 0 9px;
+  border: 1px solid #cfd9e2; border-radius: 7px;
+  background: #fff; color: #6b7885; font-size: 0.72rem; font-weight: 650;
+  white-space: nowrap;
+  cursor: pointer; transition: border-color .15s, background .15s, color .15s;
 }
+.skill-load-label { font-size: 0.7rem; }
+.skill-load-toggle:hover { border-color: var(--primary); color: var(--primary-dark); }
+/* Lit once a skill's keywords are the ones on screen. The button's own label
+   is static ("Skill"), so this tint plus the tooltip are what say WHICH skill
+   the filters below came from. */
+.skill-load-toggle.has-skill {
+  border-color: #83afd1; background: #edf7fd; color: var(--primary-dark);
+}
+/* position:fixed, not the shared absolute. Anchored to the .tat path row, this
+   menu opens from low inside a card whose body is overflow:hidden — absolute
+   positioning got it clipped at the card's edge AND ran it off the bottom of
+   the window, so most of the skill list was simply unreachable. Fixed escapes
+   both; positionSkillLoadMenu() sets top/left and flips it above the button
+   when there isn't room below. Narrower than the chat header's picker too —
+   this one hangs off a 3-column card. */
+.skill-load-picker .skill-load-menu {
+  position: fixed;
+  width: min(330px, 74vw);
+  display: flex;
+  flex-direction: column;
+}
+.skill-load-picker .skill-load-menu[hidden] { display: none; }
+.skill-load-picker .skill-doc-picker-head { flex: 0 0 auto; }
+.skill-load-picker .skill-doc-picker-list { flex: 1 1 auto; max-height: none; }
+.skill-load-option {
+  display: flex; align-items: center; gap: 7px; width: 100%;
+  padding: 7px 8px; border: 0; border-radius: 7px;
+  background: transparent; text-align: left; cursor: pointer;
+}
+.skill-load-option:hover { background: #f3f7fa; }
+.skill-load-option.is-current { background: #edf7fd; }
+.skill-load-option > span { min-width: 0; flex: 1 1 auto; }
+.skill-load-option b { display: block; color: #344455; font-size: 0.7rem; }
+.skill-load-option small {
+  display: -webkit-box; overflow: hidden; color: #7a8793; font-size: 0.62rem;
+  -webkit-line-clamp: 2; -webkit-box-orient: vertical;
+}
+.skill-load-option .fa-check { flex: 0 0 auto; color: var(--primary-dark); font-size: 0.7rem; }
 
 /* Conversation-mode toggle in the chat header — ON loads the existing
    WiFi/BT skills as prior knowledge (interview + export cover only what's NEW
@@ -1616,18 +1773,45 @@ a.btn-primary {
 }
 .decision-ledger-count[hidden] { display: none; }
 
+/* A <button>, not a div: the recommendation is the model's proposed answer and
+   clicking it loads that text into the answer box to edit (appendRecommendation). */
 .question-recommendation {
-    display: flex;
-    flex-wrap: wrap;
-    align-items: center;
-    gap: 5px;
+    display: block;
+    width: 100%;
+    text-align: left;
     margin: 7px 0 8px;
     padding: 7px 9px;
     border: 1px solid #d9e4ff;
     border-radius: 8px;
     background: #f5f8ff;
     color: #334e7d;
+    font-family: inherit;
     font-size: .76rem;
+    cursor: pointer;
+    transition: border-color .15s, background .15s;
+}
+
+.question-recommendation:hover { border-color: #315fc6; background: #eaf0ff; }
+.question-recommendation:hover .question-recommendation-use { opacity: 1; }
+
+.question-recommendation-head {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    margin-bottom: 4px;
+}
+
+.question-recommendation-body { line-height: 1.45; }
+
+.question-recommendation-use {
+    margin-left: auto;
+    color: #5a76b5;
+    font-size: .62rem;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: .03em;
+    opacity: .65;
+    transition: opacity .15s;
 }
 
 .question-recommendation-label {
@@ -1642,7 +1826,8 @@ a.btn-primary {
 }
 
 .question-recommendation small {
-    flex-basis: 100%;
+    display: block;
+    margin-top: 4px;
     color: #69768c;
 }
 
@@ -1978,6 +2163,57 @@ a.btn-primary {
 .step-tag-compact-btn:hover { background: #dde9fa !important; border-color: #c3d9f5 !important; }
 .step-tag-compact-btn:focus { box-shadow: none; }
 
+/* The main chat input used to be a fixed-height single-line <input> that a
+   long answer just scrolled sideways out of instead of wrapping. Now a
+   textarea auto-grown by autoGrowChatInput — align to the bottom of the row
+   so the step-tag/send buttons stay put against its last line instead of
+   stretching full height as it grows. */
+.chat-input-group { align-items: flex-end; }
+/* Typed as `textarea.` to outrank Bootstrap's own `textarea.form-control`
+   min-height (35px, the non-sm size), which otherwise left the empty box
+   4px taller than the paperclip/step/send buttons beside it. */
+textarea.chat-main-input {
+  resize: none;
+  overflow-y: auto;
+  min-height: 31px;
+  max-height: 160px;
+  line-height: 1.4;
+}
+/* Same 31px so a borderless send button doesn't sit 2px short of the rest. */
+.chat-input-group > .btn { min-height: 31px; }
+/* Pinned to the viewport while the engineer is typing in it, so scrolling up
+   to re-read the Filtered Log can't carry the box they're writing in off the
+   bottom of the screen. Geometry (left/width) is set inline by wireTypingDock,
+   which also sizes a .typing-dock-spacer to hold the box's place in the flow.
+   Applies to the composer AND to every question card in the transcript. */
+.is-docked {
+  position: fixed;
+  bottom: 0;
+  z-index: 1035;
+  background: #fff;
+  box-shadow: 0 -4px 14px rgba(0, 0, 0, 0.12);
+  /* A long question plus its options must not swallow the log it's about. */
+  max-height: 60vh;
+  overflow-y: auto;
+}
+.card-footer.is-docked {
+  border-top: 1px solid var(--border);
+  border-radius: 0;
+}
+.chat-question-card.is-docked { border-radius: 8px 8px 0 0; }
+.chat-attach-btn {
+  flex: 0 0 auto;
+  padding: 0 9px;
+  color: var(--text-muted) !important;
+  background: #fff !important;
+  border: 1px solid #ced4da !important;
+}
+.chat-attach-btn:hover { color: var(--primary-dark) !important; background: #eaf1fc !important; }
+.chat-attach-btn:focus { box-shadow: none; }
+/* Whole footer is the drop target, not just the textarea — dragging a
+   screenshot onto a one-line-tall input is a hard thing to aim at. */
+.card-footer.is-dropping { outline: 2px dashed var(--primary); outline-offset: -3px; border-radius: 6px; }
+
 /* Dropdown of step pills that opens above the input row */
 .step-tag-dropdown {
   display: flex;
@@ -2120,8 +2356,37 @@ a.btn-primary {
 .chat-q-opt-other { border-style: dashed; color: var(--text-muted); font-style: italic; }
 .chat-q-opt-other:hover { color: var(--primary-dark); }
 .chat-q-opt-other:hover { background: var(--bg-soft); }
-.chat-q-custom { display: flex; gap: 5px; }
-.chat-q-custom input { font-size: 0.78rem; }
+/* The answer box (buildAnswerBox) stacks: textarea, then the action row, then
+   the attachment status line. It was a single-line input laid out sideways,
+   which could not hold the thing engineers most often need to answer with —
+   a rule plus its reasoning, or a pasted config table. */
+.chat-q-custom { display: flex; flex-direction: column; gap: 6px; }
+.chat-q-answer {
+  font-size: 0.78rem;
+  line-height: 1.45;
+  min-height: 62px;
+  max-height: 340px;
+  resize: vertical;              /* the auto-grow ceiling is not a hard stop */
+  overflow-y: auto;
+  width: 100%;
+}
+.chat-q-custom.is-dropping { outline: 2px dashed var(--primary); outline-offset: 3px; border-radius: 8px; }
+.chat-q-actions { display: flex; align-items: center; gap: 5px; }
+.chat-q-hint {
+  flex: 1 1 auto;
+  min-width: 0;
+  font-size: 0.63rem;
+  color: var(--text-muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.chat-q-attach { flex: 0 0 auto; }
+.chat-q-attach-status { font-size: 0.68rem; color: var(--text-muted); }
+.chat-q-attach-status.is-error { color: #b42318; }
+.chat-q-attach-status.is-warn { color: #9a6700; }
+.chat-q-attach-status.is-ok { color: #1a7f4b; }
+.chat-q-attach-status[hidden] { display: none; }
 
 /* Log Round nudge card (see checkRoundNudge/renderRoundNudge) — appears
    automatically in chat when there are filter edits since the last logged

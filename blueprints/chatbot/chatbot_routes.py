@@ -268,10 +268,13 @@ def send():
 
     state.chat_history.append({"role": "user", "content": message, "step": step_tag})
     # Resolve before the model call: the engineer's answer remains captured
-    # even if the provider is temporarily unavailable.
+    # even if the provider is temporarily unavailable. Fall back to the
+    # latest open decision for this step when the client sent no decision_id
+    # (a plain reply typed into the main chat box, not a question card's own
+    # answer box) — otherwise that answer never reaches the ledger.
     decision_ledger.resolve(
         state,
-        data.get("decision_id"),
+        data.get("decision_id") or (decision_ledger.latest_open(state, step_tag) or {}).get("id"),
         data.get("decision_answer") or message,
     )
     try:
@@ -358,9 +361,11 @@ def send_stream():
         }), 503
 
     state.chat_history.append({"role": "user", "content": message, "step": step_tag})
+    # See /send above: fall back to the latest open decision for this step
+    # when no decision_id was sent, so a plain chat reply still resolves it.
     decision_ledger.resolve(
         state,
-        data.get("decision_id"),
+        data.get("decision_id") or (decision_ledger.latest_open(state, step_tag) or {}).get("id"),
         data.get("decision_answer") or message,
     )
     api_messages = [{"role": m["role"], "content": m["content"]} for m in state.chat_history[-20:]]

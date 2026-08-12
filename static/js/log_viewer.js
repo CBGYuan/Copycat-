@@ -22,13 +22,18 @@ let annotationData = LV.boot.logAnnotations;
 // on (omissions — a passive 🎓 hint in the Steps panel, never a question).
 // Computed server-side with no LLM call, so it refreshes on every filter run.
 let divergenceData = {};
-// What the next Export inherits from. NOT the same thing as the skill in the
-// dropdown above the filter table (that one is filter_skill_key — whose
+// What the next Export inherits from. NOT the same thing as the skill behind
+// the TAT Filter header's 🎓 picker (that one is filterSkillKey — whose
 // keywords are actually on screen). They coincide when a skill is loaded from
 // the Log Viewer, and diverge when a baseline is picked from the Skill
 // Library, which deliberately leaves the filters alone.
 let activeSkillKey = LV.boot.activeSkillKey;
 let activeSkillName = LV.boot.baselineSkillName;
+// Which skill's keywords are currently ON SCREEN. This used to be read off a
+// <select> element; it is a plain variable now that the control is an icon
+// picker, so the value no longer depends on a DOM node existing.
+let filterSkillKey = LV.boot.filterSkillKey || '';
+let filterSkillName = LV.boot.filterSkillName || '';
 let currentQuestions = [];
 let currentDraft = null;
 let decisionLedger = LV.boot.decisionLedger || {mode: 'ask', items: [], open: 0, resolved: 0, deferred: 0, blocking: 0};
@@ -314,15 +319,6 @@ function showRedFlagCard(seq, question, opts) {
     card.appendChild(badge);
     card.appendChild(el('div', 'chat-q-text', question));
 
-    const customBox = el('div', 'chat-q-custom');
-    const input = document.createElement('input');
-    input.type = 'text';
-    input.className = 'form-control form-control-sm';
-    input.placeholder = 'Type your answer… (or Dismiss if not relevant)';
-    const sendBtn = el('button', 'btn btn-sm btn-primary');
-    sendBtn.innerHTML = '<i class="fas fa-paper-plane"></i>';
-    const dismissBtn = el('button', 'btn btn-sm btn-outline-secondary', 'Dismiss');
-
     const submit = (answer) => {
         if (isBusy()) return;
         setBusy(true);
@@ -338,14 +334,16 @@ function showRedFlagCard(seq, question, opts) {
             if (opts.afterSubmit) opts.afterSubmit();
         }).catch(() => setBusy(false));
     };
-    input.onkeypress = (e) => { if (e.key === 'Enter' && input.value.trim()) submit(input.value.trim()); };
-    sendBtn.onclick = () => { if (input.value.trim()) submit(input.value.trim()); };
-    dismissBtn.onclick = () => { card.remove(); if (opts.afterSubmit) opts.afterSubmit(); };
-
-    customBox.appendChild(input);
-    customBox.appendChild(sendBtn);
-    customBox.appendChild(dismissBtn);
-    card.appendChild(customBox);
+    const answerBox = buildAnswerBox({
+        placeholder: 'Type your answer… (or Dismiss if not relevant)',
+        hint: question,
+        onSubmit: submit,
+        onSkip: () => { card.remove(); if (opts.afterSubmit) opts.afterSubmit(); },
+        skipLabel: 'Dismiss',
+    });
+    answerBox.style.display = 'flex';
+    card.__answerBox = answerBox;
+    card.appendChild(answerBox);
     box.appendChild(card);
     scrollChatToBottom();
 }
@@ -499,18 +497,20 @@ function copyPath(inputId, btn) {
     }
 }
 
-// Repopulate the skill <select> for the given domain ('wifi' | 'bt') and
+// Repopulate both skill pickers for the given domain ('wifi' | 'bt') and
 // show a small badge so it's clear which skill set is in play.
 function refreshSkillList(domain) {
     currentLogDomain = domain || 'wifi';
     fetch(`/skills/list?domain=${domain}`).then(r => r.json()).then(d => {
         if (!d.success) return;
-        const sel = document.getElementById('skillSelect');
-        const current = sel.value;
-        sel.innerHTML = '<option value="">-- or load a learned skill --</option>' +
-            d.skills.map(s => `<option value="${s.key}">${escapeHtml(s.name)}</option>`).join('');
-        if (d.skills.some(s => s.key === current)) sel.value = current;
         availableSkillDocs = d.skills || [];
+        // A skill loaded from the other domain isn't in this list any more, so
+        // the header picker must stop claiming it is on screen.
+        if (filterSkillKey && !availableSkillDocs.some(s => s.key === filterSkillKey)) {
+            filterSkillKey = '';
+            filterSkillName = '';
+        }
+        renderSkillLoadPicker();
         // A domain change makes documents from the old domain invalid. The
         // server applies the same validation; doing it here keeps the picker
         // honest before that round trip finishes.
@@ -527,7 +527,72 @@ function refreshSkillList(domain) {
         badge.className = 'domain-badge ' + (domain === 'bt' ? 'domain-bt' : 'domain-wifi');
         badge.style.display = 'inline-block';
         updateQuestionContextStatus();
+        renderExportBaselineBadge();
     });
+}
+
+// ---- The TAT Filter header's 🎓 skill picker ------------------------------
+// Was a full-width "-- or load a learned skill --" <select> plus an All/None
+// pair sitting on their own row inside the card body. That row cost the filter
+// table a chunk of the card's fixed height permanently, for controls used once
+// or twice a session — so both moved up into the header, and the select became
+// an icon that opens the same popup shape the chat header's "Load skills" uses.
+function toggleSkillLoadPicker(force) {
+    const menu = document.getElementById('skillLoadMenu');
+    const button = document.getElementById('skillLoadToggle');
+    if (!menu || !button) return;
+    const open = force !== undefined ? force : menu.hidden;
+    menu.hidden = !open;
+    button.setAttribute('aria-expanded', String(open));
+    if (open) positionSkillLoadMenu();
+}
+
+// The menu is position:fixed (see the CSS note), so it has to be placed by
+// hand: below the Skill button normally, flipped above it when the workbench
+// sits low enough that the list would run off the bottom of the window — which
+// it does at ordinary laptop heights, and used to hide most of the skills.
+function positionSkillLoadMenu() {
+    const menu = document.getElementById('skillLoadMenu');
+    const button = document.getElementById('skillLoadToggle');
+    if (!menu || !button || menu.hidden) return;
+    const rect = button.getBoundingClientRect();
+    const gap = 6;
+    const edge = 10;                       // never touch the window edge
+    const below = window.innerHeight - rect.bottom - gap - edge;
+    const above = rect.top - gap - edge;
+    const flip = below < 220 && above > below;
+    menu.style.maxHeight = Math.max(150, Math.floor(flip ? above : below)) + 'px';
+    menu.style.left = Math.round(Math.max(
+        edge, Math.min(rect.left, window.innerWidth - menu.offsetWidth - edge))) + 'px';
+    if (flip) {
+        menu.style.top = 'auto';
+        menu.style.bottom = Math.round(window.innerHeight - rect.top + gap) + 'px';
+    } else {
+        menu.style.bottom = 'auto';
+        menu.style.top = Math.round(rect.bottom + gap) + 'px';
+    }
+}
+
+function renderSkillLoadPicker() {
+    const toggle = document.getElementById('skillLoadToggle');
+    if (toggle) {
+        toggle.classList.toggle('has-skill', !!filterSkillKey);
+        toggle.title = filterSkillKey
+            ? `Filter keywords loaded from "${filterSkillName || filterSkillKey}" — click to load a different skill.`
+            : 'Load a learned skill\'s keywords as the filter.';
+    }
+    const list = document.getElementById('skillLoadList');
+    if (!list) return;
+    if (!availableSkillDocs.length) {
+        list.innerHTML = '<div class="skill-doc-picker-empty">No learned skills for this domain yet.</div>';
+        return;
+    }
+    list.innerHTML = availableSkillDocs.map(skill => `
+        <button type="button" class="skill-load-option${skill.key === filterSkillKey ? ' is-current' : ''}"
+                onclick="loadSkill('${escapeHtml(skill.key)}')">
+          <span><b>${escapeHtml(skill.name)}</b><small>${escapeHtml(skill.description || 'No description')}</small></span>
+          ${skill.key === filterSkillKey ? '<i class="fas fa-check"></i>' : ''}
+        </button>`).join('');
 }
 
 // Render the log (raw, before any filter — or filtered, once one has run)
@@ -817,6 +882,52 @@ function parseEvtTimeMs(text) {
     return ms;
 }
 
+// ---- Collapsing the two file pickers, and fitting the page to the window ---
+// The Log picker and the System Event Log picker are each used once at the
+// start of a session and then never again — but they were holding ~90px of
+// permanent vertical space, and that was the difference between the workbench
+// fitting the window and hanging below the fold. Below the fold is where the
+// case-intake card's Continue/Skip buttons ended up, which is what made the
+// whole page feel like it was sliding around. So both fold into a one-line
+// chip once they have a file, and click reopens the full picker.
+function _fileName(path) {
+    const parts = String(path || '').split(/[\\/]/);
+    return parts[parts.length - 1] || '';
+}
+
+function setLogBarCollapsed(collapsed) {
+    const full = document.getElementById('logBarFull');
+    const chip = document.getElementById('logBarChip');
+    if (!full || !chip) return;
+    const path = document.getElementById('logPathInput').value.trim();
+    const canCollapse = collapsed && !!path;      // never hide the only way to load one
+    full.hidden = canCollapse;
+    chip.hidden = !canCollapse;
+    if (canCollapse) {
+        document.getElementById('logBarChipName').textContent = _fileName(path);
+        chip.title = path;
+    }
+}
+
+function setEvtPathCollapsed(collapsed) {
+    const group = document.getElementById('evtPathGroup');
+    const chip = document.getElementById('evtPathChip');
+    if (!group || !chip) return;
+    const path = document.getElementById('evtPathInput').value.trim();
+    const canCollapse = collapsed && !!path;
+    group.hidden = canCollapse;
+    chip.hidden = !canCollapse;
+    if (canCollapse) {
+        document.getElementById('evtPathChipName').textContent = _fileName(path);
+        chip.title = path;
+    }
+}
+
+// The log pane keeps the flat height CSS gives it (.tat-log). Sizing it to
+// whatever the viewport had left over kept the whole page inside the window,
+// but made the log itself too short to read — the log is the thing being
+// worked on, so it wins and the page scrolls instead.
+
 function pickLog() {
     fetch(LV.url.log_viewer_pick_log, {method: 'POST'})
         .then(r => r.json())
@@ -832,6 +943,7 @@ function pickLog() {
                 caseSummaryText = '';
                 updateQuestionContextStatus();
                 document.getElementById('logPathInput').value = d.log_path;
+                setLogBarCollapsed(true);
                 showPathStatus('logStatus', '✔ Log loaded', 'ok');
                 if (d.domain) refreshSkillList(d.domain);
 
@@ -1158,6 +1270,9 @@ function updateEvtSection(domain, available, path) {
     const btn = document.getElementById('evtToggleBtn');
     btn.disabled = !available;
     if (path !== undefined) document.getElementById('evtPathInput').value = path || '';
+    // Collapsed once there IS a file; expanded (so the browse button is right
+    // there) when auto-discovery found nothing and the engineer has to pick.
+    setEvtPathCollapsed(!!document.getElementById('evtPathInput').value.trim());
     updateEvtTzBadge();
     // A freshly (re)loaded log invalidates any cached events.
     _evtLoaded = false; _evtData = []; _evtOffset = 0; _evtAutoPending = true;
@@ -1422,16 +1537,15 @@ function pickTat() {
         });
 }
 
-// The export baseline is only worth showing when it DIFFERS from what the
-// dropdown is already showing — i.e. it was picked in the Skill Library,
+// The export baseline is only worth showing when it DIFFERS from the skill
+// whose keywords are on screen — i.e. it was picked in the Skill Library,
 // which sets the baseline without touching the filters. When the two agree
-// (the normal case: a skill loaded right here), the dropdown already says it
-// and a second indicator would just be noise.
+// (the normal case: a skill loaded right here), the header picker already
+// says so and a second indicator would just be noise.
 function renderExportBaselineBadge() {
     const badge = document.getElementById('exportBaselineBadge');
     if (!badge) return;
-    const onScreen = document.getElementById('skillSelect').value || '';
-    if (!activeSkillKey || activeSkillKey === onScreen) {
+    if (!activeSkillKey || activeSkillKey === filterSkillKey) {
         badge.style.display = 'none';
         return;
     }
@@ -1457,14 +1571,15 @@ function clearExportBaseline() {
         .catch(e => { setBusy(false); alert('Failed: ' + e); });
 }
 
-// Only ever fires from the skillSelect dropdown's own onchange — and that
-// dropdown is itself marked data-busy-lock, so it's physically un-clickable
-// while anything else is in flight. The isBusy() guard here is defense in
-// depth against a change event that somehow lands anyway (e.g. a keyboard-
-// driven selection racing a fetch); either way the skill choice can only ever
-// change from a deliberate, isolated user action, never mid-flight.
+// Only ever fires from a click in the header's 🎓 picker — and that toggle is
+// itself marked data-busy-lock, so it's physically un-clickable while anything
+// else is in flight. The isBusy() guard here is defense in depth against a
+// click that somehow lands anyway (e.g. a keyboard-driven activation racing a
+// fetch); either way the skill choice can only ever change from a deliberate,
+// isolated user action, never mid-flight.
 function loadSkill(key) {
     if (!key || isBusy()) return;
+    toggleSkillLoadPicker(false);
     setBusy(true);
     fetch(LV.url.log_viewer_load_skill, {
         method: 'POST', headers: {'Content-Type': 'application/json'},
@@ -1481,15 +1596,12 @@ function loadSkill(key) {
             syncOps(d);
             // Loading here sets BOTH: the filters on screen and the export
             // baseline. They now agree, so the badge hides itself.
-            //
-            // Set the dropdown explicitly rather than assuming it already
-            // holds `key`. That is only true when this ran from its own
-            // onchange; any other caller would leave it stale, and the badge
-            // decides what to show by comparing against exactly this value.
-            const sel = document.getElementById('skillSelect');
-            if (sel.value !== key) sel.value = key;
+            const loaded = availableSkillDocs.find(s => s.key === key);
+            filterSkillKey = key;
+            filterSkillName = (loaded && loaded.name) || key;
             activeSkillKey = key;
-            activeSkillName = (sel.options[sel.selectedIndex] || {}).textContent || key;
+            activeSkillName = filterSkillName;
+            renderSkillLoadPicker();
             renderExportBaselineBadge();
             // Loading a named skill auto-switches the conversation into
             // PRIOR-knowledge mode server-side (see log_viewer_routes.
@@ -1970,6 +2082,19 @@ function _parseStreamDone(text) {
     try { return JSON.parse(text); } catch (e) { return null; }
 }
 
+// The main chat box was a fixed-height single-line <input> — long answers
+// (a rule plus its reasoning, a pasted table) just scrolled sideways out of
+// view instead of wrapping, the one thing every per-question answer box
+// (buildAnswerBox) already solved. Grows with typed content up to a ceiling
+// and scrolls internally past it — no manual resize handle to drag.
+function autoGrowChatInput(input) {
+    input.style.height = 'auto';
+    // border-box: scrollHeight leaves the border out, so without adding it
+    // back every wrapped line ends 2px short and shows a scrollbar.
+    const border = input.offsetHeight - input.clientHeight;
+    input.style.height = Math.min(input.scrollHeight + border, 160) + 'px';
+}
+
 function sendMsg(presetMsg, displayMsg, forceTag, allowWithoutBaseline, decisionId) {
     // chatSendBtn stays enabled while busy (see setBusy) so this same click
     // handler doubles as Stop — everything else with data-busy-lock is
@@ -1985,7 +2110,12 @@ function sendMsg(presetMsg, displayMsg, forceTag, allowWithoutBaseline, decision
     }
     const tag = forceTag !== undefined ? forceTag : currentStepTag;
     appendMsg('user', displayMsg !== undefined ? displayMsg : msg, tag);
-    if (presetMsg === undefined) input.value = '';
+    if (presetMsg === undefined) {
+        input.value = '';
+        autoGrowChatInput(input);
+        const attachStatus = document.getElementById('chatAttachStatus');
+        if (attachStatus) { attachStatus.textContent = ''; attachStatus.hidden = true; }
+    }
     setBusy(true);
     _activeChatAbort = new AbortController();
     fetch(LV.url.chatbot_send_stream, {
@@ -2043,47 +2173,24 @@ function renderProactiveClarification(q, stepTag) {
         const contextualAnswer = `Clarification question: ${q.question}\nEngineer answer: ${answer}`;
         sendMsg(contextualAnswer, answer, stepTag, false, q.decision_id);
     };
-    const customBox = el('div', 'chat-q-custom');
-    if (q.type === 'choice' && q.options && q.options.length >= 2) {
-        customBox.style.display = 'none';
-        const optsBox = el('div', 'chat-q-opts');
+    const hasOptions = q.type === 'choice' && !!q.options && q.options.length >= 2;
+    const optsBox = el('div', 'chat-q-opts');
+    if (hasOptions) {
         q.options.forEach((opt) => {
             const btn = el('button', 'chat-q-opt', opt);
             btn.type = 'button';
             btn.onclick = () => submit(opt);
             optsBox.appendChild(btn);
         });
-        const other = el('button', 'chat-q-opt chat-q-opt-other', 'Other…');
-        other.type = 'button';
-        other.onclick = () => {
-            optsBox.style.display = 'none';
-            customBox.style.display = 'flex';
-            customBox.querySelector('input').focus();
-        };
-        optsBox.appendChild(other);
-        card.appendChild(optsBox);
-    } else {
-        customBox.style.display = 'flex';
     }
-
-    const input = document.createElement('input');
-    input.type = 'text';
-    input.className = 'form-control form-control-sm';
-    input.placeholder = 'Type the missing rule or reason…';
-    input.onkeypress = (e) => {
-        if (e.key === 'Enter' && input.value.trim()) submit(input.value.trim());
-    };
-    const send = el('button', 'btn btn-sm btn-primary');
-    send.type = 'button';
-    send.innerHTML = '<i class="fas fa-paper-plane"></i>';
-    send.onclick = () => { if (input.value.trim()) submit(input.value.trim()); };
-    const skip = el('button', 'btn btn-sm btn-outline-secondary', 'Skip');
-    skip.type = 'button';
-    skip.onclick = () => { deferDecision(q.decision_id); card.remove(); };
-    customBox.appendChild(input);
-    customBox.appendChild(send);
-    customBox.appendChild(skip);
-    card.appendChild(customBox);
+    const skip = () => { deferDecision(q.decision_id); card.remove(); };
+    attachAnswerBox(card, hasOptions, optsBox, buildAnswerBox({
+        placeholder: 'Type the missing rule or reason — paste a table, or attach one…',
+        hint: q.question,
+        onSubmit: submit,
+        onSkip: skip,
+    }));
+    if (hasOptions) card.appendChild(buildSkipRow(skip));
     box.appendChild(card);
     scrollChatToBottom();
 }
@@ -2564,29 +2671,77 @@ function caseContextChip(icon, text, ready) {
     return chip;
 }
 
-function openDecisionLedger() {
+// Renders the ledger body only — never touches the modal's own display
+// style, so it doubles as an in-place refresh after answering/skipping an
+// item from inside the modal (see resolveDecisionFromLedger/deferDecision)
+// without popping the modal open behind the engineer's back when it's
+// actually closed (e.g. a chat card's own Skip button calls deferDecision
+// too, with the modal never opened at all).
+function renderDecisionLedgerBody() {
     const body = document.getElementById('decisionLedgerBody');
     const items = decisionLedger.items || [];
     if (!items.length) {
         body.innerHTML = '<div class="decision-empty"><i class="fas fa-code-branch"></i><b>No decisions yet</b><span>Questions that affect scope, rules, keywords, or exceptions will appear here.</span></div>';
-    } else {
-        body.innerHTML = items.map((item) => {
-            const status = item.status || 'open';
-            const answer = item.answer
-                ? `<div class="decision-answer"><b>Engineer:</b> ${escapeHtml(item.answer)}</div>` : '';
-            const rec = item.recommended_answer
-                ? `<div class="decision-recommendation"><b>Recommended:</b> ${escapeHtml(item.recommended_answer)}${item.recommendation_reason ? ` — ${escapeHtml(item.recommendation_reason)}` : ''}</div>` : '';
-            return `<div class="decision-row is-${escapeHtml(status)}">
-              <div class="decision-row-head"><span>${escapeHtml(item.id)}</span><b>${escapeHtml(item.source || 'chat')}</b><em>${escapeHtml(status)}</em></div>
-              <div class="decision-question">${escapeHtml(item.question)}</div>${rec}${answer}
-            </div>`;
-        }).join('');
+        return;
     }
+    body.innerHTML = items.map((item) => {
+        const status = item.status || 'open';
+        const answer = item.answer
+            ? `<div class="decision-answer"><b>Engineer:</b> ${escapeHtml(item.answer)}</div>` : '';
+        const rec = item.recommended_answer
+            ? `<div class="decision-recommendation"><b>Recommended:</b> ${escapeHtml(item.recommended_answer)}${item.recommendation_reason ? ` — ${escapeHtml(item.recommendation_reason)}` : ''}</div>` : '';
+        // Open items get an empty slot filled in below with a real DOM
+        // answer box (buildAnswerBox) — this modal used to be view-only,
+        // which meant the ONLY way to resolve a decision was to still have
+        // its original chat card on screen. Once that card had scrolled out
+        // of view (a new question, a page reload) an open item had no
+        // reachable answer box left at all.
+        const answerSlot = status === 'open'
+            ? `<div class="decision-answer-slot" data-decision-id="${escapeHtml(item.id)}"></div>` : '';
+        return `<div class="decision-row is-${escapeHtml(status)}">
+          <div class="decision-row-head"><span>${escapeHtml(item.id)}</span><b>${escapeHtml(item.source || 'chat')}</b><em>${escapeHtml(status)}</em></div>
+          <div class="decision-question">${escapeHtml(item.question)}</div>${rec}${answer}${answerSlot}
+        </div>`;
+    }).join('');
+
+    items.filter(item => (item.status || 'open') === 'open').forEach((item) => {
+        const slot = body.querySelector(`.decision-answer-slot[data-decision-id="${CSS.escape(item.id)}"]`);
+        if (!slot) return;
+        const submit = (value) => resolveDecisionFromLedger(item.id, value);
+        const skip = () => deferDecision(item.id);
+        const hasOptions = item.type === 'choice' && !!item.options && item.options.length >= 2;
+        const answerBox = buildAnswerBox({placeholder: 'Type your answer…', onSubmit: submit, onSkip: skip});
+        if (hasOptions) {
+            const optsBox = el('div', 'chat-q-opts');
+            item.options.forEach((opt) => {
+                const btn = el('button', 'chat-q-opt', opt);
+                btn.type = 'button';
+                btn.onclick = () => submit(opt);
+                optsBox.appendChild(btn);
+            });
+            attachAnswerBox(slot, true, optsBox, answerBox);
+        } else {
+            attachAnswerBox(slot, false, null, answerBox);
+        }
+    });
+}
+
+function openDecisionLedger() {
+    renderDecisionLedgerBody();
     document.getElementById('decisionLedgerModal').style.display = 'flex';
 }
 
 function closeDecisionLedger() {
     document.getElementById('decisionLedgerModal').style.display = 'none';
+}
+
+// Re-renders the ledger body in place ONLY if the modal is currently open —
+// used after resolving/skipping a decision FROM the modal itself, so the row
+// just answered immediately drops its answer box instead of waiting for the
+// next manual open/close.
+function refreshDecisionLedgerIfOpen() {
+    const modal = document.getElementById('decisionLedgerModal');
+    if (modal && modal.style.display === 'flex') renderDecisionLedgerBody();
 }
 
 function deferDecision(decisionId) {
@@ -2597,19 +2752,310 @@ function deferDecision(decisionId) {
         body: JSON.stringify({decision_id: decisionId}),
     })
         .then(r => r.json())
-        .then(d => { if (d.decision_ledger) updateDecisionLedger(d.decision_ledger); })
+        .then(d => {
+            if (d.decision_ledger) updateDecisionLedger(d.decision_ledger);
+            refreshDecisionLedgerIfOpen();
+        })
         .catch(() => {});
 }
 
+// Answers a decision straight from the ledger modal — no LLM call, same
+// contract as answer_focus_clarify's chat-card path (see learning_routes.
+// resolve_decision), so an item whose original chat card has scrolled away
+// or never existed on this page load can still be resolved.
+function resolveDecisionFromLedger(decisionId, answer) {
+    if (!decisionId || !answer) return;
+    fetch(LV.url.learning_resolve_decision, {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({decision_id: decisionId, answer}),
+    })
+        .then(r => r.json())
+        .then(d => {
+            if (d.decision_ledger) updateDecisionLedger(d.decision_ledger);
+            refreshDecisionLedgerIfOpen();
+        })
+        .catch(() => {});
+}
+
+// The RECOMMENDED block is the model's own proposed answer, and for a long
+// time it was the one thing on the card you could not act on: the engineer
+// read a sentence they agreed with, then retyped it underneath. Clicking it
+// now loads it into the answer box — deliberately NOT submitting it, because
+// its whole job is to be a starting point the engineer corrects or extends
+// (adding the table, the exception, the real reason) before it is taught.
 function appendRecommendation(card, q) {
     if (!q || !q.recommended_answer) return;
-    const row = el('div', 'question-recommendation');
-    row.appendChild(el('span', 'question-recommendation-label', 'Recommended'));
-    row.appendChild(document.createTextNode(q.recommended_answer));
+    const row = el('button', 'question-recommendation');
+    row.type = 'button';
+    const head = el('div', 'question-recommendation-head');
+    head.appendChild(el('span', 'question-recommendation-label', 'Recommended'));
+    head.appendChild(el('span', 'question-recommendation-use', 'Click to use / edit'));
+    row.appendChild(head);
+    row.appendChild(el('div', 'question-recommendation-body', q.recommended_answer));
     if (q.recommendation_reason) {
         row.appendChild(el('small', '', q.recommendation_reason));
     }
+    row.onclick = () => {
+        const box = card.__answerBox;
+        if (!box) return;
+        box.reveal();
+        box.fill(q.recommended_answer);
+    };
     card.appendChild(row);
+}
+
+// ---- The answer box every question card shares ---------------------------
+// The proactive-divergence, clarify, step-ask and batch-follow-up cards each
+// carried their own copy of the same input + send + Skip row, which meant the
+// two things wrong with it were wrong in four places at once:
+//
+//   * it was a single-line <input>, for answers that are routinely a rule
+//     PLUS its reasoning — or a whole config table lifted out of a spec. Long
+//     answers scrolled sideways out of sight and couldn't be re-read before
+//     sending. It's now a <textarea> that grows with the content and stays
+//     hand-resizable past the ceiling.
+//   * there was no way to hand it a file. The evidence for a mapping rule is
+//     very often a table in a screenshot or a .csv, and retyping it by hand
+//     was the only way in.
+//
+// Attachments resolve to TEXT INSIDE THIS BOX before anything is submitted —
+// text files verbatim, images via one transcription call (see
+// /learning/transcribe_attachment). So what the engineer reads in the box is
+// exactly what the LLM receives; there is no second, invisible payload riding
+// along with the answer, and no downstream consumer (chat history, an
+// operation's `reason`, an exported expert_rule) has to learn a new shape.
+const _ATTACH_TEXT_MAX = 200 * 1024;         // past this it isn't evidence, it's a log
+const _ATTACH_IMAGE_MAX = 5 * 1024 * 1024;
+const _ATTACH_ACCEPT = '.txt,.csv,.tsv,.md,.markdown,.json,.yaml,.yml,.log,.tat,image/*';
+const _ATTACH_TITLE = 'Attach a table or notes. Text files are inserted as-is; an image is '
+                    + 'transcribed into text you can correct before sending. You can also '
+                    + 'paste a screenshot straight into the box.';
+
+// Shared by the per-question answer boxes (buildAnswerBox) and by the main
+// chat input: file picker + paste + drag-drop, all landing as TEXT in the
+// given textarea before anything is sent. Extracted so the main chat box
+// gains the exact same behaviour rather than a second, subtly different
+// implementation — a config table screenshotted out of a spec is just as
+// often pasted into a free-form chat message as into a question's answer.
+function wireAttachments(opts) {
+    const input = opts.input;
+    const setStatus = opts.setStatus || function () {};
+    const grow = opts.grow || function () {};
+
+    const insertBlock = (label, body) => {
+        const fence = '```';
+        const block = `${label}\n${fence}\n${String(body).trim()}\n${fence}`;
+        const current = input.value.replace(/\s+$/, '');
+        input.value = current ? current + '\n\n' + block : block;
+        grow();
+        input.focus();
+    };
+
+    const picker = document.createElement('input');
+    picker.type = 'file';
+    picker.accept = _ATTACH_ACCEPT;
+    picker.style.display = 'none';
+
+    const takeFile = (file) => {
+        if (!file) return;
+        if ((file.type || '').startsWith('image/')) {
+            if (file.size > _ATTACH_IMAGE_MAX) {
+                setStatus('That image is too large — crop it to just the table.', 'error');
+                return;
+            }
+            setStatus(`Reading ${file.name || 'pasted image'}…`, 'busy');
+            if (opts.attachBtn) opts.attachBtn.disabled = true;
+            const reader = new FileReader();
+            reader.onload = () => {
+                const url = String(reader.result || '');
+                const comma = url.indexOf(',');
+                const hint = [opts.hint, input.value.trim()].filter(Boolean).join('\n').slice(0, 500);
+                fetch(LV.url.learning_transcribe_attachment, {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({
+                        media_type: file.type,
+                        data: comma >= 0 ? url.slice(comma + 1) : '',
+                        hint: hint,
+                    }),
+                })
+                    .then(r => r.json())
+                    .then(d => {
+                        if (opts.attachBtn) opts.attachBtn.disabled = false;
+                        if (!d.success || !d.text) {
+                            setStatus(d.message || 'Could not read that image.', 'error');
+                            return;
+                        }
+                        if (d.usage && d.usage.session) updateTokenBadge(d.usage.session);
+                        insertBlock(`Transcribed from ${file.name || 'a pasted image'}:`, d.text);
+                        // Not decoration: a table OCR'd out of a spec is the
+                        // kind of thing that comes back 95% right and silently
+                        // wrong in one cell, and a wrong cell taught as an
+                        // expert rule is worse than no rule at all.
+                        setStatus('Transcribed — check every row before sending.', 'warn');
+                    })
+                    .catch(e => {
+                        if (opts.attachBtn) opts.attachBtn.disabled = false;
+                        setStatus('Could not read that image: ' + e, 'error');
+                    });
+            };
+            reader.onerror = () => {
+                if (opts.attachBtn) opts.attachBtn.disabled = false;
+                setStatus('Could not read that file.', 'error');
+            };
+            reader.readAsDataURL(file);
+            return;
+        }
+        if (file.size > _ATTACH_TEXT_MAX) {
+            setStatus('That file is too big to attach to an answer — paste just the part that matters.', 'error');
+            return;
+        }
+        const reader = new FileReader();
+        reader.onload = () => {
+            insertBlock(`From ${file.name}:`, reader.result || '');
+            setStatus(`Attached ${file.name}.`, 'ok');
+        };
+        reader.onerror = () => setStatus('Could not read that file.', 'error');
+        reader.readAsText(file);
+    };
+
+    picker.onchange = () => {
+        takeFile(picker.files && picker.files[0]);
+        picker.value = '';                      // so the same file can be re-picked
+    };
+    if (opts.attachBtn) {
+        opts.attachBtn.title = _ATTACH_TITLE;
+        opts.attachBtn.onclick = () => picker.click();
+    }
+    // Pasting a screenshot straight in is the shortest path from "the table is
+    // on my other monitor" to "the table is in the answer".
+    input.addEventListener('paste', (e) => {
+        const items = (e.clipboardData && e.clipboardData.items) || [];
+        for (let i = 0; i < items.length; i++) {
+            if (items[i].type && items[i].type.startsWith('image/')) {
+                const file = items[i].getAsFile();
+                if (file) { e.preventDefault(); takeFile(file); return; }
+            }
+        }
+    });
+    const zone = opts.dropZone || input;
+    zone.addEventListener('dragover', (e) => { e.preventDefault(); zone.classList.add('is-dropping'); });
+    zone.addEventListener('dragleave', () => zone.classList.remove('is-dropping'));
+    zone.addEventListener('drop', (e) => {
+        e.preventDefault();
+        zone.classList.remove('is-dropping');
+        takeFile(e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files[0]);
+    });
+    return {picker, takeFile};
+}
+
+function buildAnswerBox(opts) {
+    const box = el('div', 'chat-q-custom');
+    const input = el('textarea', 'chat-q-answer form-control form-control-sm');
+    input.rows = 3;
+    input.placeholder = opts.placeholder || 'Type your answer…';
+
+    // Grow with the content, but stop the moment the engineer drags the
+    // resize grip themselves — from then on their height wins.
+    let autoHeight = 0;
+    let manual = false;
+    const grow = () => {
+        if (manual) return;
+        input.style.height = 'auto';
+        autoHeight = Math.min(input.scrollHeight + 2, 340);
+        input.style.height = autoHeight + 'px';
+    };
+    if (window.ResizeObserver) {
+        new ResizeObserver(() => {
+            if (autoHeight && Math.abs(input.offsetHeight - autoHeight) > 4) manual = true;
+        }).observe(input);
+    }
+    input.addEventListener('input', grow);
+
+    const submit = () => {
+        const value = input.value.trim();
+        if (value) opts.onSubmit(value);
+    };
+    // Enter still sends, so a one-line answer is still a one-key answer;
+    // Shift+Enter is the newline a multi-line answer now actually needs.
+    input.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter' && !e.shiftKey && !e.ctrlKey && !e.metaKey) {
+            e.preventDefault();
+            submit();
+        }
+    });
+
+    const status = el('div', 'chat-q-attach-status');
+    status.hidden = true;
+    const setStatus = (text, kind) => {
+        status.className = 'chat-q-attach-status' + (kind ? ' is-' + kind : '');
+        status.textContent = text || '';
+        status.hidden = !text;
+    };
+
+    const attachBtn = el('button', 'btn btn-sm btn-outline-secondary chat-q-attach');
+    attachBtn.type = 'button';
+    attachBtn.innerHTML = '<i class="fas fa-paperclip"></i>';
+    const {picker} = wireAttachments({
+        input, attachBtn, setStatus, grow, dropZone: box, hint: opts.hint,
+    });
+
+    const sendBtn = el('button', 'btn btn-sm btn-primary');
+    sendBtn.type = 'button';
+    sendBtn.innerHTML = '<i class="fas fa-paper-plane"></i>';
+    sendBtn.onclick = submit;
+
+    const actions = el('div', 'chat-q-actions');
+    actions.appendChild(attachBtn);
+    actions.appendChild(el('span', 'chat-q-hint', 'Enter sends · Shift+Enter new line'));
+    actions.appendChild(sendBtn);
+    if (opts.onSkip) {
+        const skipBtn = el('button', 'btn btn-sm btn-outline-secondary', opts.skipLabel || 'Skip');
+        skipBtn.type = 'button';
+        skipBtn.onclick = opts.onSkip;
+        actions.appendChild(skipBtn);
+    }
+
+    box.appendChild(input);
+    box.appendChild(actions);
+    box.appendChild(status);
+    box.appendChild(picker);
+
+    // Used by the "Other…" option button and by the clickable RECOMMENDED
+    // block, both of which have to open this box before they can write to it.
+    box.reveal = () => {
+        const optsBox = box.parentElement && box.parentElement.querySelector('.chat-q-opts');
+        if (optsBox) optsBox.style.display = 'none';
+        box.style.display = 'flex';
+        grow();
+        input.focus();
+    };
+    box.fill = (text) => {
+        const current = input.value.trim();
+        input.value = current ? current + '\n' + text : text;
+        grow();
+        input.focus();
+        input.setSelectionRange(input.value.length, input.value.length);
+    };
+    return box;
+}
+
+// The custom-answer row starts hidden behind an "Other…" button whenever the
+// question offers concrete options, and is the only input otherwise.
+function attachAnswerBox(card, hasOptions, optsBox, answerBox) {
+    card.__answerBox = answerBox;
+    if (hasOptions) {
+        answerBox.style.display = 'none';
+        const otherBtn = el('button', 'chat-q-opt chat-q-opt-other', 'Other…');
+        otherBtn.type = 'button';
+        otherBtn.onclick = () => answerBox.reveal();
+        optsBox.appendChild(otherBtn);
+        card.appendChild(optsBox);
+    } else {
+        answerBox.style.display = 'flex';
+    }
+    card.appendChild(answerBox);
 }
 
 // ---- Baseline read (auto, once per loaded filter set) -------------------
@@ -2922,30 +3368,19 @@ function renderStepConfirmCard(seq, knowledgeCore, expertNote, followUp, decisio
         const fuSection = el('div', 'step-confirm-followup-section');
         fuSection.appendChild(el('div', 'step-confirm-note-label', '❓ Follow-up:'));
         fuSection.appendChild(el('div', 'chat-q-text', followUp));
-        const fuRow = el('div', 'step-explain-actions');
-        const fuInput = document.createElement('input');
-        fuInput.type = 'text';
-        fuInput.className = 'form-control form-control-sm';
-        fuInput.placeholder = 'Answer… or skip';
-        const fuSend = el('button', 'btn btn-sm btn-primary');
-        fuSend.type = 'button';
-        fuSend.innerHTML = '<i class="fas fa-paper-plane"></i>';
-        const fuSkip = el('button', 'btn btn-sm btn-outline-secondary', 'Skip');
-        fuSkip.type = 'button';
-        const submitFollowUp = () => {
-            const ans = fuInput.value.trim();
-            if (!ans) return;
-            persist();
-            card.remove();
-            sendMsg(ans, undefined, seq, false, decisionId);
-        };
-        fuInput.onkeypress = (e) => { if (e.key === 'Enter') submitFollowUp(); };
-        fuSend.onclick = submitFollowUp;
-        fuSkip.onclick = () => { deferDecision(decisionId); fuSection.remove(); };
-        fuRow.appendChild(fuInput);
-        fuRow.appendChild(fuSend);
-        fuRow.appendChild(fuSkip);
-        fuSection.appendChild(fuRow);
+        const fuBox = buildAnswerBox({
+            placeholder: 'Answer… or skip',
+            hint: followUp,
+            onSubmit: (ans) => {
+                persist();
+                card.remove();
+                sendMsg(ans, undefined, seq, false, decisionId);
+            },
+            onSkip: () => { deferDecision(decisionId); fuSection.remove(); },
+        });
+        fuBox.style.display = 'flex';
+        card.__answerBox = fuBox;
+        fuSection.appendChild(fuBox);
         card.appendChild(fuSection);
     }
 
@@ -3048,58 +3483,39 @@ function renderClarifyCard(d) {
         }
     };
 
-    const customBox = el('div', 'chat-q-custom');
-    if (q.type === 'choice' && q.options && q.options.length) {
-        customBox.style.display = 'none';
-        const optsBox = el('div', 'chat-q-opts');
+    // Skipping is a real answer ("I don't want to explain this"), and the
+    // server has already recorded the divergence as asked — so it won't
+    // reappear on the next filter run.
+    const skip = () => { deferDecision(d.decision_id); card.remove(); };
+    const hasOptions = q.type === 'choice' && !!q.options && q.options.length > 0;
+    const optsBox = el('div', 'chat-q-opts');
+    if (hasOptions) {
         q.options.forEach(opt => {
             const b = el('button', 'chat-q-opt', opt);
             b.type = 'button';
             b.onclick = () => submit(opt);
             optsBox.appendChild(b);
         });
-        const otherBtn = el('button', 'chat-q-opt chat-q-opt-other', 'Other…');
-        otherBtn.type = 'button';
-        otherBtn.onclick = () => {
-            optsBox.style.display = 'none';
-            customBox.style.display = 'flex';
-            customBox.querySelector('input').focus();
-        };
-        optsBox.appendChild(otherBtn);
-        card.appendChild(optsBox);
-    } else {
-        customBox.style.display = 'flex';
     }
-
-    const input = document.createElement('input');
-    input.type = 'text';
-    input.className = 'form-control form-control-sm';
-    input.placeholder = 'Type your answer…';
-    input.onkeypress = (e) => { if (e.key === 'Enter' && input.value.trim()) submit(input.value.trim()); };
-    const sendBtn = el('button', 'btn btn-sm btn-primary');
-    sendBtn.type = 'button';
-    sendBtn.innerHTML = '<i class="fas fa-paper-plane"></i>';
-    sendBtn.onclick = () => { if (input.value.trim()) submit(input.value.trim()); };
-    // Skipping is a real answer ("I don't want to explain this"), and the
-    // server has already recorded the divergence as asked — so it won't
-    // reappear on the next filter run.
-    const skipBtn = el('button', 'btn btn-sm btn-outline-secondary', 'Skip');
-    skipBtn.type = 'button';
-    skipBtn.onclick = () => { deferDecision(d.decision_id); card.remove(); };
-    customBox.appendChild(input);
-    customBox.appendChild(sendBtn);
-    customBox.appendChild(skipBtn);
-    card.appendChild(customBox);
-    if (q.type === 'choice' && q.options && q.options.length) {
-        const skipRow = el('div', 'step-ask-skip-row');
-        const skip2 = el('button', 'btn btn-sm btn-outline-secondary', 'Skip');
-        skip2.type = 'button';
-        skip2.onclick = () => { deferDecision(d.decision_id); card.remove(); };
-        skipRow.appendChild(skip2);
-        card.appendChild(skipRow);
-    }
+    attachAnswerBox(card, hasOptions, optsBox, buildAnswerBox({
+        hint: q.question,
+        onSubmit: submit,
+        onSkip: skip,
+    }));
+    if (hasOptions) card.appendChild(buildSkipRow(skip));
     box.appendChild(card);
     scrollChatToBottom();
+}
+
+// A choice question hides the answer box (and its Skip) behind "Other…", so
+// Skip needs its own row alongside the options to stay reachable.
+function buildSkipRow(onSkip) {
+    const skipRow = el('div', 'step-ask-skip-row');
+    const btn = el('button', 'btn btn-sm btn-outline-secondary', 'Skip');
+    btn.type = 'button';
+    btn.onclick = onSkip;
+    skipRow.appendChild(btn);
+    return skipRow;
 }
 
 function renderStepAskCard(seq, q, decisionId, questionNumber) {
@@ -3110,58 +3526,24 @@ function renderStepAskCard(seq, q, decisionId, questionNumber) {
     card.appendChild(el('div', 'chat-q-text', q.question));
     appendRecommendation(card, q);
 
-    const customBox = el('div', 'chat-q-custom');
-    if (q.type === 'choice' && q.options && q.options.length) {
-        customBox.style.display = 'none';
-        const optsBox = el('div', 'chat-q-opts');
+    const answer = (text) => submitStepAnswer(seq, q.question, text, card, decisionId, true);
+    const skip = () => { deferDecision(decisionId); card.remove(); };
+    const hasOptions = q.type === 'choice' && !!q.options && q.options.length > 0;
+    const optsBox = el('div', 'chat-q-opts');
+    if (hasOptions) {
         q.options.forEach(opt => {
             const b = el('button', 'chat-q-opt', opt);
             b.type = 'button';
-            b.onclick = () => submitStepAnswer(seq, q.question, opt, card, decisionId, true);
+            b.onclick = () => answer(opt);
             optsBox.appendChild(b);
         });
-        const otherBtn = el('button', 'chat-q-opt chat-q-opt-other', 'Other…');
-        otherBtn.type = 'button';
-        otherBtn.onclick = () => {
-            optsBox.style.display = 'none';
-            customBox.style.display = 'flex';
-            customBox.querySelector('input').focus();
-        };
-        optsBox.appendChild(otherBtn);
-        card.appendChild(optsBox);
-    } else {
-        customBox.style.display = 'flex';
     }
-
-    const input = document.createElement('input');
-    input.type = 'text';
-    input.className = 'form-control form-control-sm';
-    input.placeholder = 'Type your answer…';
-    input.onkeypress = (e) => {
-        if (e.key === 'Enter' && input.value.trim()) submitStepAnswer(seq, q.question, input.value.trim(), card, decisionId, true);
-    };
-    const sendBtn = el('button', 'btn btn-sm btn-primary');
-    sendBtn.type = 'button';
-    sendBtn.innerHTML = '<i class="fas fa-paper-plane"></i>';
-    sendBtn.onclick = () => { if (input.value.trim()) submitStepAnswer(seq, q.question, input.value.trim(), card, decisionId, true); };
-    const skipBtn = el('button', 'btn btn-sm btn-outline-secondary', 'Skip');
-    skipBtn.type = 'button';
-    skipBtn.onclick = () => { deferDecision(decisionId); card.remove(); };
-
-    customBox.appendChild(input);
-    customBox.appendChild(sendBtn);
-    customBox.appendChild(skipBtn);
-    card.appendChild(customBox);
-    // Choice-type questions show Skip alongside the options too, not only
-    // inside the (initially hidden) custom-answer row.
-    if (q.type === 'choice' && q.options && q.options.length) {
-        const skipRow = el('div', 'step-ask-skip-row');
-        const skip2 = el('button', 'btn btn-sm btn-outline-secondary', 'Skip');
-        skip2.type = 'button';
-        skip2.onclick = () => { deferDecision(decisionId); card.remove(); };
-        skipRow.appendChild(skip2);
-        card.appendChild(skipRow);
-    }
+    attachAnswerBox(card, hasOptions, optsBox, buildAnswerBox({
+        hint: q.question,
+        onSubmit: answer,
+        onSkip: skip,
+    }));
+    if (hasOptions) card.appendChild(buildSkipRow(skip));
 
     box.appendChild(card);
     scrollChatToBottom();
@@ -3235,67 +3617,27 @@ function showNextQuestionCard(queue, doneCount, total) {
         advance();
     };
 
-    const customBox = document.createElement('div');
-    customBox.className = 'chat-q-custom';
-
-    if (q.type === 'choice' && q.options && q.options.length) {
-        customBox.style.display = 'none';
-        const optsBox = document.createElement('div');
-        optsBox.className = 'chat-q-opts';
-        q.options.forEach(opt => {
-            const b = document.createElement('button');
-            b.type = 'button';
-            b.className = 'chat-q-opt';
-            b.textContent = opt;
-            b.onclick = () => finish(opt);
-            optsBox.appendChild(b);
-        });
-        const otherBtn = document.createElement('button');
-        otherBtn.type = 'button';
-        otherBtn.className = 'chat-q-opt chat-q-opt-other';
-        otherBtn.textContent = 'Other…';
-        otherBtn.onclick = () => {
-            optsBox.style.display = 'none';
-            customBox.style.display = 'flex';
-            customBox.querySelector('input').focus();
-        };
-        optsBox.appendChild(otherBtn);
-        card.appendChild(optsBox);
-    } else {
-        customBox.style.display = 'flex';
-    }
-
-    const input = document.createElement('input');
-    input.type = 'text';
-    input.className = 'form-control form-control-sm';
-    input.placeholder = 'Type your answer…';
-    input.onkeypress = (e) => {
-        if (e.key === 'Enter') { const v = input.value.trim(); if (v) finish(v); }
-    };
-    const sendBtn = document.createElement('button');
-    sendBtn.type = 'button';
-    sendBtn.className = 'btn btn-sm btn-primary';
-    sendBtn.innerHTML = '<i class="fas fa-paper-plane"></i>';
-    sendBtn.onclick = () => { const v = input.value.trim(); if (v) finish(v); };
-    customBox.appendChild(input);
-    customBox.appendChild(sendBtn);
-    const skipBtn = el('button', 'btn btn-sm btn-outline-secondary', 'Skip');
-    skipBtn.type = 'button';
-    skipBtn.onclick = () => {
+    const skip = () => {
         deferDecision(q.decision_id);
         card.remove();
         advance();
     };
-    customBox.appendChild(skipBtn);
-    card.appendChild(customBox);
-    if (q.type === 'choice' && q.options && q.options.length) {
-        const skipRow = el('div', 'step-ask-skip-row');
-        const visibleSkip = el('button', 'btn btn-sm btn-outline-secondary', 'Skip');
-        visibleSkip.type = 'button';
-        visibleSkip.onclick = skipBtn.onclick;
-        skipRow.appendChild(visibleSkip);
-        card.appendChild(skipRow);
+    const hasOptions = q.type === 'choice' && !!q.options && q.options.length > 0;
+    const optsBox = el('div', 'chat-q-opts');
+    if (hasOptions) {
+        q.options.forEach(opt => {
+            const b = el('button', 'chat-q-opt', opt);
+            b.type = 'button';
+            b.onclick = () => finish(opt);
+            optsBox.appendChild(b);
+        });
     }
+    attachAnswerBox(card, hasOptions, optsBox, buildAnswerBox({
+        hint: q.question,
+        onSubmit: finish,
+        onSkip: skip,
+    }));
+    if (hasOptions) card.appendChild(buildSkipRow(skip));
 
     box.appendChild(card);
     scrollChatToBottom();
@@ -3540,7 +3882,25 @@ document.addEventListener('click', function(e) {
     }
     const skillPicker = document.getElementById('skillDocPicker');
     if (skillPicker && !skillPicker.contains(e.target)) toggleSkillDocPicker(false);
+    const loadPicker = document.getElementById('skillLoadPicker');
+    if (loadPicker && !loadPicker.contains(e.target)) toggleSkillLoadPicker(false);
 });
+
+// A fixed-position menu doesn't travel with its anchor, so anything that moves
+// the button has to be answered. Capture phase: the workbench's scrolling
+// happens inside panes, not on the window, and those events don't bubble.
+//
+// Scrolling INSIDE the menu is the one case that must NOT close it — the skill
+// list is taller than the popup and has its own scrollbar, so a plain capture
+// listener made the menu vanish the moment you reached for a skill further
+// down. Only movement of the anchor closes it.
+document.addEventListener('scroll', (e) => {
+    const menu = document.getElementById('skillLoadMenu');
+    if (!menu || menu.hidden) return;
+    if (e.target instanceof Node && menu.contains(e.target)) return;
+    toggleSkillLoadPicker(false);
+}, true);
+window.addEventListener('resize', positionSkillLoadMenu);
 
 renderFilters();
 renderStepTagSelector();
@@ -3548,6 +3908,9 @@ renderStepPanel(); // now a permanent card (left column), not a toggled overlay
 refreshSkillList(LV.boot.logDomain || 'wifi');
 // Restore the event-log panel from server state on reload (BT only).
 updateEvtSection(LV.boot.logDomain, LV.boot.hasEventLog);
+// A reload of an in-progress session already has its files — start folded, the
+// same as the moment right after picking them.
+setLogBarCollapsed(true);
 document.getElementById('dateSynthWarn').style.display = LV.boot.hasDateAnchor ? 'inline' : 'none';
 // Log row clicked → highlight + scroll to the nearest event (reverse sync);
 // only meaningful while the event panel is open. Delegated so it survives every
@@ -3564,6 +3927,83 @@ document.getElementById('previewBox').addEventListener('scroll', function () {
     renderVisibleLogRows(false);
 });
 window.addEventListener('resize', function () { renderVisibleLogRows(true); });
+// The main chat box gets the same attach/paste/drop support the per-question
+// answer boxes have — a config table screenshotted out of a spec is just as
+// often taught as a free-form message as it is as an answer to a question.
+(function wireMainChatAttachments() {
+    const input = document.getElementById('chatInput');
+    const attachBtn = document.getElementById('chatAttachBtn');
+    const status = document.getElementById('chatAttachStatus');
+    if (!input || !attachBtn || !status) return;
+    const footer = input.closest('.card-footer') || input.parentElement;
+    const {picker} = wireAttachments({
+        input,
+        attachBtn,
+        dropZone: footer,
+        grow: () => autoGrowChatInput(input),
+        setStatus: (text, kind) => {
+            status.className = 'chat-q-attach-status' + (kind ? ' is-' + kind : '');
+            status.textContent = text || '';
+            status.hidden = !text;
+        },
+    });
+    footer.appendChild(picker);
+})();
+// Scrolling up to re-read the Filtered Log while mid-sentence used to carry
+// whatever box the engineer was typing into off the bottom of the screen. Any
+// box that holds a text field pins itself to the viewport for as long as it
+// has focus; a same-height spacer holds its place in the flow, which is also
+// what keeps the "would it be off screen?" test stable and stops this
+// oscillating. Delegated rather than wired per node: question cards arrive
+// long after load and are removed the moment they're answered.
+(function wireTypingDock() {
+    const DOCKABLE = '.card-footer, .chat-question-card';
+    let node = null;      // the box currently pinned
+    let spacer = null;
+
+    function release() {
+        if (!node) return;
+        node.classList.remove('is-docked');
+        node.style.left = node.style.width = '';
+        spacer.remove();
+        node = spacer = null;
+    }
+
+    function sync() {
+        if (node && !node.isConnected) release();   // card answered and removed
+        const active = document.activeElement;
+        const host = active && active.closest ? active.closest(DOCKABLE) : null;
+        const isField = active && (active.tagName === 'TEXTAREA' ||
+            (active.tagName === 'INPUT' && !/^(hidden|file|checkbox|radio)$/.test(active.type)));
+        // Docking only ever STARTS from a text field, but survives focus
+        // moving to a button in the same box — otherwise clicking Send would
+        // unpin it out from under the click.
+        if (!host || (!isField && host !== node)) { release(); return; }
+        // Once pinned the node is out of flow, so the spacer is the only thing
+        // that still knows where it would have been.
+        const flow = (host === node ? spacer : host).getBoundingClientRect();
+        if (flow.bottom <= window.innerHeight) { release(); return; }
+        if (host !== node) {
+            release();
+            node = host;
+            spacer = document.createElement('div');
+            spacer.className = 'typing-dock-spacer';
+            node.parentNode.insertBefore(spacer, node);
+        }
+        // Re-measured every sync: the textarea auto-grows, and dropdowns and
+        // option lists open inside these boxes.
+        spacer.style.height = node.offsetHeight + 'px';
+        const at = spacer.getBoundingClientRect();
+        node.classList.add('is-docked');
+        node.style.left = at.left + 'px';
+        node.style.width = at.width + 'px';
+    }
+    ['focusin', 'input', 'click'].forEach(ev => document.addEventListener(ev, sync));
+    // Defer: activeElement is momentarily <body> between blur and the next focus.
+    document.addEventListener('focusout', () => setTimeout(sync, 0));
+    document.addEventListener('scroll', sync, {passive: true, capture: true});
+    window.addEventListener('resize', sync);
+})();
 // Restore the stable Question context. Skill options arrive from the
 // domain-scoped /skills/list request above. caseSummaryText is already seeded
 // from LV.boot at declaration; a RELOAD mid-session must not re-interrogate

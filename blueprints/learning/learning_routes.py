@@ -683,6 +683,51 @@ def clarify():
     })
 
 
+# Roughly 7MB of base64 — a generous screenshot, and small enough that a
+# mis-drop of a whole log or a photo can't push a multi-hundred-MB body
+# through the session-bound dev server.
+_MAX_ATTACHMENT_B64 = 7_000_000
+_IMAGE_MEDIA_TYPES = {"image/png", "image/jpeg", "image/gif", "image/webp"}
+
+
+@learning_bp.route("/transcribe_attachment", methods=["POST"])
+def transcribe_attachment():
+    """Turn an attached screenshot into text the answer box can hold.
+
+    Answers are typed, not spoken to a model directly — so an image has to
+    become text somewhere. It happens here, before the answer is submitted,
+    and the transcription is handed BACK to the engineer to check and edit
+    rather than being sent onward. That ordering is the whole point: OCR of a
+    config table is exactly the kind of thing that is 95% right and silently
+    wrong in one cell, and a wrong cell taught as an expert rule is worse
+    than no rule at all.
+    """
+    data = request.get_json(silent=True) or {}
+    media_type = (data.get("media_type") or "").strip().lower()
+    b64_data = data.get("data") or ""
+    if media_type not in _IMAGE_MEDIA_TYPES:
+        return jsonify({"success": False,
+                        "message": f"Unsupported image type: {media_type or 'unknown'}"}), 400
+    if not b64_data:
+        return jsonify({"success": False, "message": "Empty attachment"}), 400
+    if len(b64_data) > _MAX_ATTACHMENT_B64:
+        return jsonify({"success": False,
+                        "message": "Image is too large — crop it to just the table."}), 413
+
+    llm_helper = app_config.llm_helper
+    if not llm_helper or not llm_helper.is_ready:
+        return jsonify({"success": False, "message": "LLM is not configured yet."}), 503
+    try:
+        text = llm_helper.transcribe_image(media_type, b64_data, data.get("hint") or "")
+    except Exception as exc:                      # noqa: BLE001 - surfaced to the card
+        return jsonify({"success": False, "message": f"Transcription failed: {exc}"}), 502
+    return jsonify({
+        "success": True,
+        "text": text.strip(),
+        "usage": {"last": llm_helper.last_usage, "session": llm_helper.session_usage},
+    })
+
+
 @learning_bp.route("/answer_focus_clarify", methods=["POST"])
 def answer_focus_clarify():
     """Answer to the focus-window locating question. No LLM call. Stored on
@@ -757,6 +802,29 @@ def defer_decision():
     item = decision_ledger.defer(state, data.get("decision_id"))
     if not item:
         return jsonify({"success": False, "message": "Unknown decision"}), 404
+    return jsonify({"success": True, "decision_ledger": decision_ledger.payload(state)})
+
+
+@learning_bp.route("/decision/resolve", methods=["POST"])
+def resolve_decision():
+    """Answer a decision directly from the (previously read-only) Decision
+    Ledger review panel — no LLM call, same no-frills shape as
+    answer_focus_clarify above. Exists because the ledger's own question text
+    can scroll out of the chat log entirely (a prior card, a different step
+    tag), leaving no answer box actually reachable for it; this gives every
+    open item one, regardless of where/when it was originally asked. Recorded
+    into chat_history exactly like every other answer path, so a later
+    /learning/converge sees it as ordinary teaching context."""
+    data = request.get_json(silent=True) or {}
+    answer = (data.get("answer") or "").strip()
+    if not answer:
+        return jsonify({"success": False, "message": "Empty answer"}), 400
+    state = session_store.get_state()
+    item = decision_ledger.resolve(state, data.get("decision_id"), answer)
+    if not item:
+        return jsonify({"success": False, "message": "Unknown decision"}), 404
+    state.chat_history.append({"role": "assistant", "content": f"❓ {item['question']}", "step": item.get("step", "all")})
+    state.chat_history.append({"role": "user", "content": answer, "step": item.get("step", "all")})
     return jsonify({"success": True, "decision_ledger": decision_ledger.payload(state)})
 
 

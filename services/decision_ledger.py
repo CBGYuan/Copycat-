@@ -103,6 +103,25 @@ def defer(state, decision_id: str) -> Optional[Dict]:
     return None
 
 
+def latest_open(state, step="all") -> Optional[Dict]:
+    """Best-effort fallback target for a plain chat reply that carries no
+    explicit decision_id (the engineer typed straight into the main chat box
+    instead of using a question card's own answer box). Without this, that
+    answer is never recorded against the ledger even though it plainly
+    addressed the pending question — the item stays "open" forever and keeps
+    nagging on Export despite having been answered in conversation. Picks the
+    MOST RECENTLY asked open item matching this step (or "all"), since that's
+    the one the engineer is most likely replying to; an unrelated open item
+    from several turns ago is left alone rather than guessed at."""
+    candidates = [
+        item for item in state.decision_ledger
+        if item.get("status") == "open" and (
+            item.get("step") == step or item.get("step") == "all" or step == "all"
+        )
+    ]
+    return candidates[-1] if candidates else None
+
+
 def payload(state) -> Dict:
     items = [dict(item) for item in state.decision_ledger]
     return {

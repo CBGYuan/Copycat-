@@ -1,10 +1,22 @@
 {% extends "base.html" %}
+{% block body_class %}page-log-workbench{% endblock %}
 {% block content %}
 <div class="row g-2">
-  <!-- Row 1: compact Log File bar, full width -->
+  <!-- Row 1: compact Log File bar, full width. Once a log is loaded the
+       picker collapses to a one-line chip (see setLogBarCollapsed) — it has
+       done its job at that point, and the vertical space it was holding is
+       what the log pane and the workbench below actually need. Clicking the
+       chip brings the full picker back to load a different capture. -->
   <div class="col-12">
     <div class="card">
-      <div class="card-body p-2 d-flex align-items-center gap-2">
+      <button type="button" id="logBarChip" class="file-chip" hidden
+              onclick="setLogBarCollapsed(false)"
+              title="Click to choose a different log file">
+        <i class="fas fa-file-alt"></i>
+        <span id="logBarChipName" class="file-chip-name"></span>
+        <i class="fas fa-chevron-down file-chip-caret" aria-hidden="true"></i>
+      </button>
+      <div id="logBarFull" class="card-body p-2 d-flex align-items-center gap-2">
         <span class="tat-inline-label"><i class="fas fa-file-alt"></i> Log</span>
         <div class="path-input-group flex-grow-1">
           <div class="path-input-wrap">
@@ -51,8 +63,16 @@
             📋 System Event Log <span id="evtArrow" class="evt-arrow">▸</span>
           </button>
           <!-- Same copy+browse icon pair as the LOG row above, instead of a
-               plain text button — same action (pick a file), same look. -->
-          <div class="path-input-group evt-path-group">
+               plain text button — same action (pick a file), same look. And
+               the same collapse: once a file is loaded the picker folds into a
+               chip so this strip stops competing with the log for height. -->
+          <button type="button" id="evtPathChip" class="file-chip evt-path-chip" hidden
+                  onclick="setEvtPathCollapsed(false)"
+                  title="Click to choose a different System Event Log">
+            <span id="evtPathChipName" class="file-chip-name"></span>
+            <i class="fas fa-chevron-down file-chip-caret" aria-hidden="true"></i>
+          </button>
+          <div id="evtPathGroup" class="path-input-group evt-path-group">
             <div class="path-input-wrap">
               <input id="evtPathInput" type="text" class="form-control form-control-sm" readonly
                      placeholder="No file selected" value="{{ state.event_log_path }}">
@@ -185,14 +205,44 @@
        of the 12-column grid. TAT Filter narrowed further, chat narrowed a
        bit, Steps moved out from under TAT Filter into its own narrow column
        on chat's right instead (matching chat's height). -->
-  <div class="col-lg-3">
-    <div class="card">
-      <div class="card-header py-1 d-flex align-items-center justify-content-between">
-        <span><i class="fas fa-filter"></i> TAT Filter</span>
+  <div class="col-lg-3 workbench-col">
+    <div class="card tat-filter-card">
+      <!-- The All/None bulk toggles live in the header, not in the body. In
+           the body they cost a whole row of the card's fixed height — the row
+           the filter list needs — for a control used once or twice a session. -->
+      <div class="card-header py-1 tat-filter-header">
+        <span class="tat-filter-title"><i class="fas fa-filter"></i> TAT Filter</span>
+        <div class="tat-header-toggles">
+          <button class="btn btn-outline-secondary tat-mini-btn" onclick="selectAllFilters(true)">All</button>
+          <button class="btn btn-outline-secondary tat-mini-btn" onclick="selectAllFilters(false)">None</button>
+        </div>
         <span id="domainBadge" class="domain-badge" style="display:none;"></span>
       </div>
       <div class="card-body p-2">
+        <!-- Skill and .tat file are the two ways filters get in, so they share
+             one row: pick a learned skill on the left, browse for a .tat on the
+             right, and whichever ran last is what the table below shows. -->
         <div class="path-input-group">
+          <!-- Loads an existing skill's keywords/exclusive as the active TAT
+               filter and switches the chat into prior-knowledge mode (see
+               loadSkill()). Bound to filter_skill_key, NOT active_skill_key:
+               this control says which skill's keywords are ON SCREEN, so it must
+               never show a skill whose filters aren't actually loaded (which is
+               exactly what happened once the Skill Library could set the export
+               baseline on its own). The baseline lives in the badge below. -->
+          <div class="skill-load-picker" id="skillLoadPicker">
+            <button type="button" id="skillLoadToggle" class="skill-load-toggle" data-busy-lock
+                    onclick="toggleSkillLoadPicker()" aria-expanded="false"
+                    title="Load a learned skill's keywords as the filter. Locked while any other action is in flight — it only ever changes from a deliberate click.">
+              <i class="fas fa-lightbulb"></i> <span class="skill-load-label">Skill</span>
+            </button>
+            <div id="skillLoadMenu" class="skill-doc-picker-menu skill-load-menu" hidden>
+              <div class="skill-doc-picker-head">
+                <div><b>Load a learned skill</b><small>Replaces the filter keywords on screen.</small></div>
+              </div>
+              <div id="skillLoadList" class="skill-doc-picker-list"></div>
+            </div>
+          </div>
           <div class="path-input-wrap">
             <input id="tatPathInput" type="text" class="form-control form-control-sm" readonly
                    placeholder="No .tat file selected" value="{{ state.tat_path }}">
@@ -201,29 +251,6 @@
           <button type="button" class="btn-browse" onclick="pickTat()" title="Browse for .tat file">📁</button>
         </div>
         <div id="tatStatus" class="path-status"></div>
-
-        <div class="d-flex align-items-center gap-2 mt-1">
-          <!-- Loads an existing skill's keywords/exclusive as the active TAT
-               filter and switches the chat into prior-knowledge mode (see
-               loadSkill()) — real functionality, not vestigial, so it stays;
-               just constrained to the card's width instead of overflowing it. -->
-          <!-- Bound to filter_skill_key, NOT active_skill_key: this control
-               says which skill's keywords are ON SCREEN, so it must never show
-               a skill whose filters aren't actually loaded (which is exactly
-               what happened once the Skill Library could set the export
-               baseline on its own). The baseline lives in the badge below. -->
-          <select id="skillSelect" class="form-select form-select-sm skill-select-narrow" data-busy-lock onchange="loadSkill(this.value)"
-                  title="Loading a different skill is locked while any other action is in flight — it only ever changes from a deliberate click.">
-            <option value="">-- or load a learned skill --</option>
-            {% for key, sk in skills.items() %}
-            <option value="{{ key }}" {{ 'selected' if key == state.filter_skill_key else '' }}>{{ sk.name }}</option>
-            {% endfor %}
-          </select>
-          <div class="d-flex gap-1 flex-shrink-0">
-            <button class="btn btn-outline-secondary tat-mini-btn" onclick="selectAllFilters(true)">All</button>
-            <button class="btn btn-outline-secondary tat-mini-btn" onclick="selectAllFilters(false)">None</button>
-          </div>
-        </div>
 
         <!-- The OTHER thing a skill can be: what the next Export inherits
              from. Shown only when it differs from what the dropdown above is
@@ -315,7 +342,7 @@
        so it sits flush against Steps, split by one border line instead of a
        visible gap between two separate cards. -->
   <div class="col-lg-6 chat-panel-joined">
-    <div class="card" style="height:74vh; display:flex; flex-direction:column; overflow:hidden;">
+    <div class="card workbench-panel">
       <div class="card-header py-1 chat-header">
         <div class="chat-header-primary">
           <span class="chat-header-title" title="Skill-building chat"><i class="fas fa-comments"></i> Chat</span>
@@ -381,28 +408,32 @@
         <div id="chatBox" class="p-2 flex-grow-1" style="overflow-y:auto; background:#f8f9fa; font-size:0.82rem; min-height:220px;"></div>
         <div class="card-footer p-2">
           <div id="stepTagDropdown" class="step-tag-dropdown" style="display:none;"></div>
-          <div class="input-group input-group-sm">
-            <input id="chatInput" class="form-control" data-busy-lock placeholder="Answer / ask…" onkeypress="if(event.key==='Enter') sendMsg();">
+          <div class="input-group input-group-sm chat-input-group">
+            <button id="chatAttachBtn" type="button" class="btn btn-outline-secondary chat-attach-btn"
+                    aria-label="Attach a table, notes, or a screenshot"><i class="fas fa-paperclip"></i></button>
+            <textarea id="chatInput" class="form-control chat-main-input" rows="1" data-busy-lock placeholder="Answer / ask… (Shift+Enter for a new line)"
+                      onkeydown="if(event.key==='Enter' && !event.shiftKey){ event.preventDefault(); sendMsg(); }"
+                      oninput="autoGrowChatInput(this)"></textarea>
             <button id="stepTagBtn" type="button" class="btn btn-outline-secondary step-tag-compact-btn" onclick="toggleStepTagDropdown()" title="Tag this message with a step (#N) or mark as general knowledge (All)">All</button>
             <button id="chatSendBtn" class="btn btn-primary" data-busy-lock onclick="sendMsg()"
                     aria-label="Send chat message"><i class="fas fa-paper-plane"></i></button>
           </div>
+          <div id="chatAttachStatus" class="chat-q-attach-status" hidden></div>
         </div>
       </div>
     </div>
   </div>
 
-  <!-- Steps — narrow column on chat's right, matching chat's own fixed height
-       (74vh, same literal value as chat's card — a shared min/max range let
-       the two drift apart since each card's actual height depended on its
-       own content) instead of an independent scroll cap, with smaller type
-       since the column itself is narrow (see .step-panel-narrow).
+  <!-- Steps — narrow column on chat's right, sharing the one
+       --workbench-panel-h height with Chat and the TAT Filter column (see
+       .workbench-panel) instead of an independent scroll cap, with smaller
+       type since the column itself is narrow (see .step-panel-narrow).
        step-panel-joined squares off its left edge to sit flush against chat,
        split by one border line. No open/close toggle: it's the same
        read-only timeline of filter edits (see renderStepPanel), always fully
        shown. The 🎓 teach icon on each row is unchanged. -->
   <div class="col-lg-3 step-panel-joined">
-    <div class="card step-panel-narrow" style="height:74vh; display:flex; flex-direction:column; overflow:hidden;">
+    <div class="card step-panel-narrow workbench-panel">
       <div class="card-header py-1"><i class="fas fa-map-signs"></i> Steps</div>
       <div class="card-body p-2 d-flex flex-column" style="flex:1 1 auto; min-height:0;">
         <div id="stepPanel" class="step-panel"></div>
@@ -480,7 +511,9 @@
       learning_converge: "{{ url_for('learning.converge') }}",
       learning_save: "{{ url_for('learning.save') }}",
       learning_set_mode: "{{ url_for('learning.set_mode') }}",
+      learning_transcribe_attachment: "{{ url_for('learning.transcribe_attachment') }}",
       learning_defer_decision: "{{ url_for('learning.defer_decision') }}",
+      learning_resolve_decision: "{{ url_for('learning.resolve_decision') }}",
       log_viewer_add_filter: "{{ url_for('log_viewer.add_filter') }}",
       log_viewer_annotate_line: "{{ url_for('log_viewer.annotate_line') }}",
       log_viewer_answer_red_flag: "{{ url_for('log_viewer.answer_red_flag') }}",
@@ -502,6 +535,9 @@
     },
     boot: {
       activeSkillKey: {{ (state.active_skill_key or '')|tojson }},
+      filterSkillKey: {{ (state.filter_skill_key or '')|tojson }},
+      {# skills maps key -> Skill (a pydantic model), not dict — attribute access, not .get() #}
+      filterSkillName: {{ (skills[state.filter_skill_key].name if state.filter_skill_key in skills else '')|tojson }},
       baselineSkillName: {{ (baseline_skill_name or '')|tojson }},
       eventSyncOffsetMin: {{ state.event_sync_offset_min|tojson }},
       eventSyncBasis: {{ (state.event_sync_basis or '')|tojson }},
