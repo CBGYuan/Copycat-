@@ -898,11 +898,16 @@ function _fileName(path) {
 function setLogBarCollapsed(collapsed) {
     const full = document.getElementById('logBarFull');
     const chip = document.getElementById('logBarChip');
+    const collapseBtn = document.getElementById('logBarCollapseBtn');
     if (!full || !chip) return;
     const path = document.getElementById('logPathInput').value.trim();
     const canCollapse = collapsed && !!path;      // never hide the only way to load one
     full.hidden = canCollapse;
     chip.hidden = !canCollapse;
+    // Only worth offering once there's a file to fold back to — with none
+    // picked yet the row has to stay open, so a collapse control on it would
+    // do nothing.
+    if (collapseBtn) collapseBtn.hidden = !path;
     if (canCollapse) {
         document.getElementById('logBarChipName').textContent = _fileName(path);
         chip.title = path;
@@ -912,21 +917,25 @@ function setLogBarCollapsed(collapsed) {
 function setEvtPathCollapsed(collapsed) {
     const group = document.getElementById('evtPathGroup');
     const chip = document.getElementById('evtPathChip');
+    const collapseBtn = document.getElementById('evtPathCollapseBtn');
     if (!group || !chip) return;
     const path = document.getElementById('evtPathInput').value.trim();
     const canCollapse = collapsed && !!path;
     group.hidden = canCollapse;
     chip.hidden = !canCollapse;
+    if (collapseBtn) collapseBtn.hidden = !path;
     if (canCollapse) {
         document.getElementById('evtPathChipName').textContent = _fileName(path);
         chip.title = path;
     }
 }
 
-// The log pane keeps the flat height CSS gives it (.tat-log). Sizing it to
-// whatever the viewport had left over kept the whole page inside the window,
-// but made the log itself too short to read — the log is the thing being
-// worked on, so it wins and the page scrolls instead.
+// The log pane keeps the flat height CSS gives it (.tat-log's 48vh) — it was
+// briefly made to shrink-to-fit the viewport so the page never scrolled, but
+// that made the log itself, the thing actually being worked on, too short to
+// read whenever the workbench below it was tall. The log wins; the page
+// scrolls instead. Only Chat/Steps/TAT Filter are kept to a fixed height (see
+// .workbench-panel).
 
 function pickLog() {
     fetch(LV.url.log_viewer_pick_log, {method: 'POST'})
@@ -2095,12 +2104,41 @@ function autoGrowChatInput(input) {
     input.style.height = Math.min(input.scrollHeight + border, 160) + 'px';
 }
 
+// Set once wireMainChatAttachments (near the bottom of this file) runs at
+// load. sendMsg reads it below to resolve any staged image right before the
+// message goes out — the same deferred-to-send behaviour buildAnswerBox and
+// the case-intake card use, just for the one chat input shared across turns.
+let _mainChatAttachments = null;
+
 function sendMsg(presetMsg, displayMsg, forceTag, allowWithoutBaseline, decisionId) {
     // chatSendBtn stays enabled while busy (see setBusy) so this same click
     // handler doubles as Stop — everything else with data-busy-lock is
     // disabled, so isBusy() here only ever means "the button itself was
     // clicked again," never a stray programmatic call racing a live request.
     if (isBusy()) { stopChatSend(); return; }
+    // Only the "read from the visible input" path (presetMsg === undefined —
+    // the engineer actually typed/attached and hit Send or Enter) can have a
+    // staged image to resolve. Every other call site passes its own text
+    // directly (a chosen option, a recommended answer) and never touched the
+    // attach button at all.
+    if (presetMsg === undefined && _mainChatAttachments && _mainChatAttachments.hasPending()) {
+        const chatInput = document.getElementById('chatInput');
+        const chatSendBtn = document.getElementById('chatSendBtn');
+        chatInput.disabled = true;
+        chatSendBtn.disabled = true;
+        // No unconditional re-enable in a .finally() here: on success the
+        // recursive call below immediately calls setBusy(true) itself (the
+        // real request is now in flight), and unlike a question card's answer
+        // box — which gets removed from the DOM the moment it submits —
+        // #chatInput/#chatSendBtn are the same two persistent elements reused
+        // for the whole session. Blindly re-enabling them after the recursive
+        // call returns would race setBusy and leave Send clickable while a
+        // response is still streaming in.
+        _mainChatAttachments.resolvePending()
+            .then(() => sendMsg(presetMsg, displayMsg, forceTag, allowWithoutBaseline, decisionId))
+            .catch(() => { chatInput.disabled = false; chatSendBtn.disabled = false; });
+        return;
+    }
     const input = document.getElementById('chatInput');
     const msg = presetMsg !== undefined ? presetMsg : input.value.trim();
     if (!msg) return;
@@ -2166,7 +2204,6 @@ function renderProactiveClarification(q, stepTag) {
     card.appendChild(el('div', 'chat-q-progress', basisLabels[q.basis] || basisLabels.baseline));
     if (q.summary) card.appendChild(el('div', 'proactive-divergence-summary', q.summary));
     card.appendChild(el('div', 'chat-q-text', q.question));
-    appendRecommendation(card, q);
 
     const submit = (answer) => {
         card.remove();
@@ -2175,14 +2212,8 @@ function renderProactiveClarification(q, stepTag) {
     };
     const hasOptions = q.type === 'choice' && !!q.options && q.options.length >= 2;
     const optsBox = el('div', 'chat-q-opts');
-    if (hasOptions) {
-        q.options.forEach((opt) => {
-            const btn = el('button', 'chat-q-opt', opt);
-            btn.type = 'button';
-            btn.onclick = () => submit(opt);
-            optsBox.appendChild(btn);
-        });
-    }
+    const recommendedIsOption = hasOptions && renderOptionButtons(optsBox, q.options, q.recommended_answer, submit);
+    if (!recommendedIsOption) appendRecommendation(card, q);
     const skip = () => { deferDecision(q.decision_id); card.remove(); };
     attachAnswerBox(card, hasOptions, optsBox, buildAnswerBox({
         placeholder: 'Type the missing rule or reason — paste a table, or attach one…',
@@ -2243,31 +2274,215 @@ let currentAssessment = null;
 
 // Readiness score badge next to Export Skill — color band matches the
 // readiness guide in services/learning_service.py (_ASSESS_TASKS).
-function updateReadinessBadge(readiness) {
+function updateReadinessBadge(readiness, unverified) {
     const badge = document.getElementById('readinessBadge');
+    // A dot, not a count: once the strip is gone this is the only sign that
+    // unconfirmed claims are still sitting in the readiness panel.
+    const warn = unverified ? ' ⚠' : '';
     if (!readiness || typeof readiness.score !== 'number') {
-        badge.textContent = '🎯 Readiness —';
+        badge.textContent = '🎯 —' + warn;
         badge.classList.remove('is-low', 'is-mid', 'is-high');
         return;
     }
     const score = readiness.score;
-    badge.textContent = `🎯 Readiness ${score}%`;
+    // Number only — the word "Readiness" costs ~70px of a header that has to
+    // fit Clear and Export skill too; the tooltip and the popover title carry it.
+    badge.textContent = `🎯 ${score}%${warn}`;
     badge.classList.remove('is-low', 'is-mid', 'is-high');
     badge.classList.add(score >= 70 ? 'is-high' : score >= 35 ? 'is-mid' : 'is-low');
 }
 
-// Single entry point for a fresh assessment (from /assess or /log_round):
-// updates the badge and re-renders the details panel, and flags the badge
-// when there are unverified/contradiction items so the engineer notices
-// before exporting.
+// Single entry point for a fresh assessment (from /assess or /log_round).
 function applyAssessment(a) {
+    const previousGaps = ((currentAssessment && currentAssessment.gaps) || []).length;
     currentAssessment = a || null;
-    updateReadinessBadge(a && a.readiness);
+    const unverified = ((a && a.validation) || []).filter(v => v.status !== 'verified').length;
+    updateReadinessBadge(a && a.readiness, unverified);
     renderReadinessPanel(a);
-    const badge = document.getElementById('readinessBadge');
-    const flags = (a && a.validation || []).filter(v => v.status !== 'verified').length;
-    badge.textContent = badge.textContent.replace(/ ⚠.*$/, '');
-    if (flags) badge.textContent += ` ⚠${flags}`;
+    renderOpenItems(a, previousGaps);
+}
+
+// What still needs work, sitting directly above the chat instead of three
+// clicks deep. Two counters, deliberately separate because they are different
+// jobs: gaps are questions to ANSWER, unverified claims are statements to
+// CONFIRM OR CORRECT. Only the gaps keep the bar on screen — claims ride
+// along while it is there, and fall back to the readiness panel once the last
+// gap is answered or skipped.
+//
+// Only the one-line header takes layout space; the list opens DOWNWARD over
+// the transcript (see .open-items-list). The chat card has a fixed height, so
+// a list that grew in the flow had to steal that room from something — in the
+// footer it pushed the input box clean out of the card.
+//
+// Deliberately NOT a transcript entry: assess_readiness re-runs after every
+// answer, so appending would leave a trail of superseded lists. This is one
+// element rewritten in place, same rule as the case-context note.
+let _openItemsOpen = null;      // null | 'gaps' | 'claims'
+
+function renderOpenItems(a, previousGaps) {
+    const strip = document.getElementById('openItemsStrip');
+    if (!strip) return;
+    const gaps = (a && a.gaps) || [];
+    const unverified = ((a && a.validation) || []).filter(v => v.status !== 'verified');
+    strip.innerHTML = '';
+    // The bar is the open-work list: answer or skip the last gap and it goes
+    // away, rather than lingering on a claim count. Unverified claims do not
+    // hold it open on their own — they are still listed in the readiness
+    // panel, which the badge's ⚠ points at.
+    strip.hidden = !gaps.length;
+    if (strip.hidden) { _openItemsOpen = null; return; }
+    if (_openItemsOpen === 'claims' && !unverified.length) _openItemsOpen = null;
+
+    // stopPropagation on every control in here: re-rendering detaches the
+    // clicked node, so the close-on-outside-click handler below would see a
+    // target no longer inside the strip and shut it again immediately.
+    const tab = (key, label, cls) => {
+        const b = el('button', 'open-items-tab' + (cls ? ' ' + cls : ''));
+        b.type = 'button';
+        b.appendChild(el('span', 'open-items-caret', _openItemsOpen === key ? '▴' : '▾'));
+        b.appendChild(el('span', 'open-items-title', label));
+        b.onclick = (e) => {
+            e.stopPropagation();
+            _openItemsOpen = _openItemsOpen === key ? null : key;
+            renderOpenItems(a, previousGaps);
+        };
+        return b;
+    };
+
+    const head = el('div', 'open-items-head');
+    head.appendChild(tab('gaps', `Still missing (${gaps.length})`));
+    if (unverified.length) {
+        head.appendChild(tab('claims', `⚠ ${unverified.length} unverified`, 'is-warn'));
+    }
+    // Count, not identity: the model rewords a gap between assessments often
+    // enough that claiming specific items were answered would be a lie.
+    const delta = (previousGaps || 0) - gaps.length;
+    if (delta > 0) head.appendChild(el('span', 'open-items-delta', `−${delta} since last check`));
+    strip.appendChild(head);
+    if (!_openItemsOpen) return;
+
+    const list = el('div', 'open-items-list');
+    const redraw = () => renderOpenItems(a, previousGaps);
+    if (_openItemsOpen === 'gaps') {
+        gaps.forEach(g => list.appendChild(gapRow(g, redraw)));
+    } else {
+        unverified.forEach(v => list.appendChild(claimRow(v, redraw)));
+    }
+    strip.appendChild(list);
+}
+
+function gapRow(g, redraw) {
+    const item = el('div', 'open-items-item');
+    const row = el('button', 'open-items-row', g);
+    row.type = 'button';
+    row.title = g + '\n\nClick to answer this one in the chat.';
+    row.onclick = (e) => {
+        e.stopPropagation();
+        _openItemsOpen = null;
+        openAskCard({
+            tag: '🎯 Still missing',
+            text: g,
+            // Closed before the send: the answer is on its way into the
+            // history, so this item has had its turn. Sequenced, not fired in
+            // parallel — both calls answer with an assessment, and the older
+            // one landing last would roll the badge back.
+            onSubmit: (answer) => {
+                closeGap(g, true).then(() => sendMsg(`Re: ${g}\n${answer}`, undefined, 'all', false));
+            },
+            onSkip: () => closeGap(g, false),
+            skipLabel: 'Skip this',
+        });
+        redraw();
+    };
+    const skip = el('button', 'open-items-skip', 'Skip');
+    skip.type = 'button';
+    skip.title = "Not relevant to this case — stop counting it, here and at Export.";
+    skip.onclick = (e) => { e.stopPropagation(); closeGap(g, false); };
+    item.appendChild(row);
+    item.appendChild(skip);
+    return item;
+}
+
+// No Skip here on purpose: a claim isn't a question to decline, and nothing
+// local should be able to mark it verified. It clears when the next assessment
+// says the log backs it up.
+function claimRow(v, redraw) {
+    const meta = _VALID_META[v.status] || _VALID_META.asserted;
+    const item = el('div', 'open-items-item');
+    const row = el('button', 'open-items-row', `${meta.icon} ${v.claim}`);
+    row.type = 'button';
+    row.title = meta.label + (v.note ? ' — ' + v.note : '') + '\n\nClick to confirm or correct it.';
+    row.onclick = (e) => {
+        e.stopPropagation();
+        _openItemsOpen = null;
+        openAskCard({
+            tag: `${meta.icon} ${meta.label} — confirm, correct, or point at the evidence`,
+            text: v.claim,
+            onSubmit: (answer) => sendMsg(`Re: ${v.claim}\n${answer}`, undefined, 'all', false),
+        });
+        redraw();
+    };
+    item.appendChild(row);
+    return item;
+}
+
+// Both kinds are permanent; the two buckets stay separate because only one of
+// them means the knowledge was actually given. Recorded server-side rather
+// than hidden client-side — it has to survive a reload, and the Export gate
+// reads that same payload.
+function closeGap(gap, answered) {
+    return fetch(LV.url.learning_skip_gap, {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({gap: gap, answered: !!answered}),
+    })
+        .then(r => r.json())
+        .then(d => { if (d.success) applyAssessment(d.assessment); })
+        .catch(() => {});
+}
+
+// An overlay that covers the transcript has to get out of the way the same
+// way every other popover here does.
+document.addEventListener('click', function (e) {
+    if (!_openItemsOpen) return;
+    const strip = document.getElementById('openItemsStrip');
+    if (strip && !strip.contains(e.target)) {
+        _openItemsOpen = null;
+        renderOpenItems(currentAssessment, 0);
+    }
+});
+
+// Answering a specific item only helps if the answer says WHICH item it is —
+// the chat is free-form, and "yes, roaming-evaluation only" three messages
+// later is unattributable. So a clicked item becomes a real question card in
+// the transcript, the same shape as the LLM's own follow-ups: answer it (with
+// an attachment if that's the easier evidence) or skip it, and the prompt
+// itself stays in the history next to the answer.
+function openAskCard(opts) {
+    const box = document.getElementById('chatBox');
+    if (!box) return;
+    const previous = document.getElementById('gapAnswerCard');
+    if (previous) previous.remove();          // one open card at a time
+
+    const card = el('div', 'chat-question-card mb-2');
+    card.id = 'gapAnswerCard';
+    card.appendChild(el('div', 'chat-q-progress', opts.tag));
+    card.appendChild(el('div', 'chat-q-text', opts.text));
+
+    // forceTag 'all': these are about the round as a whole, not whatever step
+    // the step-context selector happens to be pointing at.
+    const answerBox = buildAnswerBox({
+        hint: opts.text,
+        onSubmit: (answer) => { card.remove(); opts.onSubmit(answer); },
+        onSkip: opts.onSkip ? () => { card.remove(); opts.onSkip(); } : undefined,
+        skipLabel: opts.skipLabel,
+    });
+    attachAnswerBox(card, false, null, answerBox);
+
+    box.appendChild(card);
+    scrollChatToBottom();
+    const input = card.querySelector('.chat-q-answer');
+    if (input) input.focus();
 }
 
 function toggleReadinessPanel(evt) {
@@ -2296,12 +2511,17 @@ function toggleReadinessPanel(evt) {
         }
     }
 }
-// Now floating popovers (anchored under the Spending / Readiness columns,
-// bottom-left) instead of inline flex siblings of chatBox — close both on
-// any click outside the session-menu.
+// Now floating popovers — Spending under the session menu (bottom-left),
+// Readiness under its trigger in the Chat header. Close both on any click
+// outside EITHER anchor: the two triggers no longer share one container, and
+// checking only the old one meant the click that opened Readiness immediately
+// bubbled up and closed it again.
 document.addEventListener('click', function(e) {
-    const menu = document.querySelector('.session-menu');
-    if (!menu || menu.contains(e.target)) return;
+    const inAnchor = ['.session-menu', '#chatReadiness'].some(sel => {
+        const anchor = document.querySelector(sel);
+        return anchor && anchor.contains(e.target);
+    });
+    if (inAnchor) return;
     const rp = document.getElementById('readinessPanel');
     const sp = document.getElementById('spendPanel');
     if (rp) rp.style.display = 'none';
@@ -2315,10 +2535,10 @@ const _VALID_META = {
     contradiction: {icon: '⛔', cls: 'v-bad',  label: 'contradiction / open item'},
 };
 
-// The readiness popover, trimmed down: just the per-goal coverage bars and a
-// Detail button. Everything fuller (the still-missing gaps and the claim-by-
-// claim verified-vs-asserted validation) now lives behind that button in the
-// Readiness detail popup (openReadinessDetail) so this popover stays short.
+// The readiness popover: coverage bars and the claim-by-claim check. The gaps
+// are NOT here — they are the questions the engineer is about to answer, so
+// they live in the strip above the chat where the answer gets typed
+// (renderOpenItems).
 function renderReadinessPanel(a) {
     const panel = document.getElementById('readinessPanel');
     panel.innerHTML = '';
@@ -2355,38 +2575,7 @@ function renderReadinessPanel(a) {
         body.appendChild(el('div', 'readiness-empty', 'No coverage breakdown yet.'));
     }
 
-    // Detail button — opens the fuller gaps + claim-check popup.
-    const n = (a.gaps || []).length + (a.validation || []).length;
-    const btn = el('button', 'readiness-detail-btn', n ? `Detail (${n})` : 'Detail');
-    btn.type = 'button';
-    btn.onclick = (e) => { e.stopPropagation(); openReadinessDetail(); };
-    body.appendChild(btn);
-}
-
-// Readiness detail popup — the still-missing gaps + claim-by-claim validation,
-// moved out of the compact popover behind its Detail button. Reads the latest
-// currentAssessment; built via the DOM so LLM-authored claim text can't break
-// markup.
-function openReadinessDetail() {
-    const a = currentAssessment || {};
-    const gaps = a.gaps || [];
     const validation = a.validation || [];
-    const body = document.getElementById('rdmBody');
-    body.innerHTML = '';
-
-    const sub = document.getElementById('rdmSubtitle');
-    sub.textContent = (a.readiness && typeof a.readiness.score === 'number')
-        ? `${a.readiness.score}% ready` : '';
-
-    if (!gaps.length && !validation.length) {
-        body.appendChild(el('div', 'readiness-empty', 'Nothing flagged yet — log a round or answer a question.'));
-    }
-    if (gaps.length) {
-        body.appendChild(el('div', 'readiness-h', `Still missing (${gaps.length})`));
-        const ul = el('ul', 'readiness-gaps');
-        gaps.forEach(g => ul.appendChild(el('li', null, g)));
-        body.appendChild(ul);
-    }
     if (validation.length) {
         body.appendChild(el('div', 'readiness-h', `Claim check (${validation.length})`));
         const list = el('div', 'readiness-valid');
@@ -2402,11 +2591,6 @@ function openReadinessDetail() {
         });
         body.appendChild(list);
     }
-    document.getElementById('readinessDetailModal').style.display = 'flex';
-}
-
-function closeReadinessDetail() {
-    document.getElementById('readinessDetailModal').style.display = 'none';
 }
 
 // tiny DOM helper
@@ -2475,7 +2659,12 @@ function renderSkillDocPicker() {
     const countEl = document.getElementById('skillDocCount');
     const button = document.getElementById('skillDocPickerToggle');
     if (countEl) countEl.textContent = count;
-    if (button) button.classList.toggle('has-docs', count > 0);
+    if (button) {
+        button.classList.toggle('has-docs', count > 0);
+        button.title = count
+            ? `${count} skill document(s) selected as prior knowledge`
+            : 'Choose the existing skill documents Copycat may use as prior knowledge';
+    }
 }
 
 function onSkillDocSelectionChange() {
@@ -2580,10 +2769,33 @@ function renderCaseIntakeCard(opts) {
     paintDocs();
     docsBtn.onclick = () => toggleSkillDocPicker(true);
     card.addEventListener('copycat:docschanged', paintDocs);
+    // Same attach affordance as every question's answer box (buildAnswerBox) —
+    // the case description is exactly the kind of thing an engineer sometimes
+    // has as a screenshot of a bug report rather than typed-out prose.
+    const attachBtn = el('button', 'btn btn-sm btn-outline-secondary case-intake-attach');
+    attachBtn.type = 'button';
+    attachBtn.innerHTML = '<i class="fas fa-paperclip"></i>';
+    docsRow.appendChild(attachBtn);
     docsRow.appendChild(docsBtn);
-    docsRow.appendChild(el('span', 'case-intake-hint',
-        'Optional. Selected docs guide questions; they never replace log evidence.'));
+    const docsHint = el('span', 'case-intake-hint',
+        'Optional. Selected docs guide questions; they never replace log evidence.');
+
+    const attachStatus = el('div', 'chat-q-attach-status');
+    attachStatus.hidden = true;
+    const attachments = wireAttachments({
+        input: textarea, attachBtn, dropZone: card,
+        setStatus: (text, kind) => {
+            attachStatus.className = 'chat-q-attach-status' + (kind ? ' is-' + kind : '');
+            attachStatus.textContent = text || '';
+            attachStatus.hidden = !text;
+        },
+    });
+    // Chips live in the button row, not under it: this card is already four
+    // stacked rows tall and an attachment shouldn't add a fifth.
+    docsRow.appendChild(attachments.pendingRow);
+    docsRow.appendChild(docsHint);
     card.appendChild(docsRow);
+    card.appendChild(attachStatus);
 
     const actions = el('div', 'step-explain-actions');
     const saveBtn = el('button', 'btn btn-sm btn-primary', opts.rewrite ? 'Update' : 'Continue');
@@ -2606,10 +2818,25 @@ function renderCaseIntakeCard(opts) {
             setBaselineGate();
         });
     };
-    saveBtn.onclick = () => commit(textarea.value);
+    // A staged image is read (one transcription call) only once the engineer
+    // commits — same deferred-to-send behaviour as buildAnswerBox, see
+    // wireAttachments' resolvePending.
+    const doCommit = () => {
+        if (attachments.hasPending()) {
+            saveBtn.disabled = true;
+            textarea.disabled = true;
+            attachments.resolvePending()
+                .then(() => commit(textarea.value))
+                .catch(() => {})
+                .finally(() => { saveBtn.disabled = false; textarea.disabled = false; });
+            return;
+        }
+        commit(textarea.value);
+    };
+    saveBtn.onclick = doCommit;
     skipBtn.onclick = () => { close(); setBaselineGate(); };
     textarea.onkeydown = (e) => {
-        if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); commit(textarea.value); }
+        if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); doCommit(); }
     };
 
     box.appendChild(card);
@@ -2688,7 +2915,16 @@ function renderDecisionLedgerBody() {
         const status = item.status || 'open';
         const answer = item.answer
             ? `<div class="decision-answer"><b>Engineer:</b> ${escapeHtml(item.answer)}</div>` : '';
-        const rec = item.recommended_answer
+        // An OPEN choice item whose recommendation is literally one of its
+        // options gets the badge on the button instead (see the forEach
+        // below) — showing the same sentence again here would be the exact
+        // duplication the chat cards had. Resolved/deferred items never grow
+        // option buttons at all, so their recommendation only has this one
+        // place to appear.
+        const hasChoiceOptions = item.type === 'choice' && !!item.options && item.options.length >= 2;
+        const recIsOption = status === 'open' && hasChoiceOptions && !!item.recommended_answer
+            && item.options.some((o) => o.trim() === item.recommended_answer.trim());
+        const rec = (item.recommended_answer && !recIsOption)
             ? `<div class="decision-recommendation"><b>Recommended:</b> ${escapeHtml(item.recommended_answer)}${item.recommendation_reason ? ` — ${escapeHtml(item.recommendation_reason)}` : ''}</div>` : '';
         // Open items get an empty slot filled in below with a real DOM
         // answer box (buildAnswerBox) — this modal used to be view-only,
@@ -2713,12 +2949,7 @@ function renderDecisionLedgerBody() {
         const answerBox = buildAnswerBox({placeholder: 'Type your answer…', onSubmit: submit, onSkip: skip});
         if (hasOptions) {
             const optsBox = el('div', 'chat-q-opts');
-            item.options.forEach((opt) => {
-                const btn = el('button', 'chat-q-opt', opt);
-                btn.type = 'button';
-                btn.onclick = () => submit(opt);
-                optsBox.appendChild(btn);
-            });
+            renderOptionButtons(optsBox, item.options, item.recommended_answer, submit);
             attachAnswerBox(slot, true, optsBox, answerBox);
         } else {
             attachAnswerBox(slot, false, null, answerBox);
@@ -2778,12 +3009,44 @@ function resolveDecisionFromLedger(decisionId, answer) {
         .catch(() => {});
 }
 
+// Choice questions used to show the recommendation TWICE: once as its own
+// "Recommended" block (readable, but the only thing on the card you couldn't
+// click), and again, word-for-word, as a plain option button underneath it —
+// clicking the option was the actual one-click way to accept it, the block
+// above it was decoration. Folding the badge onto the matching button removes
+// the duplicate and makes "click to accept the recommendation" the obvious
+// affordance instead of a coincidence the engineer had to notice themselves.
+// Returns true if one of the options WAS the recommendation, so the caller
+// knows the standalone block is no longer needed.
+function renderOptionButtons(optsBox, options, recommendedAnswer, onSelect) {
+    const rec = (recommendedAnswer || '').trim();
+    let matched = false;
+    options.forEach((opt) => {
+        const isRec = !!rec && opt.trim() === rec;
+        if (isRec) matched = true;
+        const btn = el('button', 'chat-q-opt' + (isRec ? ' is-recommended' : ''));
+        btn.type = 'button';
+        // The badge is a block ABOVE the option text, not inline text before
+        // it — inline made every option's sentence start at a different x
+        // the moment one of them grew a badge in front of it, undoing the
+        // very alignment .chat-q-opt is block-laid-out to give you.
+        if (isRec) btn.appendChild(el('div', 'chat-q-opt-badge', 'Recommended'));
+        btn.appendChild(document.createTextNode(opt));
+        btn.onclick = () => onSelect(opt);
+        optsBox.appendChild(btn);
+    });
+    return matched;
+}
+
 // The RECOMMENDED block is the model's own proposed answer, and for a long
 // time it was the one thing on the card you could not act on: the engineer
 // read a sentence they agreed with, then retyped it underneath. Clicking it
 // now loads it into the answer box — deliberately NOT submitting it, because
 // its whole job is to be a starting point the engineer corrects or extends
 // (adding the table, the exception, the real reason) before it is taught.
+// Only reached when there's no option button already carrying the
+// "Recommended" badge (see renderOptionButtons) — a free-answer question, or
+// a choice question whose recommendation isn't literally one of the options.
 function appendRecommendation(card, q) {
     if (!q || !q.recommended_answer) return;
     const row = el('button', 'question-recommendation');
@@ -2819,25 +3082,30 @@ function appendRecommendation(card, q) {
 //     very often a table in a screenshot or a .csv, and retyping it by hand
 //     was the only way in.
 //
-// Attachments resolve to TEXT INSIDE THIS BOX before anything is submitted —
-// text files verbatim, images via one transcription call (see
-// /learning/transcribe_attachment). So what the engineer reads in the box is
-// exactly what the LLM receives; there is no second, invisible payload riding
-// along with the answer, and no downstream consumer (chat history, an
-// operation's `reason`, an exported expert_rule) has to learn a new shape.
+// Text-file attachments resolve to TEXT INSIDE THIS BOX immediately — there's
+// no LLM step involved, so no reason to wait. Images and PDFs are different:
+// they are STAGED as a chip when attached and only actually read (one
+// transcription call to /learning/transcribe_attachment, see resolvePending
+// below) right before the message goes out, same as attaching a photo in a
+// chat app — nothing is sent to the model until Send is pressed. Either way,
+// what eventually reaches the LLM is still plain text inside this box; no
+// downstream consumer (chat history, an operation's `reason`, an exported
+// expert_rule) ever has to learn a second, image-shaped payload.
 const _ATTACH_TEXT_MAX = 200 * 1024;         // past this it isn't evidence, it's a log
 const _ATTACH_IMAGE_MAX = 5 * 1024 * 1024;
-const _ATTACH_ACCEPT = '.txt,.csv,.tsv,.md,.markdown,.json,.yaml,.yml,.log,.tat,image/*';
-const _ATTACH_TITLE = 'Attach a table or notes. Text files are inserted as-is; an image is '
-                    + 'transcribed into text you can correct before sending. You can also '
-                    + 'paste a screenshot straight into the box.';
+// A datasheet page is legitimately heavier than a screenshot; the server
+// enforces its own matching ceiling (_MAX_PDF_B64 in learning_routes.py).
+const _ATTACH_PDF_MAX = 10 * 1024 * 1024;
+const _ATTACH_ACCEPT = '.txt,.csv,.tsv,.md,.markdown,.json,.yaml,.yml,.log,.tat,.pdf,image/*,application/pdf';
+const _ATTACH_TITLE = 'Attach a table or notes. Text files are inserted as-is; an image or PDF is '
+                    + 'staged and read when you send — like attaching a photo in a chat app. '
+                    + 'You can also paste a screenshot straight into the box.';
 
-// Shared by the per-question answer boxes (buildAnswerBox) and by the main
-// chat input: file picker + paste + drag-drop, all landing as TEXT in the
-// given textarea before anything is sent. Extracted so the main chat box
-// gains the exact same behaviour rather than a second, subtly different
-// implementation — a config table screenshotted out of a spec is just as
-// often pasted into a free-form chat message as into a question's answer.
+// Shared by the per-question answer boxes (buildAnswerBox), the case-intake
+// card, and the main chat input: file picker + paste + drag-drop. Extracted
+// so every attach point gets the exact same behaviour rather than several
+// subtly different implementations — a config table screenshotted out of a
+// spec is just as often the case description as it is a question's answer.
 function wireAttachments(opts) {
     const input = opts.input;
     const setStatus = opts.setStatus || function () {};
@@ -2857,56 +3125,72 @@ function wireAttachments(opts) {
     picker.accept = _ATTACH_ACCEPT;
     picker.style.display = 'none';
 
-    const takeFile = (file) => {
-        if (!file) return;
-        if ((file.type || '').startsWith('image/')) {
-            if (file.size > _ATTACH_IMAGE_MAX) {
-                setStatus('That image is too large — crop it to just the table.', 'error');
-                return;
-            }
-            setStatus(`Reading ${file.name || 'pasted image'}…`, 'busy');
-            if (opts.attachBtn) opts.attachBtn.disabled = true;
-            const reader = new FileReader();
-            reader.onload = () => {
-                const url = String(reader.result || '');
-                const comma = url.indexOf(',');
-                const hint = [opts.hint, input.value.trim()].filter(Boolean).join('\n').slice(0, 500);
-                fetch(LV.url.learning_transcribe_attachment, {
-                    method: 'POST',
-                    headers: {'Content-Type': 'application/json'},
-                    body: JSON.stringify({
-                        media_type: file.type,
-                        data: comma >= 0 ? url.slice(comma + 1) : '',
-                        hint: hint,
-                    }),
-                })
-                    .then(r => r.json())
-                    .then(d => {
-                        if (opts.attachBtn) opts.attachBtn.disabled = false;
-                        if (!d.success || !d.text) {
-                            setStatus(d.message || 'Could not read that image.', 'error');
-                            return;
-                        }
-                        if (d.usage && d.usage.session) updateTokenBadge(d.usage.session);
-                        insertBlock(`Transcribed from ${file.name || 'a pasted image'}:`, d.text);
-                        // Not decoration: a table OCR'd out of a spec is the
-                        // kind of thing that comes back 95% right and silently
-                        // wrong in one cell, and a wrong cell taught as an
-                        // expert rule is worse than no rule at all.
-                        setStatus('Transcribed — check every row before sending.', 'warn');
-                    })
-                    .catch(e => {
-                        if (opts.attachBtn) opts.attachBtn.disabled = false;
-                        setStatus('Could not read that image: ' + e, 'error');
-                    });
+    // Staged images/PDFs, not yet sent anywhere. resolvePending() drains this
+    // list right before the answer is actually submitted.
+    let pending = [];
+    let nextPendingId = 1;
+    const pendingRow = document.createElement('div');
+    pendingRow.className = 'chat-q-pending-row';
+    pendingRow.hidden = true;
+
+    const paintPending = () => {
+        pendingRow.innerHTML = '';
+        pendingRow.hidden = pending.length === 0;
+        pending.forEach((item) => {
+            const chip = document.createElement('span');
+            chip.className = 'chat-q-pending-chip' + (item.mediaType === 'application/pdf' ? ' is-pdf' : '');
+            // The chip IS the "attached, not yet read" indicator; saying the
+            // same thing again in the status line below only cost a row.
+            chip.title = `${item.name} — read when you send`;
+            chip.appendChild(el('span', 'chat-q-pending-name', item.name));
+            const remove = document.createElement('button');
+            remove.type = 'button';
+            remove.className = 'chat-q-pending-remove';
+            remove.innerHTML = '&times;';
+            remove.title = 'Remove this attachment';
+            remove.onclick = () => {
+                pending = pending.filter((p) => p.id !== item.id);
+                paintPending();
+                setStatus('', null);
             };
-            reader.onerror = () => {
-                if (opts.attachBtn) opts.attachBtn.disabled = false;
-                setStatus('Could not read that file.', 'error');
-            };
-            reader.readAsDataURL(file);
+            chip.appendChild(remove);
+            pendingRow.appendChild(chip);
+        });
+    };
+
+    const stageMedia = (file, isPdf) => {
+        if (file.size > (isPdf ? _ATTACH_PDF_MAX : _ATTACH_IMAGE_MAX)) {
+            setStatus(isPdf ? 'That PDF is too large — attach just the relevant pages.'
+                            : 'That image is too large — crop it to just the table.', 'error');
             return;
         }
+        const reader = new FileReader();
+        reader.onload = () => {
+            const url = String(reader.result || '');
+            const comma = url.indexOf(',');
+            pending.push({
+                id: nextPendingId++,
+                name: file.name || 'pasted image',
+                mediaType: isPdf ? 'application/pdf' : file.type,
+                b64: comma >= 0 ? url.slice(comma + 1) : '',
+            });
+            paintPending();
+            setStatus('', null);
+        };
+        reader.onerror = () => setStatus('Could not read that file.', 'error');
+        reader.readAsDataURL(file);
+    };
+
+    // Drag-dropped PDFs sometimes arrive with an empty file.type, so the
+    // extension is checked too rather than letting them fall through to the
+    // text reader and land in the box as binary garbage.
+    const isPdfFile = (file) => (file.type || '').toLowerCase() === 'application/pdf'
+                             || /\.pdf$/i.test(file.name || '');
+
+    const takeFile = (file) => {
+        if (!file) return;
+        if (isPdfFile(file)) { stageMedia(file, true); return; }
+        if ((file.type || '').startsWith('image/')) { stageMedia(file, false); return; }
         if (file.size > _ATTACH_TEXT_MAX) {
             setStatus('That file is too big to attach to an answer — paste just the part that matters.', 'error');
             return;
@@ -2947,7 +3231,55 @@ function wireAttachments(opts) {
         zone.classList.remove('is-dropping');
         takeFile(e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files[0]);
     });
-    return {picker, takeFile};
+
+    // Called by the caller's own submit path right before the answer actually
+    // goes out — never on a timer, never speculatively. Transcribes every
+    // staged image/PDF in order (sequential, not parallel, so the inserted
+    // blocks land in the order they were attached) and inserts each as text,
+    // exactly like the old immediate-transcribe path did — just deferred to
+    // this one moment instead of firing the instant a file was picked. A
+    // failure here must stop the caller's submit, not send a message that
+    // silently lost an attachment, which is why this rejects instead of
+    // swallowing the error.
+    const resolvePending = () => {
+        if (!pending.length) return Promise.resolve();
+        const items = pending;
+        pending = [];
+        paintPending();
+        if (opts.attachBtn) opts.attachBtn.disabled = true;
+        setStatus(items.length > 1 ? `Reading ${items.length} attachments…` : `Reading ${items[0].name}…`, 'busy');
+        const hint = [opts.hint, input.value.trim()].filter(Boolean).join('\n').slice(0, 500);
+        return items.reduce((chain, item, idx) => chain.then(() =>
+            fetch(LV.url.learning_transcribe_attachment, {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({media_type: item.mediaType, data: item.b64, hint: hint}),
+            })
+                .then(r => r.json())
+                .then(d => {
+                    if (!d.success || !d.text) throw new Error(d.message || `Could not read ${item.name}.`);
+                    if (d.usage && d.usage.session) updateTokenBadge(d.usage.session);
+                    insertBlock(`Transcribed from ${item.name}:`, d.text);
+                })
+                .catch((err) => {
+                    // Re-stage what never made it into the box. The common
+                    // failure here is a transient one (proxy quota, dropped
+                    // connection), and losing the file to it would mean
+                    // finding and re-attaching it by hand to retry.
+                    pending = items.slice(idx).concat(pending);
+                    paintPending();
+                    throw err;
+                })
+        ), Promise.resolve())
+            .then(() => { setStatus('', null); })
+            .catch((e) => {
+                setStatus(e.message || 'Could not read an attachment.', 'error');
+                throw e;
+            })
+            .finally(() => { if (opts.attachBtn) opts.attachBtn.disabled = false; });
+    };
+
+    return {picker, pendingRow, takeFile, resolvePending, hasPending: () => pending.length > 0};
 }
 
 function buildAnswerBox(opts) {
@@ -2960,11 +3292,32 @@ function buildAnswerBox(opts) {
     // resize grip themselves — from then on their height wins.
     let autoHeight = 0;
     let manual = false;
+    const scrollerOf = () => box.closest('#chatBox, .modal-body, .decision-ledger-body');
+    // The chat is a fixed-height dock, so a flat 340px ceiling could leave a
+    // pasted answer taller than the panel — question scrolled off the top,
+    // Send button below the fold. The real ceiling is whatever is left of the
+    // visible area once the rest of the card has taken its share.
+    const ceiling = () => {
+        const scroller = scrollerOf();
+        if (!scroller || !scroller.clientHeight) return 340;
+        const card = box.closest('.chat-question-card') || box;
+        const others = Math.max(0, card.offsetHeight - input.offsetHeight);
+        return Math.max(62, Math.min(340, scroller.clientHeight - others - 24));
+    };
     const grow = () => {
         if (manual) return;
         input.style.height = 'auto';
-        autoHeight = Math.min(input.scrollHeight + 2, 340);
+        autoHeight = Math.min(input.scrollHeight + 2, ceiling());
         input.style.height = autoHeight + 'px';
+        keepActionsVisible();
+    };
+    // Typing near the ceiling still walks the action row towards the bottom
+    // edge; follow it rather than making the engineer scroll mid-sentence.
+    const keepActionsVisible = () => {
+        const scroller = scrollerOf();
+        if (!scroller) return;
+        const over = actions.getBoundingClientRect().bottom - scroller.getBoundingClientRect().bottom + 8;
+        if (over > 0) scroller.scrollTop += over;
     };
     if (window.ResizeObserver) {
         new ResizeObserver(() => {
@@ -2972,19 +3325,6 @@ function buildAnswerBox(opts) {
         }).observe(input);
     }
     input.addEventListener('input', grow);
-
-    const submit = () => {
-        const value = input.value.trim();
-        if (value) opts.onSubmit(value);
-    };
-    // Enter still sends, so a one-line answer is still a one-key answer;
-    // Shift+Enter is the newline a multi-line answer now actually needs.
-    input.addEventListener('keydown', (e) => {
-        if (e.key === 'Enter' && !e.shiftKey && !e.ctrlKey && !e.metaKey) {
-            e.preventDefault();
-            submit();
-        }
-    });
 
     const status = el('div', 'chat-q-attach-status');
     status.hidden = true;
@@ -2997,8 +3337,38 @@ function buildAnswerBox(opts) {
     const attachBtn = el('button', 'btn btn-sm btn-outline-secondary chat-q-attach');
     attachBtn.type = 'button';
     attachBtn.innerHTML = '<i class="fas fa-paperclip"></i>';
-    const {picker} = wireAttachments({
+    const attachments = wireAttachments({
         input, attachBtn, setStatus, grow, dropZone: box, hint: opts.hint,
+    });
+
+    // A staged image is read (one transcription call) at the moment of
+    // Send, not the moment it was attached — see wireAttachments'
+    // resolvePending. Disabling the input/buttons for that one round-trip
+    // is what stops Enter or a second click from firing a duplicate submit
+    // while it's in flight.
+    const submit = () => {
+        if (attachments.hasPending()) {
+            input.disabled = true;
+            sendBtn.disabled = true;
+            attachments.resolvePending()
+                .then(() => {
+                    const value = input.value.trim();
+                    if (value) opts.onSubmit(value);
+                })
+                .catch(() => {})   // resolvePending already surfaced the error via setStatus
+                .finally(() => { input.disabled = false; sendBtn.disabled = false; });
+            return;
+        }
+        const value = input.value.trim();
+        if (value) opts.onSubmit(value);
+    };
+    // Enter still sends, so a one-line answer is still a one-key answer;
+    // Shift+Enter is the newline a multi-line answer now actually needs.
+    input.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter' && !e.shiftKey && !e.ctrlKey && !e.metaKey) {
+            e.preventDefault();
+            submit();
+        }
     });
 
     const sendBtn = el('button', 'btn btn-sm btn-primary');
@@ -3018,9 +3388,10 @@ function buildAnswerBox(opts) {
     }
 
     box.appendChild(input);
+    box.appendChild(attachments.pendingRow);
     box.appendChild(actions);
     box.appendChild(status);
-    box.appendChild(picker);
+    box.appendChild(attachments.picker);
 
     // Used by the "Other…" option button and by the clickable RECOMMENDED
     // block, both of which have to open this box before they can write to it.
@@ -3464,8 +3835,6 @@ function renderClarifyCard(d) {
         : d.kind === 'omission' ? `💡 New knowledge about "${d.keyword}"`
                            : `🔍 About "${d.keyword}"`));
     card.appendChild(el('div', 'chat-q-text', q.question));
-    appendRecommendation(card, q);
-    if (d.captures) card.appendChild(el('div', 'clarify-captures', d.captures));
 
     const submit = (answer) => {
         if (d.kind === 'focus') {
@@ -3489,14 +3858,9 @@ function renderClarifyCard(d) {
     const skip = () => { deferDecision(d.decision_id); card.remove(); };
     const hasOptions = q.type === 'choice' && !!q.options && q.options.length > 0;
     const optsBox = el('div', 'chat-q-opts');
-    if (hasOptions) {
-        q.options.forEach(opt => {
-            const b = el('button', 'chat-q-opt', opt);
-            b.type = 'button';
-            b.onclick = () => submit(opt);
-            optsBox.appendChild(b);
-        });
-    }
+    const recommendedIsOption = hasOptions && renderOptionButtons(optsBox, q.options, q.recommended_answer, submit);
+    if (!recommendedIsOption) appendRecommendation(card, q);
+    if (d.captures) card.appendChild(el('div', 'clarify-captures', d.captures));
     attachAnswerBox(card, hasOptions, optsBox, buildAnswerBox({
         hint: q.question,
         onSubmit: submit,
@@ -3524,20 +3888,13 @@ function renderStepAskCard(seq, q, decisionId, questionNumber) {
     const ordinal = questionNumber > 1 ? ` · Follow-up ${questionNumber}` : '';
     card.appendChild(el('div', 'chat-q-progress', `❓ Step #${seq}${ordinal}`));
     card.appendChild(el('div', 'chat-q-text', q.question));
-    appendRecommendation(card, q);
 
     const answer = (text) => submitStepAnswer(seq, q.question, text, card, decisionId, true);
     const skip = () => { deferDecision(decisionId); card.remove(); };
     const hasOptions = q.type === 'choice' && !!q.options && q.options.length > 0;
     const optsBox = el('div', 'chat-q-opts');
-    if (hasOptions) {
-        q.options.forEach(opt => {
-            const b = el('button', 'chat-q-opt', opt);
-            b.type = 'button';
-            b.onclick = () => answer(opt);
-            optsBox.appendChild(b);
-        });
-    }
+    const recommendedIsOption = hasOptions && renderOptionButtons(optsBox, q.options, q.recommended_answer, answer);
+    if (!recommendedIsOption) appendRecommendation(card, q);
     attachAnswerBox(card, hasOptions, optsBox, buildAnswerBox({
         hint: q.question,
         onSubmit: answer,
@@ -3606,7 +3963,6 @@ function showNextQuestionCard(queue, doneCount, total) {
     qText.className = 'chat-q-text';
     qText.textContent = q.question;
     card.appendChild(qText);
-    appendRecommendation(card, q);
 
     const advance = () => showNextQuestionCard(queue, doneCount + 1, total);
     // forceTag 'all': these are clarification follow-ups, about the whole round —
@@ -3624,14 +3980,8 @@ function showNextQuestionCard(queue, doneCount, total) {
     };
     const hasOptions = q.type === 'choice' && !!q.options && q.options.length > 0;
     const optsBox = el('div', 'chat-q-opts');
-    if (hasOptions) {
-        q.options.forEach(opt => {
-            const b = el('button', 'chat-q-opt', opt);
-            b.type = 'button';
-            b.onclick = () => finish(opt);
-            optsBox.appendChild(b);
-        });
-    }
+    const recommendedIsOption = hasOptions && renderOptionButtons(optsBox, q.options, q.recommended_answer, finish);
+    if (!recommendedIsOption) appendRecommendation(card, q);
     attachAnswerBox(card, hasOptions, optsBox, buildAnswerBox({
         hint: q.question,
         onSubmit: finish,
@@ -3666,53 +4016,83 @@ let exportNotices = [];
 // the chat spans distinct knowledge domains.
 function exportSkill() {
     const btn = document.getElementById('exportSkillBtn');
-    // Guard FIRST, before the confirm() dialog even opens — a native
-    // confirm() blocks the page but a fast double-click still queues a
-    // second click event that fires the instant the dialog closes; checking
-    // disabled state up front (rather than only after the dialog) is what
-    // actually stops a second /learning/converge call from firing (which is
-    // exactly what produced the duplicate skill entries seen earlier). Also
-    // checks the GLOBAL lock so Export can't start while a baseline read, a chat
-    // send, or a step teach/ask is still in flight, and vice versa.
+    // Checks the GLOBAL lock so Export can't start while a baseline read, a
+    // chat send, or a step teach/ask is still in flight, and vice versa.
     if (btn.disabled || isBusy()) return;
 
-    // Unconditional, deliberately: this used to fire only in the old "grill"
-    // mode, so the DEFAULT mode exported with unresolved decisions and no
-    // warning whatsoever. Whether a question was asked at all is the
-    // interview mode's business; whether an ASKED question went unanswered
-    // is the export's business, and belongs here regardless of mode. Optional
-    // follow-ups opt out via blocking=false (see decision_ledger).
+    // Two separate concerns, one dialog. Asked-but-unanswered decisions are
+    // the export's business regardless of interview mode (optional follow-ups
+    // opt out via blocking=false, see decision_ledger); readiness/claims come
+    // from the last assessment. Splitting them across two stacked confirm()s
+    // meant the first was gone from the screen before the second could be
+    // weighed against it.
+    const sections = [];
     const blockingDecisions = (decisionLedger.items || []).filter(
         item => item.status === 'open' && item.blocking
     );
-    if (blockingDecisions.length &&
-        !confirm(
-            `${blockingDecisions.length} specification decision(s) are still unresolved:\n\n` +
-            blockingDecisions.map(item => `• ${item.question}`).join('\n') +
-            '\n\nExport anyway? They will stay visible in the Skill Spec review.'
-        )) {
-        return;
+    if (blockingDecisions.length) {
+        sections.push({
+            head: `Unresolved specification decisions (${blockingDecisions.length})`,
+            note: 'They stay visible in the Skill Spec review.',
+            items: blockingDecisions.map(item => item.question),
+        });
     }
-
     if (currentAssessment) {
         const score = (currentAssessment.readiness || {}).score;
         const flagged = (currentAssessment.validation || []).filter(v => v.status !== 'verified');
         const gaps = currentAssessment.gaps || [];
-        const warnings = [];
-        if (typeof score === 'number' && score < 60)
-            warnings.push(`• Readiness is only ${score}% — the skill may be thin.`);
-        if (flagged.length)
-            warnings.push(`• ${flagged.length} claim(s) are NOT verified from this log (will be exported as domain knowledge, not proven fact):\n` +
-                flagged.map(v => `    - ${v.claim}`).join('\n'));
-        if (gaps.length)
-            warnings.push(`• ${gaps.length} open item(s) still unanswered:\n` + gaps.map(g => `    - ${g}`).join('\n'));
-        if (warnings.length &&
-            !confirm("Export anyway?\n\n" + warnings.join('\n\n') +
-                     "\n\nYou can still edit everything in the next screen before saving.")) {
-            return;
+        if (typeof score === 'number' && score < 60) {
+            sections.push({head: `Readiness is only ${score}%`,
+                           note: 'The skill may be thin.', items: []});
+        }
+        if (flagged.length) {
+            sections.push({
+                head: `Claims not verified from this log (${flagged.length})`,
+                note: 'These export as domain knowledge, not proven fact.',
+                items: flagged.map(v => v.claim),
+            });
+        }
+        if (gaps.length) {
+            sections.push({head: `Open items still unanswered (${gaps.length})`,
+                           items: gaps});
         }
     }
-    if (btn.disabled || isBusy()) return; // re-check: a queued second click could have landed during confirm()
+    if (sections.length) { openExportGuard(sections); return; }
+    runExport();
+}
+
+// The one dialog that used to be two confirm()s. Non-blocking, so the
+// double-click race the old code had to guard against twice can't happen:
+// runExport re-checks the lock at the moment it actually fires.
+function openExportGuard(sections) {
+    const body = document.getElementById('exportGuardBody');
+    body.innerHTML = '';
+    sections.forEach(sec => {
+        body.appendChild(el('div', 'readiness-h', sec.head));
+        if (sec.note) body.appendChild(el('div', 'export-guard-sub', sec.note));
+        if (sec.items.length) {
+            const ul = el('ul', 'readiness-gaps');
+            sec.items.forEach(t => ul.appendChild(el('li', null, t)));
+            body.appendChild(ul);
+        }
+    });
+    const total = sections.reduce((n, s) => n + (s.items.length || 1), 0);
+    document.getElementById('exportGuardSubtitle').textContent =
+        `${total} thing${total > 1 ? 's' : ''} worth a second look before this becomes a skill`;
+    document.getElementById('exportGuardGo').onclick = () => {
+        closeExportGuard();
+        runExport();
+    };
+    document.getElementById('exportGuardModal').style.display = 'flex';
+}
+
+function closeExportGuard() {
+    document.getElementById('exportGuardModal').style.display = 'none';
+}
+
+function runExport() {
+    const btn = document.getElementById('exportSkillBtn');
+    if (btn.disabled || isBusy()) return;
     const label = btn.innerHTML;
     btn.disabled = true;
     setBusy(true);
@@ -3867,7 +4247,11 @@ function openNextDraft() {
                 openNextDraft();
                 return;
             }
-            applyAssessment(null); // server reset round_count/assessment on save
+            // Export clears the still-missing list server-side; the readiness
+            // score and the claim check survive it, so mirror that instead of
+            // blanking the badge until a reload puts it back.
+            applyAssessment(currentAssessment
+                ? Object.assign({}, currentAssessment, {gaps: []}) : null);
             document.getElementById('readinessPanel').style.display = 'none';
         },
     });
@@ -3930,13 +4314,16 @@ window.addEventListener('resize', function () { renderVisibleLogRows(true); });
 // The main chat box gets the same attach/paste/drop support the per-question
 // answer boxes have — a config table screenshotted out of a spec is just as
 // often taught as a free-form message as it is as an answer to a question.
+// The returned object is read by sendMsg() (see _mainChatAttachments above
+// it, near the top of the file) to resolve any staged image right before the
+// message actually goes out.
 (function wireMainChatAttachments() {
     const input = document.getElementById('chatInput');
     const attachBtn = document.getElementById('chatAttachBtn');
     const status = document.getElementById('chatAttachStatus');
     if (!input || !attachBtn || !status) return;
     const footer = input.closest('.card-footer') || input.parentElement;
-    const {picker} = wireAttachments({
+    _mainChatAttachments = wireAttachments({
         input,
         attachBtn,
         dropZone: footer,
@@ -3947,7 +4334,11 @@ window.addEventListener('resize', function () { renderVisibleLogRows(true); });
             status.hidden = !text;
         },
     });
-    footer.appendChild(picker);
+    footer.appendChild(_mainChatAttachments.picker);
+    // Chips go above the input row (with the status line), not inside
+    // .chat-input-group — that row is a fixed-height strip of controls
+    // (attach/textarea/tag/send), not a place for a wrapping list of chips.
+    status.insertAdjacentElement('beforebegin', _mainChatAttachments.pendingRow);
 })();
 // Scrolling up to re-read the Filtered Log while mid-sentence used to carry
 // whatever box the engineer was typing into off the bottom of the screen. Any

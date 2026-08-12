@@ -174,6 +174,12 @@ a.btn-primary {
   border-top: 1px solid var(--border);
   background: #fafbfc;
 }
+/* The "nothing is saved yet" reassurance belongs beside the buttons, where it
+   is read at the moment of deciding — in the old confirm() it was the last
+   line of a scrolling text blob and was simply never seen. */
+.export-guard-footer { justify-content: space-between; align-items: center; flex-wrap: wrap; }
+.export-guard-note { flex: 1 1 200px; font-size: 0.7rem; color: var(--text-muted); }
+.export-guard-sub { margin: -2px 0 6px; font-size: 0.72rem; color: var(--text-muted); }
 
 .desc-strength { height: 5px; border-radius: 3px; background: var(--border); overflow: hidden; }
 .desc-strength-bar { height: 100%; width: 0; transition: width 0.2s ease, background 0.2s ease; background: var(--bad); }
@@ -1051,6 +1057,17 @@ a.btn-primary {
   .tat-filter-card .tat-filter-table { flex: 1 1 auto; display: flex; flex-direction: column; min-height: 0; }
   .tat-filter-card #filterList { flex: 1 1 auto; max-height: none; }
   .workbench-col .session-menu { flex: 0 0 auto; }
+  /* Chat/Steps' own columns (.chat-panel-joined / .step-panel-joined) need a
+     DEFINITE height here, not just .workbench-panel's height:100%. A
+     percentage only resolves against a parent that itself has a definite
+     size — the column div has none of its own, so "100%" silently became
+     "auto" and the card grew to fit whatever landed in the chat (a long
+     pasted answer, a huge model response), dragging the whole row, and the
+     page, taller with it. Giving the COLUMN the same explicit height
+     .workbench-col already has is what makes 100% underneath it mean
+     something, and is what makes long messages scroll inside the card
+     instead of pushing past it. */
+  .chat-panel-joined, .step-panel-joined { height: var(--workbench-panel-h); }
   .workbench-panel { height: 100%; }
 }
 
@@ -1310,7 +1327,7 @@ a.btn-primary {
    transcript as a compact note instead of living in a panel above it. */
 .case-intake-card { border-left: 3px solid var(--primary); }
 .case-intake-input {
-  margin: 6px 0 8px; font-size: 0.78rem; resize: vertical;
+  margin: 6px 0 8px; font-size: 0.78rem; resize: none;
 }
 .case-intake-docs {
   display: flex; align-items: center; flex-wrap: wrap; gap: 8px; margin-bottom: 8px;
@@ -1319,7 +1336,15 @@ a.btn-primary {
 .case-intake-docs .btn.has-docs {
   border-color: #abd1bd; background: #f0f9f4; color: #36714f; font-weight: 650;
 }
-.case-intake-hint { color: #8a96a2; font-size: 0.64rem; }
+/* The hint is the least important thing in this row, so it's the thing that
+   gives way: it truncates rather than pushing staged-attachment chips onto a
+   line of their own. */
+.case-intake-hint {
+  flex: 1 1 120px; min-width: 0;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  color: #8a96a2; font-size: 0.64rem;
+}
+.case-intake-docs .chat-q-pending-row { margin: 0; flex: 0 1 auto; }
 
 .case-context-note {
   padding: 7px 9px; border: 1px solid #dbe6ee; border-radius: 8px;
@@ -1434,6 +1459,32 @@ a.btn-primary {
 .session-menu .readiness-badge.is-low,
 .session-menu .readiness-badge.is-mid,
 .session-menu .readiness-badge.is-high { background: transparent; }
+/* Readiness + decision ledger, merged into one pill in the Chat header.
+   Same two-column pattern as .session-menu. The popover is right-aligned:
+   the pill sits near the card's right edge, so a left-anchored one would
+   hang off it. */
+.chat-status-pill {
+  position: relative;
+  display: inline-flex; align-items: stretch;
+  border: 1px solid var(--border); border-radius: 999px;
+  background: var(--bg-soft);
+  padding: 2px;
+}
+.chat-status-col {
+  display: inline-flex; align-items: center; gap: 2px;
+  border: none; background: transparent;
+  padding: 2px 7px; border-radius: 999px;
+  color: var(--text-muted);
+  cursor: pointer;
+}
+.chat-status-col:hover { background: rgba(0, 0, 0, 0.05); }
+.chat-status-pill .readiness-badge { border: none; background: transparent; padding: 0 1px; }
+.chat-status-pill .readiness-panel { left: auto; right: 0; }
+/* The header actions win the space fight — truncating "Set baseline" is
+   recoverable, silently clipping Clear and Export skill off the card is not. */
+.chat-header-actions { flex: 0 0 auto; }
+.chat-header-primary > .skill-doc-picker,
+.chat-header-primary > #baselineBtn { min-width: 0; overflow: hidden; }
 .session-menu-chevron {
   color: var(--text-muted);
   font-size: 0.58rem;
@@ -1484,24 +1535,6 @@ a.btn-primary {
 .spend-total .spend-line-label,
 .spend-total .spend-line-usd { font-weight: 700; color: #146c2e; }
 .spend-sub { color: var(--text-muted); font-size: 0.64rem; margin-top: 4px; }
-
-/* Detail button inside the Readiness popover — opens the fuller gaps /
-   claim-check list in the Readiness detail popup. */
-.readiness-detail-btn {
-  margin-top: 8px;
-  width: 100%;
-  border: 1px solid var(--border);
-  background: var(--bg-soft);
-  color: #444;
-  border-radius: 6px;
-  padding: 4px 8px;
-  font-size: 0.66rem;
-  font-weight: 700;
-  text-transform: uppercase;
-  letter-spacing: 0.03em;
-  cursor: pointer;
-}
-.readiness-detail-btn:hover { background: #eef2f7; border-color: var(--primary-light); }
 
 /* Export Skill, shrunk from a full-width green bar into a compact pill in
    the chat header — same green "success" family as Readiness's high-score
@@ -2335,6 +2368,9 @@ textarea.chat-main-input {
 }
 .chat-q-progress { font-size: 0.68rem; color: var(--text-muted); font-weight: 600; text-transform: uppercase; letter-spacing: 0.03em; margin-bottom: 3px; }
 .chat-q-text { font-size: 0.82rem; font-weight: 600; margin-bottom: 8px; }
+/* A gap/claim can be a long sentence; inside the fixed-height chat dock it
+   would otherwise push its own answer box out of the visible area. */
+#gapAnswerCard .chat-q-text { max-height: 5.5em; overflow-y: auto; }
 /* Left-aligned bordered rows, stacked — not the previous horizontally-wrapped
    centered pill/bubble buttons, which read as messy and didn't align. */
 .chat-q-opts { display: flex; flex-direction: column; gap: 6px; margin-bottom: 6px; }
@@ -2356,6 +2392,33 @@ textarea.chat-main-input {
 .chat-q-opt-other { border-style: dashed; color: var(--text-muted); font-style: italic; }
 .chat-q-opt-other:hover { color: var(--primary-dark); }
 .chat-q-opt-other:hover { background: var(--bg-soft); }
+/* The model's recommended answer, when it's literally one of the options,
+   used to ALSO get its own "Recommended" block above the list — the engineer
+   read the sentence twice, once as inert text and once as the button they
+   actually had to click. This folds the two into one clickable row: same
+   blue treatment as the old standalone block (see .question-recommendation),
+   now on the button itself. Stays block (not flex) so the option's own text
+   still starts at the exact same left edge every other option's does — the
+   badge is its own line ABOVE the sentence, not inline in front of it, which
+   is what threw every other button's text out of alignment with this one's. */
+.chat-q-opt.is-recommended {
+  border-color: #a9bdf0;
+  background: #f2f6ff;
+}
+.chat-q-opt.is-recommended:hover { border-color: #315fc6; background: #eaf0ff; }
+.chat-q-opt-badge {
+  display: block;
+  width: fit-content;
+  margin-bottom: 4px;
+  padding: 2px 6px;
+  border-radius: 999px;
+  background: #315fc6;
+  color: #fff;
+  font-size: 0.6rem;
+  font-weight: 800;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
 /* The answer box (buildAnswerBox) stacks: textarea, then the action row, then
    the attachment status line. It was a single-line input laid out sideways,
    which could not hold the thing engineers most often need to answer with —
@@ -2387,6 +2450,133 @@ textarea.chat-main-input {
 .chat-q-attach-status.is-warn { color: #9a6700; }
 .chat-q-attach-status.is-ok { color: #1a7f4b; }
 .chat-q-attach-status[hidden] { display: none; }
+/* Above the chat input row, this line needs its own breathing room; inside a
+   question card the following element already supplies it. */
+.card-footer > .chat-q-attach-status { margin-bottom: 4px; }
+
+/* Open items strip (renderOpenItems) — the "still missing" list, directly
+   under the Chat header. Only the one-line header takes layout space; the
+   list opens downward as an overlay over the transcript. The chat card is a
+   fixed height (--workbench-panel-h), so anything that grows in the flow
+   steals room from something else — when this lived in the footer, a 7-item
+   list pushed the input box clean out of the card. */
+.open-items-strip {
+  position: relative;
+  z-index: 15;
+  margin: 4px 6px 0;
+  border: 1px solid #f0d9a8;
+  border-radius: 8px;
+  background: #fffaf0;
+}
+.open-items-strip[hidden] { display: none; }
+.open-items-head {
+  display: flex; align-items: center; gap: 4px;
+  padding: 3px 6px;
+  user-select: none;
+}
+.open-items-tab {
+  display: inline-flex; align-items: center; gap: 5px;
+  border: 0; border-radius: 6px;
+  background: transparent;
+  padding: 2px 6px;
+  cursor: pointer;
+}
+.open-items-tab:hover { background: #f6ecd8; }
+.open-items-caret { color: #a97c2a; font-size: 0.7rem; }
+.open-items-title { font-size: 0.7rem; font-weight: 650; color: #8a6116; }
+.open-items-tab.is-warn .open-items-caret,
+.open-items-tab.is-warn .open-items-title { color: #b02a37; }
+.open-items-delta {
+  margin-left: auto;
+  font-size: 0.64rem; color: #1a7f4b;
+}
+.open-items-list {
+  position: absolute;
+  top: calc(100% + 4px); left: 0; right: 0;
+  z-index: 20;
+  max-height: 40vh;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding: 6px;
+  display: flex; flex-direction: column; gap: 3px;
+  border: 1px solid #f0d9a8;
+  border-radius: 8px;
+  background: #fffaf0;
+  box-shadow: 0 8px 20px rgba(0, 0, 0, 0.16);
+}
+.open-items-item { display: flex; align-items: flex-start; gap: 4px; }
+.open-items-row {
+  flex: 1 1 auto; min-width: 0;
+  padding: 4px 6px;
+  border: 0; border-radius: 5px;
+  background: transparent;
+  font-size: 0.7rem; line-height: 1.35; color: var(--text-main);
+  text-align: left;
+  cursor: pointer;
+}
+.open-items-row:hover { background: #f6ecd8; }
+.open-items-skip {
+  flex: 0 0 auto;
+  margin-top: 2px;
+  padding: 1px 6px;
+  border: 0; border-radius: 5px;
+  background: transparent;
+  font-size: 0.62rem; color: var(--text-muted);
+  cursor: pointer;
+}
+.open-items-skip:hover { background: #efe2c9; color: #8a6116; }
+/* A staged image (attached but not yet read — see wireAttachments'
+   resolvePending) shows as a removable chip here, between the textarea and
+   the action row. Nothing about the image itself is known yet beyond its
+   name, so the chip is deliberately plain — the moment it says something
+   meatier ("a table", "3 rows") it would be implying a read that hasn't
+   happened. */
+.chat-q-pending-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 2px 0 6px;
+}
+.chat-q-pending-row[hidden] { display: none; }
+.chat-q-pending-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  max-width: 220px;
+  padding: 3px 4px 3px 8px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--bg-soft);
+  font-size: 0.68rem;
+  color: var(--text-main);
+}
+.chat-q-pending-chip::before {
+  content: '\f03e';                 /* fa-image, without pulling in an <i> per chip */
+  font-family: 'Font Awesome 6 Free';
+  font-weight: 900;
+  color: var(--text-muted);
+  font-size: 0.7em;
+}
+.chat-q-pending-chip.is-pdf::before { content: '\f1c1'; }   /* fa-file-pdf */
+.chat-q-pending-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.chat-q-pending-remove {
+  flex: 0 0 auto;
+  width: 16px;
+  height: 16px;
+  line-height: 14px;
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
+  background: transparent;
+  color: var(--text-muted);
+  font-size: 0.9rem;
+  cursor: pointer;
+}
+.chat-q-pending-remove:hover { background: #e2e6ea; color: var(--text-main); }
 
 /* Log Round nudge card (see checkRoundNudge/renderRoundNudge) — appears
    automatically in chat when there are filter edits since the last logged

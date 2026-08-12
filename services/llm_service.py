@@ -176,40 +176,53 @@ class LLM_helper:
         self._record_usage(getattr(response, "usage", None))
         return response.choices[0].message.content or ""
 
-    def transcribe_image(self, media_type: str, b64_data: str, hint: str = "") -> str:
-        """One-shot: read a pasted/attached screenshot and return its content
-        as plain text (markdown table for tabular images).
+    def transcribe_attachment(self, media_type: str, b64_data: str, hint: str = "") -> str:
+        """One-shot: read a pasted/attached screenshot or PDF and return its
+        content as plain text (markdown table for tabular content).
 
         This is the ONLY multimodal call in the app, and deliberately so. An
         engineer's evidence is often a config table screenshotted out of a
-        spec, which they were otherwise re-typing by hand before it could be
-        taught. Everything downstream of an answer — chat history, an
-        operation's `reason`, the exported expert_rules — is a plain string,
-        so the image is turned into text HERE, at the edge, and the result is
-        put back in the answer box for the engineer to correct before it is
-        submitted. Nothing further down ever has to know an image existed.
+        spec — or the spec page itself as a PDF — which they were otherwise
+        re-typing by hand before it could be taught. Everything downstream of
+        an answer — chat history, an operation's `reason`, the exported
+        expert_rules — is a plain string, so the attachment is turned into
+        text HERE, at the edge. Nothing further down ever has to know a
+        non-text payload existed.
+
+        PDFs only work on the Anthropic path: its Messages API takes a native
+        `document` block and reads the page's text AND its visual content
+        (charts, scanned handwriting). The OpenAI-compatible chat-completions
+        path has no equivalent inline block, so it is refused loudly rather
+        than silently sent as something the endpoint will ignore.
         """
         if not self.is_ready:
             raise RuntimeError("LLM_helper is not configured (no key.py found — see README.md).")
+        is_pdf = media_type == "application/pdf"
         if isinstance(self.client, AnthropicOpenAIAdapter):
-            image_block = {
-                "type": "image",
+            media_block = {
+                "type": "document" if is_pdf else "image",
                 "source": {"type": "base64", "media_type": media_type, "data": b64_data},
             }
+        elif is_pdf:
+            raise RuntimeError(
+                f"PDF attachments need a Claude model; the configured model is {self.model}. "
+                "Attach a screenshot of the page instead."
+            )
         else:
-            image_block = {
+            media_block = {
                 "type": "image_url",
                 "image_url": {"url": f"data:{media_type};base64,{b64_data}"},
             }
-        ask = ("Transcribe this image into plain text I can paste into a rules "
+        noun = "document" if is_pdf else "image"
+        ask = (f"Transcribe this {noun} into plain text I can paste into a rules "
                "document. If it is a table, output a GitHub-style markdown table "
                "and keep every row — do not summarise, truncate, or add a row that "
                "is not visible. If a cell is unreadable, write [?] rather than "
                "guessing. Output only the transcription, no commentary.")
         if hint.strip():
-            ask += f"\n\nContext for what this image shows: {hint.strip()}"
+            ask += f"\n\nContext for what this {noun} shows: {hint.strip()}"
         return self.chat(
-            [{"role": "user", "content": [image_block, {"type": "text", "text": ask}]}],
+            [{"role": "user", "content": [media_block, {"type": "text", "text": ask}]}],
             temperature=0.0,
             max_tokens=4000,
         )

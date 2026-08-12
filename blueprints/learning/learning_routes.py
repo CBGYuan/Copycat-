@@ -1,3 +1,5 @@
+import re
+
 from flask import Blueprint, request, jsonify
 
 from configs import set_up_app
@@ -75,16 +77,119 @@ def _store_assessment(state, result: dict) -> None:
     that back the live badge + details panel."""
     state.last_readiness = result.get("readiness") or {}
     state.last_coverage = result.get("coverage") or {}
-    state.last_gaps = result.get("gaps") or []
+    incoming = result.get("gaps") or []
+    previous = state.last_gaps or []
+    # One new question per round. The model re-derives its list from the whole
+    # conversation every time, so answering one thing routinely produced three
+    # replacements — the list never got shorter and stopped being read at all.
+    # Whatever doesn't make the cut is not lost: it is still missing, so the
+    # next assessment lists it again, and the model's own ranking (most
+    # blocking first) decides which one gets the slot.
+    if previous:
+        carried = [g for g in incoming if any(_same_question(g, p) for p in previous)]
+        fresh = [g for g in incoming if g not in carried]
+        state.last_gaps = carried + fresh[:1]
+    else:
+        state.last_gaps = incoming
     state.last_validation = result.get("validation") or []
 
 
+# A gap is "the same question" as an earlier one well below verbatim: the
+# model rewords its own list every round ("which AP" / "which AP was
+# blacklisted"), and exact matching turned every rewording into a brand-new
+# item the engineer had already dealt with.
+_GAP_SAME_RATIO = 0.82
+_GAP_CONTAINS_MIN = 12      # below this a substring hit is coincidence, not a repeat
+# What two gaps are ARGUING about: log keywords (ROAM_DECISION_SM), numbers
+# (a threshold, a channel), acronyms. "why was ROAM_A excluded" and "why was
+# ROAM_B excluded" read as 95% identical to any string metric while being
+# entirely different questions, so a mismatch here vetoes the fuzzy match.
+_SIGNAL_RE = re.compile(r"[A-Za-z][A-Za-z0-9]*_[A-Za-z0-9_]*|\b[A-Z]{3,}\b|\b\d+(?:\.\d+)?\b")
+
+
+def _signal_tokens(text: str) -> set:
+    return {t.casefold() for t in _SIGNAL_RE.findall(text or "")}
+
+
+_WORD_RE = re.compile(r"[A-Za-z0-9_]+")
+_STOPWORDS = {
+    "the", "and", "are", "was", "were", "for", "that", "this", "which", "what", "why",
+    "how", "does", "did", "been", "with", "from", "not", "any", "all", "its", "their",
+    "there", "here", "you", "your", "they", "has", "have", "had", "can", "should",
+    "would", "about", "into", "only", "one", "when", "where", "who", "whether",
+}
+
+
+def _content_tokens(text: str) -> set:
+    return {t for t in (w.casefold() for w in _WORD_RE.findall(text or ""))
+            if len(t) > 2 and t not in _STOPWORDS}
+
+
+def _same_topic(gap: str, question: str) -> bool:
+    """Looser than _same_question, and only used against questions the chat is
+    already asking: the interview rarely echoes the gap's wording, but asking
+    the same thing in its own words is still the same piece of work."""
+    if _same_question(gap, question):
+        return True
+    g, q = _content_tokens(gap), _content_tokens(question)
+    if not g or not q:
+        return False
+    # Containment, not Jaccard: a one-line gap against a three-line question is
+    # a subset, and dividing by the union would score it as unrelated.
+    overlap = len(g & q) / min(len(g), len(q))
+    shares_symbol = bool(_signal_tokens(gap) & _signal_tokens(question))
+    return overlap >= 0.6 or (shares_symbol and overlap >= 0.4)
+
+
+def _same_question(a: str, b: str) -> bool:
+    na, nb = skill_dedup.normalize(a), skill_dedup.normalize(b)
+    if not na or not nb:
+        return False
+    if na == nb:
+        return True
+    # Erring towards asking again: a question wrongly shown is a second of the
+    # engineer's time, a question wrongly swallowed is knowledge never captured.
+    if _signal_tokens(a) != _signal_tokens(b):
+        return False
+    short, long = (na, nb) if len(na) <= len(nb) else (nb, na)
+    if len(short) >= _GAP_CONTAINS_MIN and short in long:
+        return True
+    return skill_dedup.ratio(na, nb) >= _GAP_SAME_RATIO
+
+
+def open_gaps(state) -> list:
+    """The still-missing items worth showing: the model's list minus everything
+    already dealt with. Public because the workbench page seeds its first
+    render from it directly — a second, slightly different filter in the
+    template is how a gap closed before a reload came back after one.
+
+    Dropped: what the engineer answered or skipped, and anything the chat
+    itself is already asking (the decision ledger). The interview is the
+    teaching channel; a gap that restates an open question asks the same thing
+    twice in two places, and that duplication is what makes the strip read as
+    noise rather than as a real to-do list.
+    """
+    closed = list(getattr(state, "skipped_gaps", []) or [])
+    closed += list(getattr(state, "answered_gaps", []) or [])
+    asked = [item.get("question") or "" for item in (getattr(state, "decision_ledger", []) or [])]
+    return [g for g in (state.last_gaps or [])
+            if not any(_same_question(g, c) for c in closed)
+            and not any(_same_topic(g, q) for q in asked)]
+
+
 def _assessment_payload(state) -> dict:
-    """The assessment shape the frontend consumes (badge + panel + export gate)."""
+    """The assessment shape the frontend consumes (badge + panel + export gate).
+
+    Gaps are filtered HERE, once, so every consumer agrees: the strip above the
+    chat and the Export gate both stop counting an item that has had its turn.
+    The readiness SCORE is left alone — it is the model's own judgement of the
+    teaching, and quietly inflating it because someone dismissed a question
+    would make the number mean nothing.
+    """
     return {
         "readiness": state.last_readiness,
         "coverage": state.last_coverage,
-        "gaps": state.last_gaps,
+        "gaps": open_gaps(state),
         "validation": state.last_validation,
     }
 
@@ -687,40 +792,57 @@ def clarify():
 # mis-drop of a whole log or a photo can't push a multi-hundred-MB body
 # through the session-bound dev server.
 _MAX_ATTACHMENT_B64 = 7_000_000
+# A spec page carries far less pixel data per useful row than a screenshot,
+# but a real datasheet PDF is still bigger than any screenshot — hence the
+# separate, larger ceiling rather than one number tuned for neither.
+_MAX_PDF_B64 = 14_000_000
 _IMAGE_MEDIA_TYPES = {"image/png", "image/jpeg", "image/gif", "image/webp"}
+_PDF_MEDIA_TYPE = "application/pdf"
 
 
 @learning_bp.route("/transcribe_attachment", methods=["POST"])
 def transcribe_attachment():
-    """Turn an attached screenshot into text the answer box can hold.
+    """Turn an attached screenshot or PDF into text the answer box can hold.
 
     Answers are typed, not spoken to a model directly — so an image has to
-    become text somewhere. It happens here, before the answer is submitted,
-    and the transcription is handed BACK to the engineer to check and edit
-    rather than being sent onward. That ordering is the whole point: OCR of a
+    become text somewhere. It happens here, right as the answer is submitted,
+    and the transcription is inserted into the outgoing message. OCR of a
     config table is exactly the kind of thing that is 95% right and silently
-    wrong in one cell, and a wrong cell taught as an expert rule is worse
-    than no rule at all.
+    wrong in one cell, so the transcription is left visible in the sent
+    message rather than consumed invisibly — a wrong cell taught as an expert
+    rule is worse than no rule at all, and it has to stay reviewable.
     """
     data = request.get_json(silent=True) or {}
     media_type = (data.get("media_type") or "").strip().lower()
     b64_data = data.get("data") or ""
-    if media_type not in _IMAGE_MEDIA_TYPES:
+    is_pdf = media_type == _PDF_MEDIA_TYPE
+    if not is_pdf and media_type not in _IMAGE_MEDIA_TYPES:
         return jsonify({"success": False,
-                        "message": f"Unsupported image type: {media_type or 'unknown'}"}), 400
+                        "message": f"Unsupported attachment type: {media_type or 'unknown'}"}), 400
     if not b64_data:
         return jsonify({"success": False, "message": "Empty attachment"}), 400
-    if len(b64_data) > _MAX_ATTACHMENT_B64:
+    if len(b64_data) > (_MAX_PDF_B64 if is_pdf else _MAX_ATTACHMENT_B64):
         return jsonify({"success": False,
-                        "message": "Image is too large — crop it to just the table."}), 413
+                        "message": "That PDF is too large — attach just the relevant pages."
+                                   if is_pdf else
+                                   "Image is too large — crop it to just the table."}), 413
 
     llm_helper = app_config.llm_helper
     if not llm_helper or not llm_helper.is_ready:
         return jsonify({"success": False, "message": "LLM is not configured yet."}), 503
     try:
-        text = llm_helper.transcribe_image(media_type, b64_data, data.get("hint") or "")
+        text = llm_helper.transcribe_attachment(media_type, b64_data, data.get("hint") or "")
     except Exception as exc:                      # noqa: BLE001 - surfaced to the card
-        return jsonify({"success": False, "message": f"Transcription failed: {exc}"}), 502
+        detail = str(exc)
+        # The proxy's 429 arrives as a whole nested error dict on one line; the
+        # part that matters (a spend cap, not a bug in the attachment) is
+        # buried in it, and the engineer's next move is different too — wait,
+        # don't re-crop the image.
+        if "rate_limit" in detail or "429" in detail:
+            return jsonify({"success": False,
+                            "message": "LLM quota reached — your attachment is still "
+                                       "staged, send again once the limit resets."}), 429
+        return jsonify({"success": False, "message": f"Transcription failed: {detail}"}), 502
     return jsonify({
         "success": True,
         "text": text.strip(),
@@ -803,6 +925,24 @@ def defer_decision():
     if not item:
         return jsonify({"success": False, "message": "Unknown decision"}), 404
     return jsonify({"success": True, "decision_ledger": decision_ledger.payload(state)})
+
+
+@learning_bp.route("/gap/skip", methods=["POST"])
+def skip_gap():
+    """Close one 'still missing' item so it stops being listed and stops
+    warning at Export. Both kinds are permanent — answered is answered, and a
+    skip is a human judgement that it doesn't apply here. The two buckets stay
+    separate because only one of them means the knowledge was actually given.
+    A re-worded gap is a different string and will still surface."""
+    data = request.get_json(silent=True) or {}
+    gap = (data.get("gap") or "").strip()
+    if not gap:
+        return jsonify({"success": False, "message": "Empty gap"}), 400
+    state = session_store.get_state()
+    bucket = state.answered_gaps if data.get("answered") else state.skipped_gaps
+    if gap not in bucket:
+        bucket.append(gap)
+    return jsonify({"success": True, "assessment": _assessment_payload(state)})
 
 
 @learning_bp.route("/decision/resolve", methods=["POST"])
@@ -1475,8 +1615,16 @@ def save():
     state.skill_draft = []
     state.learning_questions = []
     state.learning_answers = []
+    # The still-missing list belongs to the skill that was just exported: its
+    # items, and the record of which ones were answered or skipped, would
+    # otherwise carry into the next skill taught in this same session — both as
+    # leftover warnings at the next Export and as questions silently suppressed
+    # for a draft they were never asked about.
+    state.last_gaps = []
+    state.skipped_gaps = []
+    state.answered_gaps = []
     # round_count / prior_knowledge / last_readiness / last_coverage /
-    # last_gaps / last_validation / operations / prev_survivors are
+    # last_validation / operations / prev_survivors are
     # deliberately NOT reset here anymore — an engineer often exports
     # several rounds from the SAME ongoing log session, and wiping the
     # readiness state on every single Save made it look like teaching

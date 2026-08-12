@@ -26,6 +26,13 @@
           </div>
           <button type="button" class="btn-browse" onclick="pickLog()" title="Browse for file">📁</button>
         </div>
+        <!-- Collapses back to the chip without picking a new file — the chip
+             click that opened this row is the only affordance to CHANGE the
+             log, but there was no way to just close it again once open. -->
+        <button type="button" id="logBarCollapseBtn" class="btn-browse" hidden
+                onclick="setLogBarCollapsed(true)" title="Collapse">
+          <i class="fas fa-chevron-up"></i>
+        </button>
         <span id="logStatus" class="path-status path-status-inline"></span>
         {% if not llm_ready %}
         <!-- A temporary connection state, not a page-level warning. Keep it
@@ -79,6 +86,10 @@
               <button type="button" class="path-input-copy" onclick="copyPath('evtPathInput', this)" title="Copy event log path" aria-label="Copy event log path">📋</button>
             </div>
             <button type="button" class="btn-browse" onclick="pickEventLog()" title="Choose a System Event Log (.evtx/.evt) manually">📁</button>
+            <button type="button" id="evtPathCollapseBtn" class="btn-browse" hidden
+                    onclick="setEvtPathCollapsed(true)" title="Collapse">
+              <i class="fas fa-chevron-up"></i>
+            </button>
           </div>
         </div>
         <div id="evtPanel" class="evt-panel" style="display:none;">
@@ -288,52 +299,44 @@
       </div>
     </div>
 
-    <!-- Session menu — two clickable columns, bottom-left under TAT Filter:
-         Spending (USD cost this session) and Readiness (score %). Each
-         column opens its own popover anchored right here. Readiness's popover
-         shows only the coverage bars + a Detail button that pops the fuller
-         gaps / claim-check list out separately. -->
+    <!-- Session menu — Spending (USD cost this session), bottom-left under TAT
+         Filter. Readiness used to be a second column here; it now lives in the
+         Chat header next to the decision-ledger icon, because that is where
+         everything it reports on (the conversation, the open items, Export)
+         already is — a score for the chat, parked under a different panel,
+         read as decoration. -->
     <div class="session-menu mt-2">
-      <!-- Column 1: Spending — badge shows the USD total only; the popover
-           breaks that down into tokens and the conversion formula. -->
+      <!-- Spending — badge shows the USD total only; the popover breaks that
+           down into tokens and the conversion formula. -->
       <button type="button" class="session-col" id="spendCol" onclick="toggleSpendPanel(event)"
               title="This session's US-dollar cost (input/output priced separately). Click to expand.">
         <span id="tokenBadge" class="token-badge">🪙 $0.0000</span>
         <i class="fas fa-chevron-down session-menu-chevron"></i>
       </button>
-      <!-- Spending popover: USD total broken into input/output token counts
-           and their conversion formula. Refreshed on every updateTokenBadge(). -->
       <div id="spendPanel" class="session-popover" style="display:none;"></div>
-
-      <div class="session-col-sep"></div>
-
-      <!-- Column 2: Readiness -->
-      <button type="button" class="session-col" id="readinessCol" onclick="toggleReadinessPanel(event)"
-              title="Readiness updates after every answer — click for the coverage bars; the Detail button inside opens the full gaps / claim-check list.">
-        <span id="readinessBadge" class="readiness-badge">🎯 Readiness —</span>
-        <i class="fas fa-chevron-down session-menu-chevron"></i>
-      </button>
-      <!-- Readiness popover: coverage bars per goal + a Detail button.
-           Refreshed after every chat answer (see refreshAssessment()). -->
-      <div id="readinessPanel" class="readiness-panel" style="display:none;"></div>
     </div>
   </div>
 
-  <!-- Readiness Detail popup — the fuller "still missing" gaps + claim-by-claim
-       verified/asserted check, moved out of the compact Readiness popover
-       behind its Detail button so the popover itself stays short. -->
-  <div class="skill-modal-overlay" id="readinessDetailModal">
-    <div class="skill-modal-card" style="width:min(520px,100%);">
+  <!-- Export guard — replaces two stacked native confirm() dialogs. Those
+       rendered every list as hyphens in an unstyleable OS box, and Chrome
+       adds a "prevent further dialogs" checkbox to the SECOND one in a row:
+       ticking it made Export fail silently forever. One dialog, real
+       structure, and the "you can still edit this later" reassurance stays
+       visible instead of scrolling out of a fixed-height text blob. -->
+  <div class="skill-modal-overlay" id="exportGuardModal">
+    <div class="skill-modal-card" style="width:min(600px,100%);">
       <div class="skill-modal-header">
         <div class="skill-modal-heading">
-          <h5 class="mb-0"><i class="fas fa-clipboard-check"></i> Readiness detail</h5>
-          <div class="skill-modal-subtitle" id="rdmSubtitle"></div>
+          <h5 class="mb-0"><i class="fas fa-triangle-exclamation"></i> Export anyway?</h5>
+          <div class="skill-modal-subtitle" id="exportGuardSubtitle"></div>
         </div>
-        <button type="button" class="skill-modal-close" onclick="closeReadinessDetail()">&times;</button>
+        <button type="button" class="skill-modal-close" onclick="closeExportGuard()">&times;</button>
       </div>
-      <div class="skill-modal-body" id="rdmBody"></div>
-      <div class="skill-modal-footer">
-        <button type="button" class="btn btn-outline-secondary" onclick="closeReadinessDetail()">Close</button>
+      <div class="skill-modal-body" id="exportGuardBody"></div>
+      <div class="skill-modal-footer export-guard-footer">
+        <span class="export-guard-note">Nothing is saved yet — you can edit everything in the next screen.</span>
+        <button type="button" class="btn btn-outline-secondary" onclick="closeExportGuard()">Go back</button>
+        <button type="button" class="btn btn-primary" id="exportGuardGo">Export anyway</button>
       </div>
     </div>
   </div>
@@ -353,12 +356,12 @@
           <button type="button" id="skillDocPickerToggle" class="btn btn-sm skill-doc-picker-toggle"
                   onclick="toggleSkillDocPicker()" aria-expanded="false"
                   title="Choose the existing skill documents Copycat may use as prior knowledge">
-            <i class="fas fa-book"></i> Load skills <span id="skillDocCount" class="skill-doc-count">0</span>
+            <i class="fas fa-book"></i> Load skills
             <i class="fas fa-chevron-down"></i>
           </button>
           <div id="skillDocPickerMenu" class="skill-doc-picker-menu" hidden>
             <div class="skill-doc-picker-head">
-              <div><b>Skill documents</b><small>Choose only what is relevant to this case.</small></div>
+              <div><b>Skill documents</b><small><span id="skillDocCount">0</span> selected — choose only what is relevant to this case.</small></div>
               <button type="button" onclick="clearSelectedSkillDocs()">Clear</button>
             </div>
             <div id="skillDocPickerList" class="skill-doc-picker-list"></div>
@@ -380,12 +383,24 @@
                 onclick="requestBaseline()">
           <i class="fas fa-flag-checkered"></i> <span id="baselineBtnLabel">Set baseline</span>
         </button>
-        <div class="d-flex align-items-center gap-2 ms-auto">
-          <!-- Decision ledger, formerly a labelled button inside the collapsible
-               Context row. That row is gone (case summary is now asked for in
-               the conversation itself — see renderCaseIntakeCard), so this
-               becomes an icon: silent at 0 open, lit with a count when a
-               specification decision is still unresolved. -->
+        <div class="d-flex align-items-center gap-2 ms-auto chat-header-actions">
+          <!-- One status control for the whole "is this conversation finished?"
+               question: the readiness score opens a popover that also carries
+               the claim check and the specification decisions. They were three
+               separate header controls; together they ate the room Clear and
+               Export skill needed. The purple count appears only when a
+               decision is still unresolved. -->
+          <div class="chat-status-pill" id="chatReadiness">
+            <button type="button" class="chat-status-col" id="readinessCol" onclick="toggleReadinessPanel(event)"
+                    title="Readiness — updates after every answer. Click for the coverage bars and the claim check.">
+              <span id="readinessBadge" class="readiness-badge">🎯 —</span>
+              <i class="fas fa-chevron-down session-menu-chevron"></i>
+            </button>
+            <div id="readinessPanel" class="readiness-panel" style="display:none;"></div>
+          </div>
+          <!-- Specification decisions — where the LLM hit a fork that is
+               defensible both ways. Quiet by default; only an UNRESOLVED one
+               earns colour and a count. -->
           <button type="button" id="decisionBadge" class="icon-btn decision-ledger-icon"
                   onclick="openDecisionLedger()" title="Review specification decisions">
             <i class="fas fa-code-branch"></i>
@@ -405,12 +420,21 @@
         </div>
       </div>
       <div class="chat-body-wrap">
-        <div id="chatBox" class="p-2 flex-grow-1" style="overflow-y:auto; background:#f8f9fa; font-size:0.82rem; min-height:220px;"></div>
+        <!-- What's still missing, directly under the Chat header. Opens
+             DOWNWARD as an overlay over the transcript (see renderOpenItems)
+             so neither expanding nor collapsing it moves the input box. -->
+        <div id="openItemsStrip" class="open-items-strip" hidden></div>
+        <div id="chatBox" class="p-2 flex-grow-1" style="overflow-y:auto; background:#f8f9fa; font-size:0.82rem; min-height:0;"></div>
         <div class="card-footer p-2">
           <div id="stepTagDropdown" class="step-tag-dropdown" style="display:none;"></div>
+          <!-- Staged attachments and their status sit ABOVE the input row:
+               this footer is pinned to the bottom of the window, so anything
+               added below the box pushes the box itself down and away from
+               where the cursor already is. -->
+          <div id="chatAttachStatus" class="chat-q-attach-status" hidden></div>
           <div class="input-group input-group-sm chat-input-group">
             <button id="chatAttachBtn" type="button" class="btn btn-outline-secondary chat-attach-btn"
-                    aria-label="Attach a table, notes, or a screenshot"><i class="fas fa-paperclip"></i></button>
+                    aria-label="Attach a table, notes, a screenshot, or a PDF"><i class="fas fa-paperclip"></i></button>
             <textarea id="chatInput" class="form-control chat-main-input" rows="1" data-busy-lock placeholder="Answer / ask… (Shift+Enter for a new line)"
                       onkeydown="if(event.key==='Enter' && !event.shiftKey){ event.preventDefault(); sendMsg(); }"
                       oninput="autoGrowChatInput(this)"></textarea>
@@ -418,7 +442,6 @@
             <button id="chatSendBtn" class="btn btn-primary" data-busy-lock onclick="sendMsg()"
                     aria-label="Send chat message"><i class="fas fa-paper-plane"></i></button>
           </div>
-          <div id="chatAttachStatus" class="chat-q-attach-status" hidden></div>
         </div>
       </div>
     </div>
@@ -514,6 +537,7 @@
       learning_transcribe_attachment: "{{ url_for('learning.transcribe_attachment') }}",
       learning_defer_decision: "{{ url_for('learning.defer_decision') }}",
       learning_resolve_decision: "{{ url_for('learning.resolve_decision') }}",
+      learning_skip_gap: "{{ url_for('learning.skip_gap') }}",
       log_viewer_add_filter: "{{ url_for('log_viewer.add_filter') }}",
       log_viewer_annotate_line: "{{ url_for('log_viewer.annotate_line') }}",
       log_viewer_answer_red_flag: "{{ url_for('log_viewer.answer_red_flag') }}",
@@ -561,7 +585,7 @@
       sessionUsage: {{ session_usage|tojson }},
       lastReadiness: {{ (state.last_readiness or {})|tojson }},
       lastCoverage: {{ (state.last_coverage or {})|tojson }},
-      lastGaps: {{ (state.last_gaps or [])|tojson }},
+      lastGaps: {{ (open_gaps or [])|tojson }},
       lastValidation: {{ (state.last_validation or [])|tojson }},
       llmReady: {{ llm_ready|tojson }},
       hasAssessment: {{ ((state.last_readiness or state.last_gaps or state.last_validation)|length > 0)|tojson }}

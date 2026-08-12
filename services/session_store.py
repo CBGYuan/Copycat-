@@ -179,6 +179,16 @@ class WorkingState:
         self.last_coverage: dict = {}      # {"knowledge": int, "scope": int, "keywords": int}
         self.last_gaps: list = []          # ["short actionable missing piece", ...]
         self.last_validation: list = []    # [{"claim", "status": verified|asserted|contradiction, "note"}]
+        # 'Still missing' items the engineer explicitly waved off as not
+        # applying to this case. Permanent: it is a human judgement the
+        # model can't make. Filtered out of the assessment payload, so a
+        # skipped item stops nagging AND stops blocking Export.
+        self.skipped_gaps: list = []
+        # Items answered in their own card. Also permanent: a question the
+        # engineer has already written an answer to must not come back, or
+        # the strip re-asks work they consider done. What the model thinks
+        # of that answer belongs in the readiness score, not in a repeat.
+        self.answered_gaps: list = []
         # Engineer-confirmed teaching evidence from the Log Preview, one entry
         # per labeled source line: {"line_no", "label": evidence|counterexample,
         # "text", "matched_keywords": [{"text", "excluding"}]}. matched_keywords
@@ -244,6 +254,8 @@ class WorkingState:
         self.last_coverage = {}
         self.last_gaps = []
         self.last_validation = []
+        self.skipped_gaps = []
+        self.answered_gaps = []
         self.skill_draft = []
         self.last_export_chat_len = 0
         self.last_round_op_count = 0

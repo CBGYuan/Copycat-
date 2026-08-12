@@ -86,9 +86,14 @@ Readiness must RISE as gaps get answered; only lower it when a NEW
 contradiction appears.
 
 LIST GAPS: the specific still-missing pieces, each a short actionable phrase
-(what to ask/answer next). Treat every material filter edit the engineer has
-NOT explained (see the operation journal / unexplained-edits list) as a gap —
-the reasoning behind an add/exclude is exactly the skill knowledge to capture.
+(what to ask/answer next). AT MOST 3, ordered most-blocking first — a longer
+list is read as noise and answered by nobody; whatever is left over comes back
+next round. NEVER list a gap that repeats a question you are asking in this
+same response, or one already asked earlier: the interview already covers it,
+and seeing the same thing twice is what makes the engineer stop reading either
+of them. Treat every material filter edit the engineer has NOT explained (see
+the operation journal / unexplained-edits list) as a gap — the reasoning behind
+an add/exclude is exactly the skill knowledge to capture.
 Empty list only if nothing material is missing.
 
 VALIDATE every substantive claim the engineer has made (防呆 / sanity-check).
