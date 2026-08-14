@@ -8,6 +8,8 @@ import uuid
 
 from flask import session
 
+from utils import question_match
+
 _STORE: dict = {}
 
 
@@ -232,6 +234,42 @@ class WorkingState:
             f"\x01summary={self.case_summary.strip()}"
         )
 
+    def close_gaps_covered_by(self, *texts) -> list:
+        """Close the "still missing" items a piece of teaching just answered.
+
+        The gap list is re-derived from the whole conversation, but only by
+        the next assessment — until then an item the engineer plainly just
+        explained (from a Step's teach box, a question card, or a plain chat
+        reply) sat there still asking. Where the answer was typed is not
+        supposed to matter, so this is called from every answer path rather
+        than from the one that happens to own the strip.
+
+        Counts as answered, not skipped: the engineer did give the knowledge,
+        just not through this item's own box. Returns what it closed.
+        """
+        covering = [str(t).strip() for t in texts if str(t or "").strip()]
+        if not covering:
+            return []
+        closed = []
+        for gap in list(self.last_gaps or []):
+            if gap in self.answered_gaps or gap in self.skipped_gaps:
+                continue
+            if any(question_match.answer_covers(gap, t) for t in covering):
+                self.answered_gaps.append(gap)
+                closed.append(gap)
+        return closed
+
+    def restamp_baseline(self) -> None:
+        """Keep an existing baseline valid across bookkeeping that moves the
+        signature without changing the evidence it describes — Export adding
+        the skill it just saved to the loaded docs, or picking an Export
+        parent in the Skill Library. Same log, same filter, same first read;
+        only the record of which skill docs are loaded moved. Without this the
+        next chat message is refused by a gate the UI still shows as met.
+        """
+        if self.baseline and self.baseline_filter_sig:
+            self.baseline_filter_sig = self.baseline_signature()
+
     def has_current_baseline(self) -> bool:
         return bool(
             self.baseline
@@ -283,9 +321,3 @@ def get_state() -> WorkingState:
         _STORE[sid] = WorkingState()
     return _STORE[sid]
 
-
-def reset_state() -> WorkingState:
-    sid = session.get("wsid")
-    if sid and sid in _STORE:
-        del _STORE[sid]
-    return get_state()

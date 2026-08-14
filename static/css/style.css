@@ -26,6 +26,10 @@
      the extra height goes to the log, which is the pane that can actually use
      it (fitLogPaneToViewport). */
   --workbench-panel-h: clamp(340px, 45vh, 400px);
+  /* One height for EVERY log row. The virtual pane multiplies this by the row
+     count to place the list, so it has to be a single stated number rather
+     than whatever each row's content happens to produce — see .tat-log-row. */
+  --log-row-h: 19px;
 }
 
 * { font-family: 'Inter', 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; }
@@ -373,9 +377,46 @@ a.btn-primary {
 /* ===== TAT-style Filtered Log pane: sticky line-number gutter + one
    non-wrapping colored line per entry (horizontal scroll), matching
    TextAnalysisTool.NET. ===== */
+.log-goto {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  margin-left: 6px;
+  color: var(--text-muted);
+  font-size: 0.62rem;
+  font-weight: 600;
+}
+.log-goto-input {
+  width: 84px;
+  height: 22px;
+  padding: 0 6px;
+  font-size: 0.66rem;
+  font-variant-numeric: tabular-nums;
+}
+.log-goto-note {
+  color: var(--warning, #b8860b);
+  font-weight: 600;
+  white-space: nowrap;
+}
+.log-goto-note[hidden] { display: none; }
+/* The pane is focusable now (keyboard nav); make that visible without the
+   heavy default ring sitting on top of the first log row. */
+.tat-log:focus-visible { outline: 2px solid var(--primary); outline-offset: -2px; }
+
 .tat-log {
   height: 48vh;
   overflow: auto;
+  /* Scroll anchoring MUST be off on a virtualized pane. It is a browser
+     feature for ordinary documents: when content above the viewport changes
+     size, Chrome silently shifts scrollTop to keep what you're looking at
+     still. Here the content above the viewport changes size on every single
+     scroll tick BY DESIGN — renderVisibleLogRows swaps the rendered window
+     and resizes the two spacer pads — so the browser "corrected" a scroll
+     that was already correct, and each correction fed the next. Measured:
+     one arrow-key row step landed 2-3 rows away and drifted further the more
+     it was pressed, which is what made scrolling a large log feel like it ran
+     away and could not be stopped. */
+  overflow-anchor: none;
   background: #fff;
   font-family: Consolas, "Courier New", monospace;
   font-size: 0.68rem;
@@ -393,7 +434,22 @@ a.btn-primary {
    scrollbar still represents the whole result. See renderVisibleLogRows(). */
 .tat-log-pad { width: 0; }
 .tat-log-row-loading .tat-log-text { color: var(--text-muted); }
-.tat-log-row { display: flex; width: 100%; white-space: nowrap; }
+/* EVERY row must be exactly --log-row-h tall, loaded or not. The virtual pane
+   (renderVisibleLogRows) positions the whole list by multiplying a single
+   measured row height by the row count, so a row that is a different height
+   silently breaks that arithmetic. It did: a real row is sized by its 19px
+   annotation buttons, but a not-yet-loaded placeholder has none and collapsed
+   to the 14px text line-height. Scrolling into an unloaded stretch therefore
+   rendered a block ~5px-per-row SHORT — about a full pane of drift across one
+   window — and it sprang back as the rows arrived, which is what made fast
+   scrolling feel like the log was lurching around on its own. */
+.tat-log-row {
+  display: flex;
+  width: 100%;
+  white-space: nowrap;
+  height: var(--log-row-h);
+  box-sizing: border-box;
+}
 .log-annotation-tools {
   position: sticky;
   right: 0;
@@ -406,8 +462,8 @@ a.btn-primary {
 .tat-log-row:hover .log-annotation-tools,
 .tat-log-row.is-annotated .log-annotation-tools { opacity: 1; }
 .log-annotation-tools button {
-  width: 19px;
-  height: 19px;
+  width: var(--log-row-h);
+  height: var(--log-row-h);
   padding: 0;
   border: 1px solid var(--border);
   background: #fff;
@@ -882,6 +938,16 @@ a.btn-primary {
   border-top: 1px solid #edf1f4;
 }
 .ctp-panel-actions .btn { min-width: 58px; font-size: 0.68rem; }
+
+/* The Filtered Log header carries the title, Go to, the E/X legend, Issue
+   Time + its badge and the scan stats on ONE row — an active issue-time
+   window used to push it onto two. Nothing here wraps; the stats line is the
+   one part allowed to truncate (its full sentence is in the title). */
+.log-pane-head { flex-wrap: nowrap; gap: 8px; }
+.log-pane-head > span { min-width: 0; }
+.log-pane-stats {
+  min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
 
 .focus-badge {
   cursor: pointer;
@@ -1695,6 +1761,43 @@ a.btn-primary {
 .step-item:hover { background: var(--bg-soft); }
 .step-item.is-exclude { border-left: 3px solid #e0a0a0; }
 .step-item:not(.is-exclude) { border-left: 3px solid #9cc3e6; }
+/* Pre-baseline setup edits (operation_journal's phase) — still clickable to
+   jump to what was said around them, but visually demoted so the numbered
+   teaching steps below are what the eye lands on. The colored left border
+   goes too: include-vs-exclude is a teaching distinction. */
+.step-phase-head {
+  margin: 6px 0 3px;
+  font-size: 0.6rem;
+  font-weight: 800;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+}
+.step-phase-head:first-child { margin-top: 0; }
+button.step-phase-head {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  width: 100%;
+  padding: 0;
+  background: none;
+  border: 0;
+  text-align: left;
+  cursor: pointer;
+}
+button.step-phase-head:hover { color: var(--text); }
+.step-phase-caret { font-size: 0.55rem; }
+.step-setup-rows[hidden] { display: none; }
+.step-item.is-setup,
+.step-item.is-setup.is-exclude,
+.step-item.is-setup:not(.is-exclude) {
+  border-left: 3px solid var(--border);
+  background: var(--bg-soft);
+  color: var(--text-muted);
+  opacity: 0.85;
+}
+.step-item.is-setup:hover { opacity: 1; }
+.step-item.is-setup .step-seq { color: var(--text-muted); font-weight: 600; }
 .step-seq {
   flex: 0 0 auto;
   font-variant-numeric: tabular-nums;
@@ -2359,7 +2462,7 @@ textarea.chat-main-input {
 /* ===== Interactive question cards in the skill-building chat — clickable
    options (auto-derived by the LLM from the operation delta/stats) plus an
    always-available custom-answer fallback, same interaction shape as
-   Claude's own AskUserQuestion. See renderQuestionCards() in log_viewer.html. ===== */
+   Claude's own AskUserQuestion. Shared by every question card in log_viewer.js. ===== */
 .chat-question-card {
   background: #fff;
   border: 1px solid var(--border);
@@ -2681,10 +2784,7 @@ textarea.chat-main-input {
   padding-top: 6px; border-top: 1px dashed var(--border);
 }
 
-/* "Ask about this step" — the LLM-LED counterpart, always skippable (see
-   askStepQuestion/renderStepAskCard). Blue accent matches the general
-   question-card family it reuses the option/custom-answer layout from. */
-.step-ask-card { border-color: #b7d9f5 !important; background: #f5faff; }
+/* Skip row for choice questions, which hide the answer box behind "Other…". */
 .step-ask-skip-row { display: flex; justify-content: flex-end; margin-top: 4px; }
 
 /* Export baseline indicator (Log Viewer) — shown only when the skill the next

@@ -277,6 +277,9 @@ def send():
         data.get("decision_id") or (decision_ledger.latest_open(state, step_tag) or {}).get("id"),
         data.get("decision_answer") or message,
     )
+    # A "still missing" item answered in passing here is answered. The strip
+    # picks this up through the refreshAssessment the client fires next.
+    state.close_gaps_covered_by(message)
     try:
         # Strip the "step" tag before handing history to the API — it's UI
         # metadata for this app's own message-tagging (see chat_history.step
@@ -368,6 +371,7 @@ def send_stream():
         data.get("decision_id") or (decision_ledger.latest_open(state, step_tag) or {}).get("id"),
         data.get("decision_answer") or message,
     )
+    state.close_gaps_covered_by(message)
     api_messages = [{"role": m["role"], "content": m["content"]} for m in state.chat_history[-20:]]
     system_content = _build_system_prompt(state)
     expect_structured = state.has_current_baseline() and state.interview_mode != "quiet"

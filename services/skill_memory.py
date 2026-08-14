@@ -30,7 +30,7 @@ import json
 import os
 import threading
 from datetime import datetime
-from typing import Dict, List, Optional
+from typing import Dict, Optional
 
 from configs import path_configs
 
@@ -167,15 +167,3 @@ def stats_for(skill_key: str) -> dict:
         "added_after": added,
         "coverage_gaps": gaps,
     }
-
-
-def unused_keys(pool_keys: List[str]) -> List[str]:
-    """Keys in `pool_keys` this workbench has never loaded.
-
-    The pruning signal from the paper set, stated honestly: it means "never
-    used HERE", not "useless". A shared skill can be central to a teammate and
-    still never have been opened on this machine, so this is only ever input
-    to a human decision, never grounds for deleting anything automatically.
-    """
-    data = _load()
-    return [k for k in pool_keys if int((data.get(k) or {}).get("uses") or 0) == 0]

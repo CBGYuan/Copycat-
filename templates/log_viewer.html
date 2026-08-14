@@ -115,10 +115,24 @@
       <!-- Hover card with the full event detail (fixed-position). -->
       <div id="evtHoverCard" class="evt-hover-card" style="display:none;"></div>
 
-      <div class="card-header py-1 d-flex justify-content-between align-items-center">
+      <div class="card-header py-1 log-pane-head d-flex justify-content-between align-items-center">
         <span>
           <span id="logPaneTitle">Log</span> (<span id="matchCount">0</span> of <span id="totalLines">0</span>)
           <span id="dateSynthWarn" class="date-synth-warn" style="display:none;" title="This log's own lines carry a time-of-day but no date (BT's dateless HCI export / WiFi's DDD export) — the date shown was estimated from the loaded System Event Log's earliest event, or the file's own save time if no event log is loaded. Only the DATE is a guess; the time-of-day is exact.">⚠ date estimated</span>
+          <!-- Precise navigation for a pane the scrollbar cannot address: at
+               100k lines in a ~350px pane the thumb is at its 17px minimum and
+               one pixel of drag is ~300 lines, so "scroll to roughly there" is
+               the only thing dragging can express. Typing the LINE number (the
+               left column, the only number on screen) is exact; the keyboard
+               (see wireLogKeyboardNav) covers moving a line or a page at a
+               time. -->
+          <span class="log-goto">
+            <label for="logGotoInput" title="Jump to a line number from the list's left column">Go to</label>
+            <input id="logGotoInput" type="number" min="1" step="1" inputmode="numeric"
+                   class="form-control form-control-sm log-goto-input" placeholder="line #"
+                   aria-label="Jump to log line number">
+            <span id="logGotoNote" class="log-goto-note" hidden></span>
+          </span>
         </span>
         <span class="d-flex align-items-center gap-2">
           <span class="annotation-legend" aria-label="Log observation labels"
@@ -205,10 +219,13 @@
           <button type="button" class="btn btn-outline-secondary tat-mini-btn" onclick="showAllLog()" title="Back to the full unfiltered log">
             <i class="fas fa-list"></i> Show all
           </button>
-          <span id="statsSummary" class="small text-muted"></span>
+          <span id="statsSummary" class="small text-muted log-pane-stats"></span>
         </span>
       </div>
-      <div id="previewBox" class="tat-log"></div>
+      <!-- tabindex: the pane has to be focusable for PageUp/PageDown/arrows to
+           reach it (see wireLogKeyboardNav). -->
+      <div id="previewBox" class="tat-log" tabindex="0"
+           aria-label="Filtered log rows. Click here, then use Page Up/Down, arrows, Home and End to move."></div>
     </div>
   </div>
 
@@ -526,7 +543,6 @@
       chatbot_send_stream: "{{ url_for('chatbot.send_stream') }}",
       learning_answer_focus_clarify: "{{ url_for('learning.answer_focus_clarify') }}",
       learning_answer_step_question: "{{ url_for('learning.answer_step_question') }}",
-      learning_ask_step: "{{ url_for('learning.ask_step') }}",
       learning_assess: "{{ url_for('learning.assess') }}",
       learning_baseline: "{{ url_for('learning.baseline') }}",
       learning_clarify: "{{ url_for('learning.clarify') }}",
@@ -545,6 +561,7 @@
       log_viewer_clear_focus: "{{ url_for('log_viewer.clear_focus') }}",
       log_viewer_load_skill: "{{ url_for('log_viewer.load_skill') }}",
       log_viewer_nearest_row: "{{ url_for('log_viewer.nearest_row') }}",
+      log_viewer_row_for_line: "{{ url_for('log_viewer.row_for_line') }}",
       log_viewer_parse_event_log: "{{ url_for('log_viewer.parse_event_log') }}",
       log_viewer_pick_event_log: "{{ url_for('log_viewer.pick_event_log') }}",
       log_viewer_pick_log: "{{ url_for('log_viewer.pick_log') }}",

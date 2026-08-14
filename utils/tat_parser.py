@@ -77,13 +77,6 @@ def parse_filter_file(filter_file_path: str) -> List[Dict]:
     return rules
 
 
-# Kept for the two remaining call sites (skill-based filters have no colors/
-# excluding metadata of their own — they're synthesized as plain including
-# keywords from skill.keywords / skill.exclusive).
-def extract_all_keywords_from_filter_file(filter_file_path: str) -> List[Dict]:
-    return parse_filter_file(filter_file_path)
-
-
 def _line_matcher(rule: Dict):
     """Return a fast predicate(line_lower, line) -> bool for one rule."""
     if rule["regex"]:

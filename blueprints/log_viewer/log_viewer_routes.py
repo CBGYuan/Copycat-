@@ -174,6 +174,10 @@ def index():
         state.selected_skill_keys = (
             [state.active_skill_key] if state.active_skill_key in pool else list(pool)
         )
+        # Back-filling a legacy session's doc list also moves
+        # baseline_signature(); without this a plain page reload threw away a
+        # baseline the engineer had already paid an LLM call for.
+        state.restamp_baseline()
     llm_ready = bool(app_config.llm_helper and app_config.llm_helper.is_ready)
     session_usage = app_config.llm_helper.session_usage if llm_ready else None
     # Name of the skill the next Export inherits from, resolved across BOTH
@@ -281,6 +285,35 @@ def preview_page():
         rows = _raw_rows(log_lines, state.view_start_idx, offset, limit, state.view_total)
     return jsonify({"success": True, "offset": offset, "rows": rows,
                     "view_total": state.view_total})
+
+
+@log_viewer_bp.route("/row_for_line", methods=["POST"])
+def row_for_line():
+    """View index of a SOURCE line number — what the pane's left column shows.
+
+    The Go-to box takes the number the engineer can read on screen. After a
+    filter that number is nothing like the row's position: 845 survivors out
+    of 101,168 lines means line 50,006 is somewhere around view row 400, and
+    treating the typed number as a position silently clamped it to the last
+    row. A filtered-out line has no row of its own, so this lands on the next
+    surviving line and says so rather than pretending it found it.
+    """
+    data = request.get_json(silent=True) or {}
+    line_no = _as_int(data.get("line_no"), 0, 1, 100_000_000)
+    state = session_store.get_state()
+    if not line_no or not state.view_total:
+        return jsonify({"success": True, "index": None})
+    if state.view_mode == "filtered":
+        line_nos = [ln for ln, _ in state.view_rows]
+        pos = bisect_left(line_nos, line_no)
+        if pos >= len(line_nos):
+            pos = len(line_nos) - 1
+        landed = line_nos[pos]
+    else:
+        pos = min(max(line_no - 1 - state.view_start_idx, 0), state.view_total - 1)
+        landed = state.view_start_idx + pos + 1
+    return jsonify({"success": True, "index": pos, "line_no": landed,
+                    "exact": landed == line_no})
 
 
 @log_viewer_bp.route("/nearest_row", methods=["POST"])

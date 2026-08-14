@@ -34,7 +34,6 @@ let activeSkillName = LV.boot.baselineSkillName;
 // picker, so the value no longer depends on a DOM node existing.
 let filterSkillKey = LV.boot.filterSkillKey || '';
 let filterSkillName = LV.boot.filterSkillName || '';
-let currentQuestions = [];
 let currentDraft = null;
 let decisionLedger = LV.boot.decisionLedger || {mode: 'ask', items: [], open: 0, resolved: 0, deferred: 0, blocking: 0};
 let interviewMode = 'ask';
@@ -247,14 +246,35 @@ function syncOps(d) {
 // "#N"); clicking it toggles a small dropdown of all available steps.
 // Step-scoped cards (teach/red-flag) tag their own messages directly and
 // ignore this; it's only for the free-typed chat box.
+
+// Teaching steps are numbered from the first thing actually TAUGHT. The
+// server's seq counts every filter edit from the session's first one, so with
+// four pre-baseline setup edits the first taught step read "#5" — a number
+// that answers a question nobody asked. Setup edits get no number at all:
+// nothing can point at one, so a number would only be something to look up in
+// vain. Display only — o.seq stays the wire identity for every server call.
+function stepLabel(seq) {
+    const op = operationData.find(o => o.seq === seq);
+    if (!op) return '#' + seq;
+    if (op.phase === 'setup') return 'Setup';
+    const teaching = operationData.filter(o => o.phase !== 'setup');
+    return '#' + (teaching.findIndex(o => o.seq === seq) + 1);
+}
+
 function renderStepTagSelector() {
     const dropdown = document.getElementById('stepTagDropdown');
     const btn = document.getElementById('stepTagBtn');
     if (!dropdown || !btn) return;
-    if (currentStepTag !== 'all' && !operationData.some(o => o.seq === currentStepTag)) {
+    // Setup edits are not taggable: a setup step can never carry a reason (no
+    // teach button, never asked "why"), so tagging a message to one only
+    // looked like it filed the knowledge there. It still reaches the model as
+    // ordinary conversation, exactly as an "All" message does.
+    const taggable = (o) => o.phase !== 'setup'
+        && o.action !== 'load_skill' && o.action !== 'load_tat';
+    if (currentStepTag !== 'all' && !operationData.some(o => o.seq === currentStepTag && taggable(o))) {
         currentStepTag = 'all';
     }
-    btn.textContent = currentStepTag === 'all' ? 'All' : '#' + currentStepTag;
+    btn.textContent = currentStepTag === 'all' ? 'All' : stepLabel(currentStepTag);
 
     dropdown.innerHTML = '';
     const mkPill = (tag, label, title) => {
@@ -269,9 +289,9 @@ function renderStepTagSelector() {
         return b;
     };
     dropdown.appendChild(mkPill('all', 'All', 'Tag as general / session-wide knowledge'));
-    operationData.forEach(o => {
-        if (o.action === 'load_skill' || o.action === 'load_tat') return;
-        dropdown.appendChild(mkPill(o.seq, '#' + o.seq, `Tag as about step #${o.seq} (${o.verb} "${o.label || o.text}")`));
+    operationData.filter(taggable).forEach(o => {
+        dropdown.appendChild(mkPill(o.seq, stepLabel(o.seq),
+            `Tag as about step ${stepLabel(o.seq)} (${o.verb} "${o.label || o.text}")`));
     });
 }
 
@@ -362,6 +382,7 @@ function syncOpsQuiet(d) {
 // to slice chatHistoryMirror — never sends anything, never asks a new question.
 // Lives in its own permanent card now (left column, under TAT Filter) —
 // always rendered, no open/close toggle to gate it behind.
+let _setupStepsOpen = false;
 function renderStepPanel() {
     const panel = document.getElementById('stepPanel');
     if (!panel) return;
@@ -377,13 +398,54 @@ function renderStepPanel() {
         body.appendChild(el('div', 'step-empty', 'No filter edits yet this session.'));
         return;
     }
+    // Setup edits (everything up to the baseline — see operation_journal's
+    // `phase`) are how the engineer got the filter set into a workable state,
+    // not knowledge being taught. They still belong in the panel, because the
+    // baseline is only interpretable against the set they produced, but they
+    // are shown as a quiet preamble: a collapsed header, a dot instead of a
+    // step number, and no "why?" prompt.
+    // Teaching steps are displayed from #1 (see stepLabel) — the pre-baseline
+    // setup edits no longer push the first taught step's number up.
+    let setupHeaderDone = false;
+    let teachingHeaderDone = false;
+    // Once a baseline exists the setup edits are settled history: they still
+    // have to be reachable (the baseline only reads against the set they
+    // produced) but they no longer compete for the space the teaching steps
+    // need. Before the baseline they ARE the panel, so they stay open.
+    const pastSetup = baselineDone || operationData.some(o => o.phase !== 'setup');
+    const setupRows = el('div', 'step-setup-rows');
+    setupRows.hidden = pastSetup && !_setupStepsOpen;
     operationData.forEach((o, i) => {
+        const isSetup = o.phase === 'setup';
+        if (isSetup && !setupHeaderDone) {
+            setupHeaderDone = true;
+            const n = operationData.filter(x => x.phase === 'setup').length;
+            const label = 'Setup — getting the filter ready';
+            const h = el(pastSetup ? 'button' : 'div', 'step-phase-head is-setup');
+            h.title = 'Filter edits made before the baseline read. They shaped the starting '
+                    + 'point rather than teaching anything, so they are not asked about.';
+            if (pastSetup) {
+                h.type = 'button';
+                h.appendChild(el('span', 'step-phase-caret', _setupStepsOpen ? '\u25be' : '\u25b8'));
+                h.appendChild(el('span', null, `${label} (${n})`));
+                h.onclick = () => { _setupStepsOpen = !_setupStepsOpen; renderStepPanel(); };
+            } else {
+                h.textContent = label;
+            }
+            body.appendChild(h);
+            body.appendChild(setupRows);
+        }
+        if (!isSetup && !teachingHeaderDone && setupHeaderDone) {
+            teachingHeaderDone = true;
+            body.appendChild(el('div', 'step-phase-head', 'Teaching — since the baseline'));
+        }
         const from = o.chat_index;
         const to = (i + 1 < operationData.length) ? operationData[i + 1].chat_index : chatHistoryMirror.length;
         const count = Math.max(0, to - from);
-        const item = el('button', 'step-item' + (o.excluding ? ' is-exclude' : ''));
+        const item = el('button', 'step-item' + (o.excluding ? ' is-exclude' : '')
+                                              + (isSetup ? ' is-setup' : ''));
         item.type = 'button';
-        item.appendChild(el('span', 'step-seq', '#' + o.seq));
+        item.appendChild(el('span', 'step-seq', isSetup ? '·' : stepLabel(o.seq)));
         item.appendChild(el('span', 'step-text', o.verb + ' "' + (o.label || o.text) + '"'));
         if (o.effect_phrase) item.appendChild(el('span', 'step-effect', o.effect_phrase));
         if (o.reason) item.appendChild(el('span', 'step-has-reason', '✓ why'));
@@ -418,7 +480,7 @@ function renderStepPanel() {
         // points, engineer's choice: 🎓 = write your own explanation first
         // (user-led); ❓ = have the LLM ask you one targeted question instead
         // (LLM-led, always skippable).
-        if (o.action !== 'load_skill' && o.action !== 'load_tat') {
+        if (o.action !== 'load_skill' && o.action !== 'load_tat' && !isSetup) {
             const teachBtn = el('button', 'step-teach-btn');
             teachBtn.type = 'button';
             teachBtn.innerHTML = '<i class="fas fa-graduation-cap"></i>';
@@ -440,7 +502,7 @@ function renderStepPanel() {
             teachBtn.onclick = (e) => { e.stopPropagation(); openStepExplainBox(o.seq, teachBtn); };
             row.appendChild(teachBtn);
         }
-        body.appendChild(row);
+        (isSetup ? setupRows : body).appendChild(row);
     });
 }
 
@@ -664,6 +726,7 @@ function renderLogRows(preview, emptyMessage, total) {
     vlog.maxLineNo = 0;
     vlog.minWidth = 0;
     vlog.highlightIndex = null;
+    setLogGotoNote('');     // the note described the view being replaced
     rows.forEach((p, i) => { vlog.rows[i] = p; });
     if (!vlog.total) {
         box.innerHTML = `<div class="tat-log-empty">${escapeHtml(vlog.emptyMessage)}</div>`;
@@ -692,8 +755,18 @@ function renderVisibleLogRows(force) {
     const pads = inner.querySelectorAll('.tat-log-pad');
     const body = inner.querySelector('.tat-log-body');
     if (!vlog.rowH) {
-        body.innerHTML = logRowHtml(vlog.rows[0] || {line_no: 1, text: ' '});
-        vlog.rowH = (body.firstElementChild && body.firstElementChild.offsetHeight) || 15;
+        // Read the ONE height every row is pinned to (--log-row-h, see
+        // .tat-log-row) rather than measuring whichever row happened to render
+        // first: a measurement is only right if every other row matches it,
+        // and making that true is exactly what the CSS variable is for.
+        const declared = parseFloat(
+            getComputedStyle(document.documentElement).getPropertyValue('--log-row-h'));
+        if (declared > 0) {
+            vlog.rowH = declared;
+        } else {
+            body.innerHTML = logRowHtml(vlog.rows[0] || {line_no: 1, text: ' '});
+            vlog.rowH = (body.firstElementChild && body.firstElementChild.offsetHeight) || 15;
+        }
     }
     const overscan = 25;
     const first = Math.max(0, Math.floor(box.scrollTop / vlog.rowH) - overscan);
@@ -756,6 +829,51 @@ function scrollLogToIndex(index) {
     vlog.highlightIndex = index;
     box.scrollTop = Math.max(0, index * vlog.rowH - box.clientHeight / 2 + vlog.rowH / 2);
     renderVisibleLogRows(true);
+}
+
+// ---- Getting somewhere precisely -----------------------------------------
+// A 100k-line view is 1.9M virtual pixels in a ~350px pane: the scrollbar
+// thumb bottoms out at its 17px minimum and one pixel of drag covers ~300
+// rows, so dragging can only ever express "somewhere over there" and there is
+// no scroll-speed setting that changes that — the ratio is total rows over
+// track pixels. The answer is not a slower scrollbar but what the scrollbar
+// can't do: go exactly somewhere.
+
+// Scroll so `index` (0-based view row) is the TOP row, clamped into range.
+function scrollLogToRowTop(index) {
+    const box = document.getElementById('previewBox');
+    if (!vlog.rowH || !vlog.total) return;
+    const clamped = Math.max(0, Math.min(vlog.total - 1, index));
+    box.scrollTop = clamped * vlog.rowH;
+    renderVisibleLogRows(false);
+}
+
+function gotoLogRow(rowNumber) {
+    const n = parseInt(rowNumber, 10);
+    if (!Number.isFinite(n) || !vlog.total) return;
+    // The number typed is the SOURCE line number — the one in the pane's left
+    // column and the only one on screen. Only the server knows where a given
+    // line sits in the current view, since the view is paged and, once
+    // filtered, is a sparse subset of the file.
+    fetch(LV.url.log_viewer_row_for_line, {
+        method: 'POST', headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({line_no: n}),
+    }).then(r => r.json()).then(d => {
+        if (!d.success || d.index == null) return;
+        // Centre it rather than putting it flush at the top — an engineer
+        // jumping to a line almost always wants the lines around it too.
+        scrollLogToIndex(d.index);
+        setLogGotoNote(d.exact ? '' : `line ${n} filtered out — showing ${d.line_no}`);
+    }).catch(() => {});
+}
+
+// Says where Go-to actually landed when it couldn't land where it was asked.
+// Silence there was the whole problem: the pane just moved somewhere else.
+function setLogGotoNote(text) {
+    const note = document.getElementById('logGotoNote');
+    if (!note) return;
+    note.textContent = text;
+    note.hidden = !text;
 }
 
 function highlightLogIndex() {
@@ -963,6 +1081,7 @@ function pickLog() {
                 document.getElementById('matchCount').textContent = d.view_total;
                 document.getElementById('totalLines').textContent = d.total_lines;
                 document.getElementById('statsSummary').textContent = 'no filter applied yet';
+                document.getElementById('statsSummary').title = '';
                 renderLogRows(d.preview, null, d.view_total);
                 // A new log always clears any focus window server-side (see
                 // /pick_log) — an issue time from the OLD file's frame could
@@ -1019,6 +1138,7 @@ function showAllLog() {
             document.getElementById('matchCount').textContent = d.view_total;
             document.getElementById('totalLines').textContent = d.total_lines;
             document.getElementById('statsSummary').textContent = '';
+            document.getElementById('statsSummary').title = '';
             renderLogRows(d.preview, null, d.view_total);
             // /show_all always clears any active focus window server-side —
             // mirror that in the UI so the Focus controls don't lie about state.
@@ -1240,9 +1360,9 @@ function setFocusUiState(focus) {
         document.getElementById('focusBtn').classList.remove('is-active');
         return;
     }
-    const timePart = focus.center.split('-').pop(); // HH:MM:SS(.mmm) portion
-    badge.textContent = `🎯 ±${focus.window_min || 5}m around ${timePart}`;
-    badge.title = 'Only this window is being scanned. Click to clear.';
+    const timePart = focus.center.split('-').pop().split('.')[0]; // HH:MM:SS, no ms
+    badge.textContent = `🎯 ±${focus.window_min || 5}m @ ${timePart}`;
+    badge.title = `Only ±${focus.window_min || 5} minutes around ${focus.center.split('-').pop()} is being scanned. Click to clear.`;
     badge.style.display = '';
     clearBtn.style.display = '';
     document.getElementById('focusBtn').classList.add('is-active');
@@ -1709,9 +1829,13 @@ function applyFilter() {
             lastMatchCount = d.total_matched;
             document.getElementById('matchCount').textContent = d.total_matched;
             document.getElementById('totalLines').textContent = d.total_lines;
-            document.getElementById('statsSummary').textContent =
-                `${d.overlap_count} lines matched 2+ keywords` +
-                (d.focus ? ` — scanned ${d.total_lines} of ${d.full_total_lines} lines in file` : '');
+            const stats = document.getElementById('statsSummary');
+            // The scanned count is already the "of N" in the pane title above,
+            // so an active window only needs to add the whole file's size.
+            stats.textContent = `${d.overlap_count} lines matched 2+ keywords`
+                + (d.focus ? ` · full file: ${Number(d.full_total_lines).toLocaleString()} lines` : '');
+            stats.title = `${d.overlap_count} lines matched 2 or more include keywords`
+                + (d.focus ? ` — scanned ${d.total_lines} of ${d.full_total_lines} lines in file` : '');
             setFocusUiState(d.focus);
             contextLineCount = Number(d.context_count || d.preview_count || 0);
             contextTimeSpan = d.time_span || {};
@@ -1862,7 +1986,7 @@ const _STEP_KNOWLEDGE_RE = /^\*\*Step #(\d+) — knowledge core:\*\* ([\s\S]*)/;
 function renderStepKnowledgeBubble(contentEl, content) {
     const m = content.match(_STEP_KNOWLEDGE_RE);
     if (!m) return false;
-    const seq = m[1];
+    const seq = +m[1];      // number, so it matches operationData's own seq in stepLabel
     const parts = m[2].split('\n\n');
     const core = parts[0];
     let expertNote = '', followUp = '';
@@ -1873,7 +1997,7 @@ function renderStepKnowledgeBubble(contentEl, content) {
         if (fuM) { followUp = fuM[1]; }
     }
     const head = el('div', 'step-knowledge-head');
-    head.innerHTML = `<i class="fas fa-brain"></i> Step #${seq} knowledge core`;
+    head.innerHTML = `<i class="fas fa-brain"></i> Step ${stepLabel(seq)} knowledge core`;
     contentEl.appendChild(head);
     contentEl.appendChild(el('div', 'step-confirm-core', core));
     if (expertNote) {
@@ -1929,8 +2053,8 @@ function appendMsg(role, content, stepTag) {
     if (tag !== null) {
         const meta = el('div', 'chat-bubble-meta');
         const isAll = (tag === 'all');
-        const badge = el('span', 'chat-step-badge' + (isAll ? ' is-all' : ''), isAll ? 'All' : ('#' + tag));
-        badge.title = isAll ? 'General / session-wide knowledge' : `About step #${tag}`;
+        const badge = el('span', 'chat-step-badge' + (isAll ? ' is-all' : ''), isAll ? 'All' : stepLabel(tag));
+        badge.title = isAll ? 'General / session-wide knowledge' : `About step ${stepLabel(tag)}`;
         meta.appendChild(badge);
         bubble.appendChild(meta);
     }
@@ -2039,8 +2163,8 @@ function toggleSpendPanel(evt) {
 }
 
 // forceTag: overrides the step-context selector for this ONE send — used by
-// clarification follow-up answers (see showNextQuestionCard), which are always
-// about the whole round, not whatever step the selector happens to be on.
+// clarification follow-up answers, which are always about the whole round,
+// not whatever step the selector happens to be on.
 let pendingBaselineSend = null;
 let baselineGuardReturnFocus = null;
 
@@ -2172,7 +2296,14 @@ function sendMsg(presetMsg, displayMsg, forceTag, allowWithoutBaseline, decision
         if (d.success) {
             appendMsg('assistant', d.reply, d.step_tag !== undefined ? d.step_tag : tag);
             if (d.clarification) renderProactiveClarification(d.clarification, tag);
-        } else appendMsg('assistant', '⚠️ ' + d.message, tag);
+        } else {
+            // The server checks the baseline against the CURRENT signature, so
+            // it can be stale while this page still thinks one is on file.
+            // Put the button back in its "needs a read" state so the next
+            // click is the fix, instead of leaving a message with no control.
+            if (d.baseline_required) { baselineDone = false; setBaselineGate(); }
+            appendMsg('assistant', '⚠️ ' + d.message, tag);
+        }
         if (d.usage) updateTokenBadge(d.usage.session);
         if (d.decision_ledger) updateDecisionLedger(d.decision_ledger);
         // Every answer re-scores readiness live (only once a filter has run —
@@ -3004,6 +3135,7 @@ function resolveDecisionFromLedger(decisionId, answer) {
         .then(r => r.json())
         .then(d => {
             if (d.decision_ledger) updateDecisionLedger(d.decision_ledger);
+            if (d.assessment) applyAssessment(d.assessment);
             refreshDecisionLedgerIfOpen();
         })
         .catch(() => {});
@@ -3570,6 +3702,7 @@ function requestBaseline(attempt, forceRefresh) {
             }
             baselineDone = true;
             baselineEverDone = true;
+            renderStepPanel();          // setup steps fold away now they're history
             setBusy(false);
             if (d.cached) return;                 // already read, nothing new to show
             if (d.usage) updateTokenBadge(d.usage.session);
@@ -3606,7 +3739,7 @@ function openStepExplainBox(seq, anchorBtn) {
     renderStepTagSelector();
     const box = document.getElementById('chatBox');
     const card = el('div', 'chat-question-card step-explain-card mb-2');
-    card.appendChild(el('div', 'chat-q-progress', `🎓 Teaching step #${seq}`));
+    card.appendChild(el('div', 'chat-q-progress', `🎓 Teaching step ${stepLabel(seq)}`));
     card.appendChild(el('div', 'chat-q-text', 'What key thing did you notice — and what was the problem?'));
 
     const textarea = document.createElement('textarea');
@@ -3713,7 +3846,7 @@ function stepKnowledgeCoreText(seq, knowledgeCore, expertNote, followUp) {
 function renderStepConfirmCard(seq, knowledgeCore, expertNote, followUp, decisionId) {
     const box = document.getElementById('chatBox');
     const card = el('div', 'chat-question-card step-confirm-card mb-2');
-    card.appendChild(el('div', 'chat-q-progress', `🧠 Knowledge core — step #${seq}`));
+    card.appendChild(el('div', 'chat-q-progress', `🧠 Knowledge core — step ${stepLabel(seq)}`));
     card.appendChild(el('div', 'step-confirm-core', knowledgeCore));
     if (expertNote) {
         const note = el('div', 'step-confirm-note');
@@ -3759,41 +3892,6 @@ function renderStepConfirmCard(seq, knowledgeCore, expertNote, followUp, decisio
     scrollChatToBottom();
 }
 
-// "Ask about this step" — the LLM-LED counterpart to 🎓's user-led explain
-// box: clicking a step's ❓ icon (see renderStepPanel) has the LLM fire ONE
-// targeted question about that edit instead of the engineer writing first.
-// Always skippable — this is a secondary entry point for whoever would rather
-// answer a question than compose free text, never a forced interruption.
-function askStepQuestion(seq, btn) {
-    if (isBusy() || btn.disabled) return;
-    setBusy(true);
-    const label = btn.innerHTML;
-    btn.innerHTML = '<i class="fas fa-spinner fa-spin"></i>';
-    fetch(LV.url.learning_ask_step, {
-        method: 'POST',
-        headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({seq: seq}),
-    })
-        .then(r => r.json())
-        .then(d => {
-            setBusy(false);
-            btn.innerHTML = label;
-            if (!d.success) { alert(d.message); return; }
-            if (d.usage) updateTokenBadge(d.usage.session);
-            if (d.decision_ledger) updateDecisionLedger(d.decision_ledger);
-            if (!d.question) {
-                appendMsg('assistant', d.message || 'No remaining question would materially change this step.', seq);
-                return;
-            }
-            renderStepAskCard(seq, d.question, d.decision_id, d.question_number || 1);
-        })
-        .catch(e => { setBusy(false); btn.innerHTML = label; alert('Failed: ' + e); });
-}
-
-// Renders the ❓ question with the SAME options/custom-answer shape as
-// showNextQuestionCard, plus an explicit Skip. Skip records a deferred
-// decision and stops this Step's chain. An answer may return exactly one next
-// high-value question; no next question means the chain is complete.
 // Offer ONE clarifying question when the engineer's last edit contradicted
 // the baseline read (see /learning/clarify). This does auto-fire an LLM call
 // off a filter action — the pattern this app deliberately removed once — but
@@ -3843,6 +3941,7 @@ function renderClarifyCard(d) {
                 body: JSON.stringify({question: q.question, answer, decision_id: d.decision_id || ''}),
             }).then(r => r.json()).then(result => {
                 if (result.decision_ledger) updateDecisionLedger(result.decision_ledger);
+                if (result.assessment) applyAssessment(result.assessment);
                 card.remove();
                 appendMsg('assistant', `❓ ${q.question}`, 'all');
                 appendMsg('user', answer, 'all');
@@ -3882,31 +3981,9 @@ function buildSkipRow(onSkip) {
     return skipRow;
 }
 
-function renderStepAskCard(seq, q, decisionId, questionNumber) {
-    const box = document.getElementById('chatBox');
-    const card = el('div', 'chat-question-card step-ask-card mb-2');
-    const ordinal = questionNumber > 1 ? ` · Follow-up ${questionNumber}` : '';
-    card.appendChild(el('div', 'chat-q-progress', `❓ Step #${seq}${ordinal}`));
-    card.appendChild(el('div', 'chat-q-text', q.question));
-
-    const answer = (text) => submitStepAnswer(seq, q.question, text, card, decisionId, true);
-    const skip = () => { deferDecision(decisionId); card.remove(); };
-    const hasOptions = q.type === 'choice' && !!q.options && q.options.length > 0;
-    const optsBox = el('div', 'chat-q-opts');
-    const recommendedIsOption = hasOptions && renderOptionButtons(optsBox, q.options, q.recommended_answer, answer);
-    if (!recommendedIsOption) appendRecommendation(card, q);
-    attachAnswerBox(card, hasOptions, optsBox, buildAnswerBox({
-        hint: q.question,
-        onSubmit: answer,
-        onSkip: skip,
-    }));
-    if (hasOptions) card.appendChild(buildSkipRow(skip));
-
-    box.appendChild(card);
-    scrollChatToBottom();
-}
-
-function submitStepAnswer(seq, question, answer, card, decisionId, continueChain) {
+// Records one answer as the step's `reason` — shared by the clarify card and
+// by 🎓's optional follow-up question.
+function submitStepAnswer(seq, question, answer, card, decisionId) {
     if (isBusy()) return;
     setBusy(true);
     fetch(LV.url.learning_answer_step_question, {
@@ -3914,7 +3991,7 @@ function submitStepAnswer(seq, question, answer, card, decisionId, continueChain
         headers: {'Content-Type': 'application/json'},
         body: JSON.stringify({
             seq: seq, question: question, answer: answer,
-            decision_id: decisionId || '', continue_chain: continueChain === true,
+            decision_id: decisionId || '',
         }),
     })
         .then(r => r.json())
@@ -3926,71 +4003,10 @@ function submitStepAnswer(seq, question, answer, card, decisionId, continueChain
             appendMsg('user', answer, seq);
             if (d.usage && d.usage.session) updateTokenBadge(d.usage.session);
             if (d.decision_ledger) updateDecisionLedger(d.decision_ledger);
+            if (d.assessment) applyAssessment(d.assessment);
             syncOpsQuiet(d); // updates the step's "✓ why" indicator (only if it was previously empty)
-            if (continueChain && d.next_question) {
-                renderStepAskCard(
-                    seq, d.next_question, d.next_decision_id,
-                    d.question_number || 2,
-                );
-            }
         })
         .catch(e => { setBusy(false); alert('Failed: ' + e); });
-}
-
-// Whatever number of questions the LLM returns in one batch, show them ONE
-// at a time — a card is only for the current question; answering it (click
-// an option, or type + send) removes it and reveals the next, rather than
-// dumping every question into the chat at once.
-function renderQuestionCards(questions) {
-    appendMsg('assistant', 'Follow-up — pick an option or type your own:', 'all');
-    showNextQuestionCard(questions.slice(), 0, questions.length);
-}
-
-function showNextQuestionCard(queue, doneCount, total) {
-    if (!queue.length) return;
-    const q = queue.shift();
-    const box = document.getElementById('chatBox');
-
-    const card = document.createElement('div');
-    card.className = 'chat-question-card mb-2';
-
-    const progress = document.createElement('div');
-    progress.className = 'chat-q-progress';
-    progress.textContent = `Question ${doneCount + 1} of ${total}`;
-    card.appendChild(progress);
-
-    const qText = document.createElement('div');
-    qText.className = 'chat-q-text';
-    qText.textContent = q.question;
-    card.appendChild(qText);
-
-    const advance = () => showNextQuestionCard(queue, doneCount + 1, total);
-    // forceTag 'all': these are clarification follow-ups, about the whole round —
-    // not whatever step the step-context selector happens to be set to.
-    const finish = (answerText) => {
-        card.remove();
-        sendMsg(answerText, undefined, 'all', false, q.decision_id);
-        advance();
-    };
-
-    const skip = () => {
-        deferDecision(q.decision_id);
-        card.remove();
-        advance();
-    };
-    const hasOptions = q.type === 'choice' && !!q.options && q.options.length > 0;
-    const optsBox = el('div', 'chat-q-opts');
-    const recommendedIsOption = hasOptions && renderOptionButtons(optsBox, q.options, q.recommended_answer, finish);
-    if (!recommendedIsOption) appendRecommendation(card, q);
-    attachAnswerBox(card, hasOptions, optsBox, buildAnswerBox({
-        hint: q.question,
-        onSubmit: finish,
-        onSkip: skip,
-    }));
-    if (hasOptions) card.appendChild(buildSkipRow(skip));
-
-    box.appendChild(card);
-    scrollChatToBottom();
 }
 
 // ---- Export a skill from the rounds/chat gathered so far, open the Edit Skill modal ----
@@ -4311,6 +4327,46 @@ document.getElementById('previewBox').addEventListener('scroll', function () {
     renderVisibleLogRows(false);
 });
 window.addEventListener('resize', function () { renderVisibleLogRows(true); });
+// Keyboard navigation, because the scrollbar cannot be precise at this scale
+// (see scrollLogToRowTop). Only acts when the pane itself has focus, so these
+// keys keep working normally everywhere else on the page — in particular
+// PageUp/PageDown inside the chat box and Home/End inside a text field.
+(function wireLogKeyboardNav() {
+    const box = document.getElementById('previewBox');
+    if (!box) return;
+    box.addEventListener('keydown', (e) => {
+        if (e.ctrlKey || e.altKey || e.metaKey || !vlog.rowH || !vlog.total) return;
+        const rowsPerPage = Math.max(1, Math.floor(box.clientHeight / vlog.rowH) - 1);
+        const top = Math.floor(box.scrollTop / vlog.rowH);
+        let target = null;
+        switch (e.key) {
+            case 'ArrowDown':  target = top + 1; break;
+            case 'ArrowUp':    target = top - 1; break;
+            case 'PageDown':   target = top + rowsPerPage; break;
+            case 'PageUp':     target = top - rowsPerPage; break;
+            case 'Home':       target = 0; break;
+            case 'End':        target = vlog.total - 1; break;
+            default: return;
+        }
+        e.preventDefault();     // otherwise the PAGE scrolls as well as the pane
+        scrollLogToRowTop(target);
+    });
+})();
+(function wireLogGoto() {
+    const input = document.getElementById('logGotoInput');
+    if (!input) return;
+    const go = () => {
+        if (!input.value.trim()) return;
+        gotoLogRow(input.value);
+        // Focus moves to the pane so the arrows/PageUp keep working from where
+        // you landed, instead of the next keystroke editing the number again.
+        document.getElementById('previewBox').focus();
+    };
+    input.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter') { e.preventDefault(); go(); }
+    });
+    input.addEventListener('change', go);
+})();
 // The main chat box gets the same attach/paste/drop support the per-question
 // answer boxes have — a config table screenshotted out of a spec is just as
 // often taught as a free-form message as it is as an answer to a question.

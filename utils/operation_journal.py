@@ -278,8 +278,21 @@ def compact(state, limit: int = 20) -> str:
 
 
 def payload(state) -> List[Dict]:
-    """The journal shape the frontend renders (one row per edit)."""
+    """The journal shape the frontend renders (one row per edit).
+
+    `phase` splits SETUP from TEACHING. Trimming a too-broad .tat down to
+    something readable is the engineer getting ready to work, not knowledge
+    being taught — but every one of those edits was landing in the Steps panel
+    as a numbered teaching step with a "why?" prompt on it, which reads as the
+    tool having started grading before the engineer started working. The
+    boundary is the baseline: it is defined as the committed first read of
+    whatever filter set the engineer settled on, so everything up to it BUILT
+    that set (divergence.py already counts from exactly this line). Until a
+    baseline exists nothing can be teaching yet, so it is all setup.
+    """
+    cutoff = state.baseline_op_seq if state.has_current_baseline() else float("inf")
     return [{
+        "phase": "setup" if op["seq"] <= cutoff else "teaching",
         "seq": op["seq"],
         "action": op["action"],
         "verb": _ACTION_VERB.get(op["action"], op["action"]),

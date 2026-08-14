@@ -7,6 +7,8 @@ name/description/keywords/exclusive/expert_rules shape.
 import re
 from typing import Dict, Optional
 
+from utils import question_match
+
 
 VALID_MODES = {"quiet", "ask"}
 
@@ -80,7 +82,26 @@ def record_question(
     return item
 
 
-def resolve(state, decision_id: str, answer: str) -> Optional[Dict]:
+def resolve(state, decision_id: str, answer: str, *, covers=question_match.same_topic) -> Optional[Dict]:
+    """Resolve one decision, and close the ones it made moot.
+
+    `covers(a, b) -> bool` defaults to the same matcher the gap strip uses, so
+    question-similarity has ONE definition rather than two that drift apart.
+    Every caller gets the sweep by default — the symptom this fixes showed up
+    through the plain-chat-reply path as readily as through a question card,
+    and a resolve() that only sometimes swept would have fixed it in one place
+    and left it broken in the other. Pass covers=None to opt out.
+
+    Why supersede rather than resolve: the interview reliably circles back on
+    a question in its own words a few turns later, and answering that later,
+    better-phrased version left the ORIGINAL sitting open forever — it kept
+    nagging on Export as an "unresolved specification decision" even though
+    the engineer had plainly answered it. But the two questions are only
+    FUZZILY the same, so copying the answer onto the older item would put
+    words in the engineer's mouth. `superseded` says exactly what happened:
+    covered by another decision, no longer blocking, never claimed to have
+    been answered directly.
+    """
     decision_id = str(decision_id or "").strip()
     answer = str(answer or "").strip()
     if not decision_id or not answer:
@@ -89,8 +110,27 @@ def resolve(state, decision_id: str, answer: str) -> Optional[Dict]:
         if item.get("id") == decision_id:
             item["status"] = "resolved"
             item["answer"] = answer
+            if covers:
+                _supersede_covered_by(state, item, covers)
             return item
     return None
+
+
+def _supersede_covered_by(state, answered: Dict, covers) -> None:
+    """Close open items the just-answered one plainly also answers.
+
+    Only ever downgrades OPEN items, and never the one just resolved — a
+    deferred or already-resolved item has had its outcome decided and must not
+    be rewritten by a later, loosely-related answer.
+    """
+    question = answered.get("question") or ""
+    for other in state.decision_ledger:
+        if other is answered or other.get("status") != "open":
+            continue
+        if covers(other.get("question") or "", question):
+            other["status"] = "superseded"
+            other["blocking"] = False
+            other["superseded_by"] = answered.get("id", "")
 
 
 def defer(state, decision_id: str) -> Optional[Dict]:
@@ -130,6 +170,7 @@ def payload(state) -> Dict:
         "open": sum(item.get("status") == "open" for item in items),
         "resolved": sum(item.get("status") == "resolved" for item in items),
         "deferred": sum(item.get("status") == "deferred" for item in items),
+        "superseded": sum(item.get("status") == "superseded" for item in items),
         "blocking": sum(
             item.get("status") == "open" and item.get("blocking") for item in items
         ),
@@ -151,6 +192,9 @@ def build_skill_spec(draft: Dict, state) -> Dict:
         for item in ledger["items"]
         if item.get("status") == "resolved"
     ]
+    # `superseded` is deliberately absent: it was covered by another decision
+    # the engineer DID answer, so listing it here would report the same open
+    # question twice — once as itself and once as the answer that closed it.
     unresolved = [
         item.get("question", "")
         for item in ledger["items"]

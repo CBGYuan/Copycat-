@@ -53,7 +53,6 @@ SKILLS_YAML_PATH = os.path.join(SKILLS_LOCAL_DIR, "skills.yaml")
 # (see skill_service.save_skill's `domain` param), which is exactly the
 # WiFi/BT architecture mismatch this file exists to prevent.
 SKILLS_BT_YAML_PATH = os.path.join(SKILLS_LOCAL_DIR, "bt_skills.yaml")
-CACHE_DIR = os.path.join(DATA_DIR, "cache")
 
 # ---- shared skill knowledge base — the actual live corp share (same share
 # as the key.py backup path above). Confirmed layout on \\infs089...:

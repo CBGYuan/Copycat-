@@ -5,7 +5,7 @@ from flask import Blueprint, request, jsonify
 from configs import set_up_app
 from configs.global_configs import app_config
 from services import session_store, learning_service, skill_service, decision_ledger
-from utils import operation_journal, divergence, skill_dedup
+from utils import operation_journal, divergence, skill_dedup, question_match
 
 # No standalone page: the "Teach This Scenario" flow lives inline inside the
 # combined Log Viewer workbench (templates/log_viewer.html) — this blueprint
@@ -94,67 +94,11 @@ def _store_assessment(state, result: dict) -> None:
     state.last_validation = result.get("validation") or []
 
 
-# A gap is "the same question" as an earlier one well below verbatim: the
-# model rewords its own list every round ("which AP" / "which AP was
-# blacklisted"), and exact matching turned every rewording into a brand-new
-# item the engineer had already dealt with.
-_GAP_SAME_RATIO = 0.82
-_GAP_CONTAINS_MIN = 12      # below this a substring hit is coincidence, not a repeat
-# What two gaps are ARGUING about: log keywords (ROAM_DECISION_SM), numbers
-# (a threshold, a channel), acronyms. "why was ROAM_A excluded" and "why was
-# ROAM_B excluded" read as 95% identical to any string metric while being
-# entirely different questions, so a mismatch here vetoes the fuzzy match.
-_SIGNAL_RE = re.compile(r"[A-Za-z][A-Za-z0-9]*_[A-Za-z0-9_]*|\b[A-Z]{3,}\b|\b\d+(?:\.\d+)?\b")
-
-
-def _signal_tokens(text: str) -> set:
-    return {t.casefold() for t in _SIGNAL_RE.findall(text or "")}
-
-
-_WORD_RE = re.compile(r"[A-Za-z0-9_]+")
-_STOPWORDS = {
-    "the", "and", "are", "was", "were", "for", "that", "this", "which", "what", "why",
-    "how", "does", "did", "been", "with", "from", "not", "any", "all", "its", "their",
-    "there", "here", "you", "your", "they", "has", "have", "had", "can", "should",
-    "would", "about", "into", "only", "one", "when", "where", "who", "whether",
-}
-
-
-def _content_tokens(text: str) -> set:
-    return {t for t in (w.casefold() for w in _WORD_RE.findall(text or ""))
-            if len(t) > 2 and t not in _STOPWORDS}
-
-
-def _same_topic(gap: str, question: str) -> bool:
-    """Looser than _same_question, and only used against questions the chat is
-    already asking: the interview rarely echoes the gap's wording, but asking
-    the same thing in its own words is still the same piece of work."""
-    if _same_question(gap, question):
-        return True
-    g, q = _content_tokens(gap), _content_tokens(question)
-    if not g or not q:
-        return False
-    # Containment, not Jaccard: a one-line gap against a three-line question is
-    # a subset, and dividing by the union would score it as unrelated.
-    overlap = len(g & q) / min(len(g), len(q))
-    shares_symbol = bool(_signal_tokens(gap) & _signal_tokens(question))
-    return overlap >= 0.6 or (shares_symbol and overlap >= 0.4)
-
-
-def _same_question(a: str, b: str) -> bool:
-    na, nb = skill_dedup.normalize(a), skill_dedup.normalize(b)
-    if not na or not nb:
-        return False
-    if na == nb:
-        return True
-    # Erring towards asking again: a question wrongly shown is a second of the
-    # engineer's time, a question wrongly swallowed is knowledge never captured.
-    if _signal_tokens(a) != _signal_tokens(b):
-        return False
-    short, long = (na, nb) if len(na) <= len(nb) else (nb, na)
-    if len(short) >= _GAP_CONTAINS_MIN and short in long:
-        return True
-    return skill_dedup.ratio(na, nb) >= _GAP_SAME_RATIO
+# Question similarity lives in utils.question_match so the gap strip below and
+# the decision ledger's supersede sweep (decision_ledger.resolve) judge a pair
+# of questions the same way — they are two symptoms of one problem.
+_same_question = question_match.same_question
+_same_topic = question_match.same_topic
 
 
 def open_gaps(state) -> list:
@@ -370,6 +314,7 @@ def _context_from_state(state, exclude_skill_key: str = "", include_existing: bo
         } if baseline_skill else None,
         "sample_lines": _sample_lines(state.filtered_preview, limit=40),
         "case_summary": state.case_summary,
+        "focus_reason": state.focus_reason,
         "log_annotations": state.log_annotations,
         "chat_history": state.chat_history,
     }
@@ -864,10 +809,15 @@ def answer_focus_clarify():
     state = session_store.get_state()
     state.focus_reason = answer
     decision_ledger.resolve(state, data.get("decision_id"), answer)
+    state.close_gaps_covered_by(question, answer)
     if question:
         state.chat_history.append({"role": "assistant", "content": f"❓ {question}", "step": "all"})
     state.chat_history.append({"role": "user", "content": answer, "step": "all"})
-    return jsonify({"success": True, "decision_ledger": decision_ledger.payload(state)})
+    return jsonify({
+        "success": True,
+        "decision_ledger": decision_ledger.payload(state),
+        "assessment": _assessment_payload(state),
+    })
 
 
 @learning_bp.route("/set_mode", methods=["POST"])
@@ -963,9 +913,14 @@ def resolve_decision():
     item = decision_ledger.resolve(state, data.get("decision_id"), answer)
     if not item:
         return jsonify({"success": False, "message": "Unknown decision"}), 404
+    state.close_gaps_covered_by(item.get("question") or "", answer)
     state.chat_history.append({"role": "assistant", "content": f"❓ {item['question']}", "step": item.get("step", "all")})
     state.chat_history.append({"role": "user", "content": answer, "step": item.get("step", "all")})
-    return jsonify({"success": True, "decision_ledger": decision_ledger.payload(state)})
+    return jsonify({
+        "success": True,
+        "decision_ledger": decision_ledger.payload(state),
+        "assessment": _assessment_payload(state),
+    })
 
 
 def _step_annotations(state, op: dict) -> list:
@@ -994,18 +949,7 @@ def _step_annotations(state, op: dict) -> list:
     ]
 
 
-def _step_question_history(state, seq: int) -> list:
-    return [
-        {"question": item.get("question", ""), "answer": item.get("answer", "")}
-        for item in state.decision_ledger
-        if item.get("step") == seq
-        and item.get("source") == "step"
-        and item.get("status") == "resolved"
-        and item.get("answer")
-    ]
-
-
-def _step_op_context(state, op: dict, *, continuing: bool = False) -> dict:
+def _step_op_context(state, op: dict) -> dict:
     domain = (state.log_domain or "wifi").lower()
     return {
         "domain": domain,
@@ -1020,8 +964,6 @@ def _step_op_context(state, op: dict, *, continuing: bool = False) -> dict:
         "case_summary": state.case_summary,
         "sample_lines": _sample_lines(state.filtered_preview, limit=24),
         "step_annotations": _step_annotations(state, op),
-        "answered_questions": _step_question_history(state, op["seq"]),
-        "continuing": continuing,
     }
 
 
@@ -1058,6 +1000,7 @@ def confirm_step():
         return jsonify({"success": False, "message": "Empty explanation"}), 400
 
     operation_journal.annotate_reason(state, seq, explanation)
+    state.close_gaps_covered_by(explanation)
     state.chat_history.append({"role": "user", "content": explanation, "step": seq})
 
     llm_helper = app_config.llm_helper
@@ -1116,80 +1059,10 @@ def confirm_step():
     })
 
 
-@learning_bp.route("/ask_step", methods=["POST"])
-def ask_step():
-    """'Ask about this step' — the LLM-LED counterpart to confirm_step's
-    user-led flow, triggered by a step's own ❓ icon (separate from 🎓's
-    user-led explain box — the engineer picks whichever entry point suits
-    them). Generates ONE targeted question about that single edit; the
-    frontend renders it as a skippable question card (see
-    learning_service.ASK_STEP_SYS_PROMPT and log_viewer.html's
-    askStepQuestion/renderStepAskCard) — answering it goes to
-    /learning/answer_step_question below, skipping just dismisses the card
-    client-side with no backend call."""
-    llm_helper = app_config.llm_helper
-    if not llm_helper or not llm_helper.is_ready:
-        return jsonify({"success": False, "message": "LLM is not configured yet."}), 503
-
-    data = request.get_json(silent=True) or {}
-    seq = data.get("seq")
-    state = session_store.get_state()
-    op = next((o for o in state.operations if o["seq"] == seq), None)
-    if not isinstance(seq, int) or not op:
-        return jsonify({"success": False, "message": "Unknown operation"}), 400
-
-    answered = _step_question_history(state, seq)
-    if len(answered) >= 4:
-        return jsonify({
-            "success": True, "seq": seq, "question": None,
-            "no_question": True,
-            "message": "This step already has enough answered refinement questions.",
-            "decision_ledger": decision_ledger.payload(state),
-        })
-    op_context = _step_op_context(state, op, continuing=bool(answered))
-    try:
-        question = learning_service.ask_step_question(llm_helper, op_context, state.prior_knowledge)
-    except Exception as e:
-        return jsonify({"success": False, "message": f"LLM call failed: {e}"}), 500
-    if not question:
-        return jsonify({
-            "success": True, "seq": seq, "question": None,
-            "no_question": True,
-            "message": "No remaining question would materially change this skill.",
-            "decision_ledger": decision_ledger.payload(state),
-            "usage": {"last": llm_helper.last_usage, "session": llm_helper.session_usage},
-        })
-
-    decision = decision_ledger.record_question(
-        state,
-        source="step",
-        question=question["question"],
-        qtype=question.get("type"),
-        options=question.get("options"),
-        recommended_answer=question.get("recommended_answer"),
-        recommendation_reason=question.get("recommendation_reason"),
-        step=seq,
-        source_key=f"step:{seq}:{question['question']}",
-    )
-    state.chat_history.append({"role": "assistant", "content": f"❓ {question['question']}", "step": seq})
-    return jsonify({
-        "success": True,
-        "seq": seq,
-        "question": question,
-        "question_number": len(answered) + 1,
-        "decision_id": decision["id"] if decision else "",
-        "decision_ledger": decision_ledger.payload(state),
-        "usage": {"last": llm_helper.last_usage, "session": llm_helper.session_usage},
-    })
-
-
 @learning_bp.route("/answer_step_question", methods=["POST"])
 def answer_step_question():
-    """Record one Step answer, then optionally generate the next high-value
-    question. Only one card is ever returned. The chain stops when the model
-    finds no remaining skill-changing gap, after four answered questions as a
-    runaway guard, or immediately when the UI uses Skip (which calls defer
-    instead of this route)."""
+    """Record one Step answer as that operation's `reason`. Used by the
+    clarify card and by confirm_step's optional follow-up question."""
     data = request.get_json(silent=True) or {}
     seq = data.get("seq")
     question = (data.get("question") or "").strip()
@@ -1202,55 +1075,19 @@ def answer_step_question():
         return jsonify({"success": False, "message": "Empty answer"}), 400
 
     decision_ledger.resolve(state, data.get("decision_id"), answer)
+    state.close_gaps_covered_by(question, answer)
     if not op["reason"]:
         operation_journal.annotate_reason(state, seq, answer)
     state.chat_history.append({"role": "user", "content": answer, "step": seq})
 
-    next_question = None
-    next_decision = None
-    answered = _step_question_history(state, seq)
     llm_helper = app_config.llm_helper
-    if (data.get("continue_chain") is True and len(answered) < 4
-            and llm_helper and llm_helper.is_ready):
-        try:
-            next_question = learning_service.ask_step_question(
-                llm_helper,
-                _step_op_context(state, op, continuing=True),
-                state.prior_knowledge,
-            )
-        except Exception:
-            # The submitted answer is already safely recorded. A failed
-            # optional continuation must never turn that successful action
-            # into an error or make the user submit twice.
-            next_question = None
-        if next_question:
-            next_decision = decision_ledger.record_question(
-                state,
-                source="step",
-                question=next_question["question"],
-                qtype=next_question.get("type"),
-                options=next_question.get("options"),
-                recommended_answer=next_question.get("recommended_answer"),
-                recommendation_reason=next_question.get("recommendation_reason"),
-                step=seq,
-                source_key=f"step:{seq}:{next_question['question']}",
-            )
-            state.chat_history.append({
-                "role": "assistant",
-                "content": f"❓ {next_question['question']}",
-                "step": seq,
-            })
     return jsonify({
         "success": True,
         "seq": seq,
         "operations": operation_journal.payload(state),
         "decision_ledger": decision_ledger.payload(state),
-        "next_question": next_question,
-        "next_decision_id": next_decision["id"] if next_decision else "",
-        "question_number": len(answered) + 1 if next_question else len(answered),
-        "chain_complete": not bool(next_question),
+        "assessment": _assessment_payload(state),
         "usage": {
-            "last": llm_helper.last_usage if llm_helper and next_question else None,
             "session": llm_helper.session_usage if llm_helper else None,
         },
     })
@@ -1612,6 +1449,11 @@ def save():
     if saved_key not in state.selected_skill_keys:
         state.selected_skill_keys.append(saved_key)
     state.prior_knowledge = True
+    # Both lines above feed baseline_signature(), so the export silently
+    # invalidated its own baseline: the next chat message came back "Set the
+    # comparison baseline first" with a button that still read "Update
+    # baseline".
+    state.restamp_baseline()
     state.skill_draft = []
     state.learning_questions = []
     state.learning_answers = []

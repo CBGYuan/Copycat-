@@ -101,7 +101,6 @@ def find_event_log_near(log_path: str) -> str:
 # effective offset at capture time; accepting only the first shape silently
 # discarded the timezone in real captures.
 _TZ_OFFSET_RE = re.compile(r'\((?:UTC|GMT)([+-])(\d{2}):?(\d{2})\)', re.IGNORECASE)
-_SYSTEMINFO_FILENAMES = ("systeminfo.txt", "system_info.txt")
 _SYSTEMINFO_SEARCH_DEPTH = 4
 
 

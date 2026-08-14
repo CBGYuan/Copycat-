@@ -161,10 +161,3 @@ class ManagedChromeWindow:
 
         if profile_dir:
             shutil.rmtree(profile_dir, ignore_errors=True)
-
-
-def open_in_chrome(url: str) -> ManagedChromeWindow:
-    """Compatibility helper for callers that do not need lifecycle control."""
-    window = ManagedChromeWindow()
-    window.open(url)
-    return window

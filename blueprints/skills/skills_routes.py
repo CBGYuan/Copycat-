@@ -260,6 +260,7 @@ def activate(skill_key):
         state.selected_skill_keys.append(skill_key)
     if skill_key:
         state.prior_knowledge = True
+    state.restamp_baseline()
     skill = (app_config.skills.get(state.active_skill_key)
              or app_config.bt_skills.get(state.active_skill_key))
     return jsonify({"success": True, "active_key": state.active_skill_key,

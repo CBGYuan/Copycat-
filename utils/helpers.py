@@ -6,14 +6,6 @@ import socket
 from datetime import date, datetime
 
 
-def get_load_path(*paths):
-    """Return the first path in `paths` that exists, or None."""
-    for p in paths:
-        if p and os.path.exists(p):
-            return p
-    return None
-
-
 def load_module(file_path: str, module_name: str = "dyn_module"):
     """Import an arbitrary .py file by path (used to load key.py / skill draft
     modules the same way wireless_ce_avatar/IntelAvatar's utils.helpers does)."""
@@ -236,13 +228,3 @@ def get_available_port(start: int = 54000, end: int = 60000, max_tries: int = 20
             except OSError:
                 continue
     raise RuntimeError(f"No available port found in [{start}, {end}] after {max_tries} tries")
-
-
-def save_file(path: str, lines, ensure_newline: bool = True) -> None:
-    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
-    with open(path, "w", encoding="utf-8") as f:
-        for line in lines:
-            line = str(line)
-            if ensure_newline and not line.endswith("\n"):
-                line += "\n"
-            f.write(line)
