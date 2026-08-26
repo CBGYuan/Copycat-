@@ -48,6 +48,28 @@ body { background: var(--bg-soft); color: var(--text-main); }
   box-shadow: 0 2px 10px rgba(0, 90, 160, 0.25);
 }
 .app-navbar .navbar-brand { font-weight: 700; color: #fff !important; letter-spacing: 0.02em; }
+/* Product name large, what-it-does small beside it. Baseline-aligned so the
+   two sit on one line without the tagline dragging the navbar taller. */
+.app-brand { display: inline-flex; align-items: baseline; gap: 9px; }
+.app-brand .fa-robot { align-self: center; }
+.app-brand-name { font-size: 1.32rem; font-weight: 800; letter-spacing: 0.01em; }
+.app-brand-sep {
+  align-self: center;
+  width: 1px;
+  height: 17px;
+  background: rgba(255, 255, 255, 0.42);
+}
+.app-brand-tagline {
+  font-size: 0.82rem;
+  font-weight: 500;
+  color: rgba(255, 255, 255, 0.84);
+  letter-spacing: 0.01em;
+}
+/* On a narrow window the tagline is the half that can go — the product name
+   never wraps under its own icon. */
+@media (max-width: 640px) {
+  .app-brand-sep, .app-brand-tagline { display: none; }
+}
 .app-navbar .nav-link {
   color: rgba(255, 255, 255, 0.88) !important;
   font-weight: 500;

@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>{% block title %}Log Triage & Skill Learning{% endblock %}</title>
+<title>{% block title %}Castor — Log Triage & Skill Learning{% endblock %}</title>
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
 <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
 <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css" rel="stylesheet">
@@ -12,7 +12,16 @@
 <body class="{% block body_class %}{% endblock %}">
 <nav class="navbar navbar-expand-lg app-navbar mb-4">
   <div class="container-fluid">
-    <a class="navbar-brand" href="{{ url_for('main.index') }}"><i class="fas fa-robot"></i> Log Triage &amp; Skill Learning</a>
+    <!-- Product name first, what it does second. Laid out side by side rather
+         than stacked: the log workbench is height-tight enough that its navbar
+         margin is already trimmed (see .page-log-workbench), and a two-line
+         brand would take that back out of the log pane. -->
+    <a class="navbar-brand app-brand" href="{{ url_for('main.index') }}">
+      <i class="fas fa-robot"></i>
+      <span class="app-brand-name">Castor</span>
+      <span class="app-brand-sep" aria-hidden="true"></span>
+      <span class="app-brand-tagline">Log Triage &amp; Skill Learning</span>
+    </a>
     <button class="navbar-toggler bg-light" type="button" data-bs-toggle="collapse" data-bs-target="#navContent">
       <span class="navbar-toggler-icon"></span>
     </button>
