@@ -29,7 +29,7 @@
       <button type="button" class="lib-datadir-open" id="lib-datadir-open"
               title="Open this folder in Explorer">Open</button>
       <span class="lib-datadir-warn" id="lib-datadir-warn" hidden>
-        This folder is gone — Copycat was moved or deleted while it was open.
+        This folder is gone — Castor was moved or deleted while it was open.
         Nothing can be saved until you reopen it from its new location.
       </span>
     </div>
@@ -194,7 +194,7 @@ function loadDataLocation() {
       strip.innerHTML = others.map(o => `
         <div class="lib-stray">
           <div>
-            <b>${o.skill_count} skill(s)</b> saved by another copy of Copycat you ran
+            <b>${o.skill_count} skill(s)</b> saved by another copy of Castor you ran
             <span class="lib-stray-when">${esc((o.last_used || "").replace("T", " "))}</span>
             <div><code>${esc(o.path)}</code></div>
           </div>

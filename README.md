@@ -699,11 +699,14 @@ and unaffected.
 
 ### Standalone executable
 
-Engineers without a Python environment run `Copycat.exe` from the Releases
-page instead. Same app, no install.
+Engineers without a Python environment run `Castor.exe` from the Releases
+page instead. Same app, no install. The released artifact is named **Castor**;
+the repository and its modules keep the `copycat` name, since renaming those
+would rewrite every import path and orphan the data folders existing installs
+already write to.
 
 ```powershell
-pyinstaller copycat.spec        # -> dist\Copycat.exe
+pyinstaller copycat.spec        # -> dist\Castor.exe
 ```
 
 Ship it as a **zip**, not a bare `.exe` — corporate web filtering blocks direct
@@ -711,7 +714,7 @@ executable downloads, so a raw exe release asset is undownloadable on the
 Intel network (IntelAvatar's releases are zipped for the same reason).
 
 ```powershell
-Compress-Archive dist\Copycat.exe, dist\README.txt dist\Copycat-<version>.zip
+Compress-Archive dist\Castor.exe, dist\README.txt dist\Castor-<version>.zip
 ```
 
 A frozen build has two roots and `configs/path_configs.py` keeps them apart:

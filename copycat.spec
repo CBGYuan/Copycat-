@@ -46,7 +46,10 @@ exe = EXE(
     a.binaries,
     a.datas,
     [],
-    name="Copycat",
+    # Shipped as Castor. The repo/module names stay "copycat" — renaming
+    # those would rewrite import paths and the data folder history for no
+    # gain; this is the name engineers actually see and download.
+    name="Castor",
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,

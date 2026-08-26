@@ -129,7 +129,7 @@ class ManagedChromeWindow:
                     _safe_print(
                         f"⚠️  Chrome started and exited immediately (code "
                         f"{process.returncode}). The usual cause is running "
-                        "Copycat as administrator: the child process inherits "
+                        "this app as administrator: the child process inherits "
                         "that token and Chrome refuses to run elevated. "
                         "Falling back to the default browser."
                     )
