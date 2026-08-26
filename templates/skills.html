@@ -20,6 +20,19 @@
       Every skill visible to this workbench, drawn by ancestry. Pick one to inspect its
       revision trail, load it as the baseline the next Export inherits from, or edit it.
     </div>
+    <!-- The folder Export actually writes to. Said here because a second copy
+         of Copycat is a second, empty library, and the only symptom is a
+         library that looks emptier than the engineer remembers. -->
+    <div class="lib-datadir" id="lib-datadir">
+      <i class="fas fa-folder-open"></i>
+      <span>Saving to</span> <code id="lib-datadir-path">…</code>
+      <button type="button" class="lib-datadir-open" id="lib-datadir-open"
+              title="Open this folder in Explorer">Open</button>
+      <span class="lib-datadir-warn" id="lib-datadir-warn" hidden>
+        This folder is gone — Copycat was moved or deleted while it was open.
+        Nothing can be saved until you reopen it from its new location.
+      </span>
+    </div>
   </div>
   <div class="lib-head-actions">
     <div class="btn-group btn-group-sm" role="group" id="lib-domain">
@@ -29,6 +42,11 @@
     <button class="btn btn-sm btn-outline-secondary" onclick="newSkill()"><i class="fas fa-plus"></i> New Blank Skill</button>
   </div>
 </div>
+
+<!-- Only ever shown when a folder this user really launched a Copycat from
+     still holds skills this copy doesn't have. Nothing is scanned for and
+     nothing is moved without this click. -->
+<div class="lib-strays" id="lib-strays" hidden></div>
 
 <div class="lib-grid">
   <!-- ── Left: the lineage forest ─────────────────────────────────────── -->
@@ -149,6 +167,84 @@ function selectSource(path) {
     loadSources();
     loadGraph(false);
   });
+}
+
+// ── Where this copy saves ────────────────────────────────────────
+// Skills live beside the exe, so running a SECOND copy of Copycat gives that
+// copy its own empty library — and the only symptom is a library that looks
+// emptier than it should. The path is always on screen, and any other folder
+// this user has really launched a Copycat from is offered here rather than
+// left to be discovered in Explorer weeks later.
+function loadDataLocation() {
+  fetch("/skills/data_location")
+    .then(r => r.json())
+    .then(d => {
+      if (!d.success) return;
+      document.getElementById("lib-datadir-path").textContent = d.current;
+      const line = document.getElementById("lib-datadir");
+      line.classList.toggle("is-gone", d.reachable === false);
+      const warn = document.getElementById("lib-datadir-warn");
+      warn.hidden = d.reachable !== false;
+      const strip = document.getElementById("lib-strays");
+      const others = d.others || [];
+      strip.hidden = !others.length;
+      if (!others.length) { strip.innerHTML = ""; return; }
+      // data-path, not an inline onclick argument: a Windows path inside a JS
+      // string literal loses every backslash to escape processing.
+      strip.innerHTML = others.map(o => `
+        <div class="lib-stray">
+          <div>
+            <b>${o.skill_count} skill(s)</b> saved by another copy of Copycat you ran
+            <span class="lib-stray-when">${esc((o.last_used || "").replace("T", " "))}</span>
+            <div><code>${esc(o.path)}</code></div>
+          </div>
+          <div class="lib-stray-actions">
+            <button type="button" class="btn btn-sm btn-outline-secondary"
+                    data-open-path="${esc(o.path)}">Open</button>
+            <button type="button" class="btn btn-sm btn-primary"
+                    data-import-path="${esc(o.path)}">Bring them here</button>
+          </div>
+        </div>`).join("");
+      strip.querySelectorAll("[data-import-path]").forEach(b => {
+        b.addEventListener("click", () => importDataLocation(b, b.dataset.importPath));
+      });
+      strip.querySelectorAll("[data-open-path]").forEach(b => {
+        b.addEventListener("click", () => openDataFolder(b.dataset.openPath));
+      });
+    });
+}
+
+function openDataFolder(path) {
+  fetch("/skills/data_location/open", {
+    method: "POST", headers: {"Content-Type": "application/json"},
+    body: JSON.stringify({path: path || ""}),
+  }).then(r => r.json()).then(d => {
+    if (!d.success) alert(d.message || "Could not open that folder");
+  }).catch(e => alert("Could not open that folder: " + e));
+}
+
+function importDataLocation(btn, path) {
+  btn.disabled = true;
+  fetch("/skills/data_location/import", {
+    method: "POST", headers: {"Content-Type": "application/json"},
+    body: JSON.stringify({path: path}),
+  }).then(r => r.json()).then(d => {
+    if (!d.success) { alert(d.message || "Could not import those skills"); btn.disabled = false; return; }
+    // Never say "done, delete it": a skipped key is a DIFFERENT edit of a
+    // skill this library already has, and it only exists over there.
+    let msg = d.total
+      ? `${d.total} skill(s) copied here.`
+      : "Nothing new to copy: this library already has a skill under every one of those keys.";
+    if (d.conflicts) {
+      msg += `\n\n${d.conflicts} were left behind — this library already has a skill under`
+           + ` the same key, and yours was kept. Those may be different edits, so don't`
+           + ` delete that folder until you have compared them.`;
+    }
+    msg += "\n\nNothing was deleted. A note was left in that folder saying where its skills went.";
+    alert(msg);
+    loadDataLocation();
+    loadGraph(false);
+  }).catch(e => { alert("Could not import those skills: " + e); btn.disabled = false; });
 }
 
 function loadGraph(keepSelection) {
@@ -476,6 +572,8 @@ document.addEventListener("DOMContentLoaded", function () {
   document.getElementById("lib-source-browse").addEventListener("click", browseSource);
   document.getElementById("lib-load-btn").addEventListener("click", doActivate);
   document.getElementById("lib-edit-btn").addEventListener("click", editSelected);
+  document.getElementById("lib-datadir-open").addEventListener("click", () => openDataFolder(""));
+  loadDataLocation();
   loadSources();
   loadGraph(false);
 });

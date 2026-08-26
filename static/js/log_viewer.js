@@ -610,12 +610,10 @@ function toggleSkillLoadPicker(force) {
 }
 
 // The menu is position:fixed (see the CSS note), so it has to be placed by
-// hand: below the Skill button normally, flipped above it when the workbench
-// sits low enough that the list would run off the bottom of the window — which
-// it does at ordinary laptop heights, and used to hide most of the skills.
-function positionSkillLoadMenu() {
-    const menu = document.getElementById('skillLoadMenu');
-    const button = document.getElementById('skillLoadToggle');
+// hand: below its button normally, flipped above it when the workbench sits
+// low enough that the list would run off the bottom of the window — which it
+// does at ordinary laptop heights, and used to hide most of the skills.
+function placeAnchoredMenu(menu, button) {
     if (!menu || !button || menu.hidden) return;
     const rect = button.getBoundingClientRect();
     const gap = 6;
@@ -633,6 +631,13 @@ function positionSkillLoadMenu() {
         menu.style.bottom = 'auto';
         menu.style.top = Math.round(rect.bottom + gap) + 'px';
     }
+}
+
+function positionSkillLoadMenu() {
+    placeAnchoredMenu(
+        document.getElementById('skillLoadMenu'),
+        document.getElementById('skillLoadToggle'),
+    );
 }
 
 function renderSkillLoadPicker() {
@@ -2084,23 +2089,18 @@ function appendMsg(role, content, stepTag) {
 // LLM_helper._record_usage — same numbers also print to the terminal on
 // every call). Session-cumulative, not per-call, since that's the more
 // useful "is this getting expensive" signal while iterating on a skill.
-// Claude Sonnet 6 bills input (prompt) and output (completion) tokens at
-// DIFFERENT US-dollar rates — adjust these two constants if the contract
-// rate changes. Units: USD per 1,000,000 tokens.
-const USD_PER_MTOK_IN = 3.0;    // input / prompt tokens
-const USD_PER_MTOK_OUT = 15.0;  // output / completion tokens
 // Last session usage {prompt_tokens, completion_tokens, total_tokens, calls},
-// kept so the Spending popover can recompute the USD breakdown on demand
-// without a refetch.
+// including the SERVER-CALCULATED estimate. The browser deliberately owns no
+// pricing table or cost arithmetic; see services/pricing_service.py.
 let lastSessionUsage = null;
 
 function updateTokenBadge(sessionUsage) {
     if (!sessionUsage) return;
     lastSessionUsage = sessionUsage;
     const badge = document.getElementById('tokenBadge');
-    const usd = spendUsd(sessionUsage);
-    badge.textContent = `🪙 $${usd.total.toFixed(4)}`;
-    badge.title = `${sessionUsage.total_tokens} tokens across ${sessionUsage.calls} LLM call(s) this session — click for the breakdown`;
+    const cost = readBackendCost(sessionUsage);
+    badge.textContent = cost.available ? `🪙 Est. $${cost.total.toFixed(4)}` : '🪙 Cost n/a';
+    badge.title = `${sessionUsage.total_tokens} measured tokens across ${sessionUsage.calls} LLM call(s) this session — click for the breakdown`;
     // Keep the spending popover live if it's currently open.
     const sp = document.getElementById('spendPanel');
     if (sp && sp.style.display !== 'none') renderSpendPanel();
@@ -2109,13 +2109,20 @@ function updateTokenBadge(sessionUsage) {
 // tiny token formatter (1234 -> "1,234")
 function fmtTok(n) { return (n || 0).toLocaleString('en-US'); }
 
-// Shared USD math so the badge and the popover never drift apart.
-function spendUsd(u) {
+// Read the backend result without reproducing its rates or arithmetic here.
+function readBackendCost(u) {
     const inTok = (u && u.prompt_tokens) || 0;
     const outTok = (u && u.completion_tokens) || 0;
-    const usdIn = inTok / 1e6 * USD_PER_MTOK_IN;
-    const usdOut = outTok / 1e6 * USD_PER_MTOK_OUT;
-    return {inTok, outTok, usdIn, usdOut, total: usdIn + usdOut};
+    const breakdown = (u && u.cost_breakdown) || {};
+    return {
+        inTok,
+        outTok,
+        usdIn: Number(breakdown.input_usd || 0),
+        usdOut: Number(breakdown.output_usd || 0),
+        total: Number((u && u.estimated_cost_usd) || 0),
+        available: !!(u && u.cost_estimate_available),
+        rates: (u && u.rates_usd_per_mtok) || null,
+    };
 }
 
 // One spending-popover line, laid out as a fixed-column grid so every row's
@@ -2129,25 +2136,28 @@ function spendLine(label, formula, usdStr, cls) {
     return row;
 }
 
-// Spending popover — token spend split into input vs output (each at its own
-// Claude Sonnet 6 USD rate, shown as the actual conversion formula) plus the
-// combined total. Built via the DOM so it stays consistent with the
-// readiness popover's building style.
+// Spending popover — measured tokens plus the estimate produced by Flask.
 function renderSpendPanel() {
     const p = document.getElementById('spendPanel');
     p.innerHTML = '';
     const u = lastSessionUsage || {prompt_tokens: 0, completion_tokens: 0, total_tokens: 0, calls: 0};
-    const {inTok, outTok, usdIn, usdOut, total} = spendUsd(u);
+    const {inTok, outTok, usdIn, usdOut, total, available, rates} = readBackendCost(u);
     const totTok = u.total_tokens || (inTok + outTok);
 
     p.appendChild(el('div', 'readiness-panel-title', 'Spending'));
     const table = el('div', 'spend-table');
-    table.appendChild(spendLine('Input', `${fmtTok(inTok)} tok x $${USD_PER_MTOK_IN.toFixed(2)}/1M`, '$' + usdIn.toFixed(4)));
-    table.appendChild(spendLine('Output', `${fmtTok(outTok)} tok x $${USD_PER_MTOK_OUT.toFixed(2)}/1M`, '$' + usdOut.toFixed(4)));
+    const inFormula = rates ? `${fmtTok(inTok)} tok x $${Number(rates.input).toFixed(2)}/1M` : `${fmtTok(inTok)} measured tok`;
+    const outFormula = rates ? `${fmtTok(outTok)} tok x $${Number(rates.output).toFixed(2)}/1M` : `${fmtTok(outTok)} measured tok`;
+    table.appendChild(spendLine('Input', inFormula, available ? '$' + usdIn.toFixed(4) : '—'));
+    table.appendChild(spendLine('Output', outFormula, available ? '$' + usdOut.toFixed(4) : '—'));
     table.appendChild(el('div', 'spend-divider'));
-    table.appendChild(spendLine('Total', `${fmtTok(totTok)} tok`, '$' + total.toFixed(4), 'spend-total'));
+    table.appendChild(spendLine('Estimated', `${fmtTok(totTok)} measured tok`, available ? '$' + total.toFixed(4) : 'Unavailable', 'spend-total'));
     p.appendChild(table);
-    p.appendChild(el('div', 'spend-sub', `${u.calls || 0} LLM call(s) this session · Claude Sonnet 6`));
+    const models = Array.isArray(u.models) && u.models.length ? u.models.join(', ') : 'model unknown';
+    p.appendChild(el('div', 'spend-sub', `${u.calls || 0} LLM call(s) · ${models}`));
+    p.appendChild(el('div', 'spend-sub', available
+        ? `${u.rate_source || 'Configured rate'} · Estimate only, not the GNAI invoice.`
+        : 'No configured rate for this model. Measured tokens are still available.'));
 }
 
 // Spending column click — open its popover (and close Readiness's so only
@@ -2168,8 +2178,8 @@ function toggleSpendPanel(evt) {
 let pendingBaselineSend = null;
 let baselineGuardReturnFocus = null;
 
-function showBaselineGuard(presetMsg, displayMsg, forceTag, decisionId) {
-    pendingBaselineSend = {presetMsg, displayMsg, forceTag, decisionId};
+function showBaselineGuard(presetMsg, displayMsg, forceTag, decisionId, answeredGap) {
+    pendingBaselineSend = {presetMsg, displayMsg, forceTag, decisionId, answeredGap};
     baselineGuardReturnFocus = document.activeElement;
     const modal = document.getElementById('baselineGuardModal');
     modal.style.display = 'flex';
@@ -2189,7 +2199,8 @@ function allowChatWithoutBaselineOnce() {
     if (!pending) { closeBaselineGuard(); return; }
     closeBaselineGuard(false);
     pendingBaselineSend = null;
-    sendMsg(pending.presetMsg, pending.displayMsg, pending.forceTag, true, pending.decisionId);
+    sendMsg(pending.presetMsg, pending.displayMsg, pending.forceTag, true, pending.decisionId,
+            pending.answeredGap);
 }
 
 // The in-flight chat request's AbortController — set only while a response
@@ -2234,7 +2245,12 @@ function autoGrowChatInput(input) {
 // the case-intake card use, just for the one chat input shared across turns.
 let _mainChatAttachments = null;
 
-function sendMsg(presetMsg, displayMsg, forceTag, allowWithoutBaseline, decisionId) {
+// answeredGap: the "Still missing" item this send is the answer TO. The card
+// prepends `Re: <the gap>` so the transcript (and the model) can see which one
+// is being answered, and naming it here lets the server take that echo back
+// out before matching the answer against the REMAINING gaps — otherwise the
+// echoed log keywords close every neighbouring item about the same symbol.
+function sendMsg(presetMsg, displayMsg, forceTag, allowWithoutBaseline, decisionId, answeredGap) {
     // chatSendBtn stays enabled while busy (see setBusy) so this same click
     // handler doubles as Stop — everything else with data-busy-lock is
     // disabled, so isBusy() here only ever means "the button itself was
@@ -2259,7 +2275,8 @@ function sendMsg(presetMsg, displayMsg, forceTag, allowWithoutBaseline, decision
         // call returns would race setBusy and leave Send clickable while a
         // response is still streaming in.
         _mainChatAttachments.resolvePending()
-            .then(() => sendMsg(presetMsg, displayMsg, forceTag, allowWithoutBaseline, decisionId))
+            .then(() => sendMsg(presetMsg, displayMsg, forceTag, allowWithoutBaseline, decisionId,
+                                answeredGap))
             .catch(() => { chatInput.disabled = false; chatSendBtn.disabled = false; });
         return;
     }
@@ -2267,7 +2284,7 @@ function sendMsg(presetMsg, displayMsg, forceTag, allowWithoutBaseline, decision
     const msg = presetMsg !== undefined ? presetMsg : input.value.trim();
     if (!msg) return;
     if (!baselineDone && !allowWithoutBaseline) {
-        showBaselineGuard(presetMsg, displayMsg, forceTag, decisionId);
+        showBaselineGuard(presetMsg, displayMsg, forceTag, decisionId, answeredGap);
         return;
     }
     const tag = forceTag !== undefined ? forceTag : currentStepTag;
@@ -2279,6 +2296,10 @@ function sendMsg(presetMsg, displayMsg, forceTag, allowWithoutBaseline, decision
         if (attachStatus) { attachStatus.textContent = ''; attachStatus.hidden = true; }
     }
     setBusy(true);
+    // From the send, not from the assess call: the reassessment only starts
+    // after the reply finishes, and that whole stretch is time the engineer
+    // spends reading a list that hasn't seen the answer yet.
+    assessBusy(true);
     _activeChatAbort = new AbortController();
     fetch(LV.url.chatbot_send_stream, {
         method: 'POST', headers: {'Content-Type': 'application/json'},
@@ -2289,6 +2310,7 @@ function sendMsg(presetMsg, displayMsg, forceTag, allowWithoutBaseline, decision
             allow_without_baseline: !!allowWithoutBaseline,
             decision_id: decisionId || '',
             decision_answer: decisionId ? (displayMsg !== undefined ? displayMsg : msg) : '',
+            answered_gap: answeredGap || '',
         })
     }).then(r => r.text()).then(text => {
         const d = _parseStreamDone(text);
@@ -2316,7 +2338,7 @@ function sendMsg(presetMsg, displayMsg, forceTag, allowWithoutBaseline, decision
         } else {
             appendMsg('assistant', '⚠️ Network error: ' + e, tag);
         }
-    }).finally(() => { setBusy(false); _activeChatAbort = null; });
+    }).finally(() => { setBusy(false); _activeChatAbort = null; assessBusy(false); });
 }
 
 // One high-information question when a chat message introduces knowledge
@@ -2360,7 +2382,19 @@ function renderProactiveClarification(q, stepTag) {
 // Live re-assessment after each chat answer: updates the readiness badge +
 // the 防呆 details panel from the whole conversation so far. Cheap, standalone
 // (no new analysis/questions), and a no-op until a filter has been run.
+// The strip is a whole second LLM call behind the chat reply, so for that
+// gap it showed the PREVIOUS round's list as if it were the answer to what
+// was just taught. Counted, not a flag: the send marks it busy and the
+// assess it triggers marks it again, so the two overlap without flickering.
+let _assessPending = 0;
+
+function assessBusy(on) {
+    _assessPending = Math.max(0, _assessPending + (on ? 1 : -1));
+    renderOpenItems(currentAssessment);
+}
+
 function refreshAssessment() {
+    assessBusy(true);
     fetch(LV.url.learning_assess, {
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
@@ -2372,7 +2406,8 @@ function refreshAssessment() {
             if (d.usage) updateTokenBadge(d.usage.session);
             if (d.assessment) applyAssessment(d.assessment);
         })
-        .catch(() => {}); // a failed background assess shouldn't disrupt the chat
+        .catch(() => {}) // a failed background assess shouldn't disrupt the chat
+        .finally(() => assessBusy(false));
 }
 
 function resetChat() {
@@ -2423,14 +2458,27 @@ function updateReadinessBadge(readiness, unverified) {
     badge.classList.add(score >= 70 ? 'is-high' : score >= 35 ? 'is-mid' : 'is-low');
 }
 
+// The two claim buckets, split because only one of them is work. A
+// contradiction has to be answered; an "asserted" claim is often something the
+// log physically cannot prove (a firmware weighting rule), so it stops
+// counting once the engineer confirms it is deliberate.
+function claimBuckets(a) {
+    const validation = (a && a.validation) || [];
+    return {
+        conflicts: validation.filter(v => v.status === 'contradiction' && !v.skipped),
+        unconfirmed: validation.filter(v => v.status === 'asserted' && !v.acknowledged && !v.skipped),
+        filed: validation.filter(v => v.status === 'asserted' && v.acknowledged && !v.skipped),
+        setAside: validation.filter(v => v.skipped),
+    };
+}
+
 // Single entry point for a fresh assessment (from /assess or /log_round).
 function applyAssessment(a) {
-    const previousGaps = ((currentAssessment && currentAssessment.gaps) || []).length;
     currentAssessment = a || null;
-    const unverified = ((a && a.validation) || []).filter(v => v.status !== 'verified').length;
-    updateReadinessBadge(a && a.readiness, unverified);
+    const b = claimBuckets(a);
+    updateReadinessBadge(a && a.readiness, b.conflicts.length + b.unconfirmed.length);
     renderReadinessPanel(a);
-    renderOpenItems(a, previousGaps);
+    renderOpenItems(a);
 }
 
 // What still needs work, sitting directly above the chat instead of three
@@ -2450,19 +2498,20 @@ function applyAssessment(a) {
 // element rewritten in place, same rule as the case-context note.
 let _openItemsOpen = null;      // null | 'gaps' | 'claims'
 
-function renderOpenItems(a, previousGaps) {
+function renderOpenItems(a) {
     const strip = document.getElementById('openItemsStrip');
     if (!strip) return;
     const gaps = (a && a.gaps) || [];
-    const unverified = ((a && a.validation) || []).filter(v => v.status !== 'verified');
+    const {conflicts, unconfirmed} = claimBuckets(a);
     strip.innerHTML = '';
     // The bar is the open-work list: answer or skip the last gap and it goes
     // away, rather than lingering on a claim count. Unverified claims do not
     // hold it open on their own — they are still listed in the readiness
     // panel, which the badge's ⚠ points at.
-    strip.hidden = !gaps.length;
+    strip.hidden = !gaps.length && !_assessPending;
     if (strip.hidden) { _openItemsOpen = null; return; }
-    if (_openItemsOpen === 'claims' && !unverified.length) _openItemsOpen = null;
+    if (_openItemsOpen === 'claims' && !unconfirmed.length) _openItemsOpen = null;
+    if (_openItemsOpen === 'conflicts' && !conflicts.length) _openItemsOpen = null;
 
     // stopPropagation on every control in here: re-rendering detaches the
     // clicked node, so the close-on-outside-click handler below would see a
@@ -2475,37 +2524,63 @@ function renderOpenItems(a, previousGaps) {
         b.onclick = (e) => {
             e.stopPropagation();
             _openItemsOpen = _openItemsOpen === key ? null : key;
-            renderOpenItems(a, previousGaps);
+            renderOpenItems(a);
         };
         return b;
     };
 
     const head = el('div', 'open-items-head');
-    head.appendChild(tab('gaps', `Still missing (${gaps.length})`));
-    if (unverified.length) {
-        head.appendChild(tab('claims', `⚠ ${unverified.length} unverified`, 'is-warn'));
+    if (gaps.length) head.appendChild(tab('gaps', `Still missing (${gaps.length})`));
+    // Contradictions get their own tab: buried among a dozen expert rules the
+    // engineer supplied on purpose, the one claim that actually conflicts is
+    // the one nobody reads.
+    if (conflicts.length) {
+        head.appendChild(tab('conflicts', `⛔ ${conflicts.length} contradiction`, 'is-bad'));
     }
-    // Count, not identity: the model rewords a gap between assessments often
-    // enough that claiming specific items were answered would be a lie.
-    const delta = (previousGaps || 0) - gaps.length;
-    if (delta > 0) head.appendChild(el('span', 'open-items-delta', `−${delta} since last check`));
+    if (unconfirmed.length) {
+        head.appendChild(tab('claims', `⚠ ${unconfirmed.length} not in this log`, 'is-warn'));
+    }
+    if (_assessPending) {
+        const busy = el('span', 'open-items-busy');
+        busy.appendChild(el('span', 'open-items-spin'));
+        busy.appendChild(el('span', '', gaps.length ? 'rechecking…' : 'checking what\u2019s still missing…'));
+        busy.title = 'The list below is the PREVIOUS round\u2019s — your last answer is still being assessed.';
+        head.appendChild(busy);
+    }
+    // Both counters are running totals for the session, not deltas: "since
+    // last time" was measured against whatever this tab last saw, so a reload
+    // reported the whole session as one round. Green is the engineer's number
+    // only — questions arriving is not progress, and painting the two the same
+    // colour made a round that asked six read like a round that closed six.
+    const settled = (a && a.settled) || 0;
+    const asked = (a && a.raised) || 0;
+    if (settled) head.appendChild(el('span', 'open-items-delta', `${settled} answered or skipped`));
+    if (asked) head.appendChild(el('span', 'open-items-asked', `${asked} asked so far`));
     strip.appendChild(head);
     if (!_openItemsOpen) return;
 
     const list = el('div', 'open-items-list');
-    const redraw = () => renderOpenItems(a, previousGaps);
+    const redraw = () => renderOpenItems(a);
     if (_openItemsOpen === 'gaps') {
-        gaps.forEach(g => list.appendChild(gapRow(g, redraw)));
+        const arrived = (a && a.new_gaps) || [];
+        // Newest first: the list no longer shrinks on its own, so the one
+        // question that just arrived would otherwise sit at the bottom of six
+        // the engineer has already read past.
+        const ordered = arrived.concat(gaps.filter(g => arrived.indexOf(g) < 0));
+        ordered.forEach(g => list.appendChild(gapRow(g, redraw, arrived.indexOf(g) >= 0)));
+    } else if (_openItemsOpen === 'conflicts') {
+        conflicts.forEach(v => list.appendChild(claimRow(v, redraw)));
     } else {
-        unverified.forEach(v => list.appendChild(claimRow(v, redraw)));
+        unconfirmed.forEach(v => list.appendChild(claimRow(v, redraw)));
     }
     strip.appendChild(list);
 }
 
-function gapRow(g, redraw) {
+function gapRow(g, redraw, isNew) {
     const item = el('div', 'open-items-item');
     const row = el('button', 'open-items-row', g);
     row.type = 'button';
+    if (isNew) row.insertBefore(el('span', 'open-items-new', 'new'), row.firstChild);
     row.title = g + '\n\nClick to answer this one in the chat.';
     row.onclick = (e) => {
         e.stopPropagation();
@@ -2518,7 +2593,8 @@ function gapRow(g, redraw) {
             // parallel — both calls answer with an assessment, and the older
             // one landing last would roll the badge back.
             onSubmit: (answer) => {
-                closeGap(g, true).then(() => sendMsg(`Re: ${g}\n${answer}`, undefined, 'all', false));
+                closeGap(g, true)
+                    .then(() => sendMsg(`Re: ${g}\n${answer}`, undefined, 'all', false, undefined, g));
             },
             onSkip: () => closeGap(g, false),
             skipLabel: 'Skip this',
@@ -2534,27 +2610,105 @@ function gapRow(g, redraw) {
     return item;
 }
 
-// No Skip here on purpose: a claim isn't a question to decline, and nothing
-// local should be able to mark it verified. It clears when the next assessment
-// says the log backs it up.
+// Nothing local may mark a claim VERIFIED — only the next assessment finding
+// evidence in the log can do that. Filing one as deliberate expert knowledge
+// is a different statement, and the only one the engineer is in a position to
+// make: it says the log cannot prove this, which for a firmware rule is
+// permanently true. Contradictions get no such button.
 function claimRow(v, redraw) {
     const meta = _VALID_META[v.status] || _VALID_META.asserted;
     const item = el('div', 'open-items-item');
     const row = el('button', 'open-items-row', `${meta.icon} ${v.claim}`);
     row.type = 'button';
-    row.title = meta.label + (v.note ? ' — ' + v.note : '') + '\n\nClick to confirm or correct it.';
+    row.title = meta.label + (v.note ? ' — ' + v.note : '') + '\n\n' + meta.prompt;
     row.onclick = (e) => {
         e.stopPropagation();
         _openItemsOpen = null;
-        openAskCard({
-            tag: `${meta.icon} ${meta.label} — confirm, correct, or point at the evidence`,
-            text: v.claim,
-            onSubmit: (answer) => sendMsg(`Re: ${v.claim}\n${answer}`, undefined, 'all', false),
-        });
+        openClaimCard(v, meta);
         redraw();
     };
     item.appendChild(row);
+    const skip = el('button', 'open-items-skip', 'Skip');
+    skip.type = 'button';
+    skip.title = 'Not this session\u2019s argument \u2014 stop counting it.'
+               + '\nSays nothing about whether it is true, and it still shows at Export.';
+    skip.onclick = (e) => { e.stopPropagation(); skipClaim(v.claim); };
+    item.appendChild(skip);
+    if (v.status === 'asserted') {
+        const ack = el('button', 'open-items-skip open-items-force', 'Force expert');
+        ack.type = 'button';
+        ack.title = "Override the log check \u2014 this is domain knowledge on purpose, and the log"
+                  + "\ncan't prove it and never will."
+                  + "\nStops the warning. It still exports as asserted, not verified.";
+        ack.onclick = (e) => {
+            e.stopPropagation();
+            if (forceExpertRule(v.claim)) acknowledgeClaim(v.claim);
+        };
+        item.appendChild(ack);
+    }
     return item;
+}
+
+// One confirmation for both entry points: it is one click from a strip that
+// re-renders under the cursor, and nothing later re-checks the claim.
+function forceExpertRule(claim) {
+    return confirm('Force this in as expert knowledge?\n\n' + claim
+        + '\n\nThe log check is OVERRIDDEN \u2014 this claim will never be checked'
+        + '\nagainst the log, now or later.'
+        + '\nIt stops the warning, and still exports as asserted, never as verified.');
+}
+
+// Three ways out of one card, because a claim has three honest endings: cite
+// the line that shows it, correct it, or state that the log was never going
+// to show it. Skip is the fourth and says nothing about the claim itself —
+// it is recorded, not swallowed, and still appears at Export.
+function openClaimCard(v, meta) {
+    const isAsserted = v.status === 'asserted';
+    openAskCard({
+        tag: `${meta.icon} ${meta.label} — ${meta.prompt}`,
+        text: v.claim,
+        placeholder: isAsserted
+            ? 'Cite the line below, or correct the claim in your own words…'
+            : 'Correct it here…',
+        lineLookup: true,
+        onSubmit: (answer) => sendMsg(`Re: ${v.claim}\n${answer}`, undefined, 'all', false),
+        onSkip: () => skipClaim(v.claim),
+        skipLabel: 'Skip',
+        skipTitle: 'Not this session\u2019s argument \u2014 stop counting it.'
+                 + '\nSays nothing about whether it is true, and it still shows at Export.',
+        extraActions: isAsserted ? [{
+            label: 'Force expert rule',
+            cls: 'btn-outline-danger',
+            title: "Override the log check: force this in as domain knowledge the log can't prove.",
+            onClick: (close) => {
+                if (!forceExpertRule(v.claim)) return;
+                close();
+                acknowledgeClaim(v.claim);
+            },
+        }] : [],
+    });
+}
+
+function acknowledgeClaim(claim) {
+    return fetch(LV.url.learning_ack_claim, {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({claim: claim}),
+    })
+        .then(r => r.json())
+        .then(d => { if (d.success) applyAssessment(d.assessment); })
+        .catch(() => {});
+}
+
+function skipClaim(claim) {
+    return fetch(LV.url.learning_skip_claim, {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({claim: claim}),
+    })
+        .then(r => r.json())
+        .then(d => { if (d.success) applyAssessment(d.assessment); })
+        .catch(() => {});
 }
 
 // Both kinds are permanent; the two buckets stay separate because only one of
@@ -2579,7 +2733,7 @@ document.addEventListener('click', function (e) {
     const strip = document.getElementById('openItemsStrip');
     if (strip && !strip.contains(e.target)) {
         _openItemsOpen = null;
-        renderOpenItems(currentAssessment, 0);
+        renderOpenItems(currentAssessment);
     }
 });
 
@@ -2604,9 +2758,15 @@ function openAskCard(opts) {
     // the step-context selector happens to be pointing at.
     const answerBox = buildAnswerBox({
         hint: opts.text,
+        placeholder: opts.placeholder,
+        lineLookup: opts.lineLookup,
         onSubmit: (answer) => { card.remove(); opts.onSubmit(answer); },
         onSkip: opts.onSkip ? () => { card.remove(); opts.onSkip(); } : undefined,
         skipLabel: opts.skipLabel,
+        // The action decides whether the card closes: one that opens a
+        // confirmation must survive the engineer cancelling it.
+        extraActions: (opts.extraActions || []).map(
+            act => Object.assign({}, act, {onClick: () => act.onClick(() => card.remove())})),
     });
     attachAnswerBox(card, false, null, answerBox);
 
@@ -2660,10 +2820,17 @@ document.addEventListener('click', function(e) {
 });
 
 const _COVER_LABELS = {knowledge: 'Knowledge & rules', scope: 'Scope (non-overlapping)', keywords: 'Minimal keywords', evidence: 'Evidence (labeled lines)'};
+// `label` names where the claim CAME FROM, not how true it is: "unverified"
+// read as "we think this is wrong, defend it", when for expert knowledge the
+// log was never going to show it and nothing is owed. Only a contradiction
+// asks for a correction.
 const _VALID_META = {
-    verified:      {icon: '✅', cls: 'v-ok',   label: 'verified from log'},
-    asserted:      {icon: '⚠️', cls: 'v-warn', label: 'stated, not log-verified'},
-    contradiction: {icon: '⛔', cls: 'v-bad',  label: 'contradiction / open item'},
+    verified:      {icon: '✅', cls: 'v-ok',   label: 'shown in this log',
+                    prompt: 'Confirm or correct it.'},
+    asserted:      {icon: '⚠️', cls: 'v-warn', label: 'from your knowledge, not this log',
+                    prompt: "Point at a line that shows it, or force it in as an expert rule if this log can't."},
+    contradiction: {icon: '⛔', cls: 'v-bad',  label: 'conflicts with the log or an earlier answer',
+                    prompt: 'Correct it here.'},
 };
 
 // The readiness popover: coverage bars and the claim-by-claim check. The gaps
@@ -2716,7 +2883,9 @@ function renderReadinessPanel(a) {
             item.appendChild(el('span', 'valid-icon', meta.icon));
             const vbody = el('div', 'valid-body');
             vbody.appendChild(el('div', 'valid-claim', v.claim));
-            vbody.appendChild(el('div', 'valid-note', meta.label + (v.note ? ' — ' + v.note : '')));
+            const label = v.skipped ? 'set aside by you'
+                : v.acknowledged ? 'expert knowledge, confirmed by you' : meta.label;
+            vbody.appendChild(el('div', 'valid-note', label + (v.note ? ' — ' + v.note : '')));
             item.appendChild(vbody);
             list.appendChild(item);
         });
@@ -2770,6 +2939,14 @@ function toggleSkillDocPicker(force) {
     const open = force !== undefined ? force : menu.hidden;
     menu.hidden = !open;
     button.setAttribute('aria-expanded', String(open));
+    if (open) placeAnchoredMenu(menu, button);
+}
+
+function positionSkillDocMenu() {
+    placeAnchoredMenu(
+        document.getElementById('skillDocPickerMenu'),
+        document.getElementById('skillDocPickerToggle'),
+    );
 }
 
 function renderSkillDocPicker() {
@@ -3515,11 +3692,20 @@ function buildAnswerBox(opts) {
     if (opts.onSkip) {
         const skipBtn = el('button', 'btn btn-sm btn-outline-secondary', opts.skipLabel || 'Skip');
         skipBtn.type = 'button';
+        skipBtn.title = opts.skipTitle || '';
         skipBtn.onclick = opts.onSkip;
         actions.appendChild(skipBtn);
     }
+    (opts.extraActions || []).forEach(act => {
+        const b = el('button', 'btn btn-sm ' + (act.cls || 'btn-outline-secondary'), act.label);
+        b.type = 'button';
+        b.title = act.title || '';
+        b.onclick = act.onClick;
+        actions.appendChild(b);
+    });
 
     box.appendChild(input);
+    if (opts.lineLookup) box.appendChild(buildLineLookup(box));
     box.appendChild(attachments.pendingRow);
     box.appendChild(actions);
     box.appendChild(status);
@@ -3542,6 +3728,49 @@ function buildAnswerBox(opts) {
         input.setSelectionRange(input.value.length, input.value.length);
     };
     return box;
+}
+
+// The line number is what the engineer can read off the pane; the line TEXT
+// is what the model needs, and typing it out by hand is why claims went
+// uncited. Pulls both in, and moves the pane there so the citation can be
+// checked before it is sent.
+function buildLineLookup(box) {
+    const row = el('div', 'chat-q-lineref');
+    const field = el('input', 'form-control form-control-sm chat-q-lineno');
+    field.type = 'number';
+    field.min = '1';
+    field.placeholder = 'Line #';
+    const note = el('span', 'chat-q-lineref-note');
+    const add = el('button', 'btn btn-sm btn-outline-secondary', 'Cite line');
+    add.type = 'button';
+    add.title = 'Copy that line into the answer and jump the log pane to it.';
+    const run = () => {
+        const n = parseInt(field.value, 10);
+        if (!Number.isFinite(n)) return;
+        note.textContent = '';
+        fetch(LV.url.log_viewer_row_for_line, {
+            method: 'POST', headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({line_no: n}),
+        })
+            .then(r => r.json())
+            .then(d => {
+                if (!d.success || d.index == null) { note.textContent = 'No log loaded.'; return; }
+                box.fill(`Line ${d.line_no}: ${d.text || '(no text)'}`);
+                scrollLogToIndex(d.index);
+                note.textContent = d.exact ? '' : `line ${n} is filtered out — cited ${d.line_no}`;
+                field.value = '';
+            })
+            .catch(() => { note.textContent = 'Could not read that line.'; });
+    };
+    add.onclick = run;
+    field.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter') { e.preventDefault(); run(); }
+    });
+    row.appendChild(el('span', 'chat-q-lineref-label', 'Evidence line'));
+    row.appendChild(field);
+    row.appendChild(add);
+    row.appendChild(note);
+    return row;
 }
 
 // The custom-answer row starts hidden behind an "Other…" button whenever the
@@ -4055,22 +4284,48 @@ function exportSkill() {
     }
     if (currentAssessment) {
         const score = (currentAssessment.readiness || {}).score;
-        const flagged = (currentAssessment.validation || []).filter(v => v.status !== 'verified');
+        const {conflicts, unconfirmed, filed, setAside} = claimBuckets(currentAssessment);
         const gaps = currentAssessment.gaps || [];
         if (typeof score === 'number' && score < 60) {
             sections.push({head: `Readiness is only ${score}%`,
                            note: 'The skill may be thin.', items: []});
         }
-        if (flagged.length) {
+        if (conflicts.length) {
             sections.push({
-                head: `Claims not verified from this log (${flagged.length})`,
+                head: `Contradictions and open items (${conflicts.length})`,
+                note: 'These conflict with the stats or with another answer.',
+                items: conflicts.map(v => v.claim),
+            });
+        }
+        if (unconfirmed.length) {
+            sections.push({
+                head: `Claims this log doesn't show (${unconfirmed.length})`,
                 note: 'These export as domain knowledge, not proven fact.',
-                items: flagged.map(v => v.claim),
+                items: unconfirmed.map(v => v.claim),
             });
         }
         if (gaps.length) {
             sections.push({head: `Open items still unanswered (${gaps.length})`,
                            items: gaps});
+        }
+        // Only alongside something else. Repeating what the engineer already
+        // confirmed, on its own, would make acknowledging pointless — the
+        // dialog would open every time regardless.
+        if (filed.length && sections.length) {
+            sections.push({
+                head: `Expert knowledge you confirmed (${filed.length})`,
+                note: 'Exporting as asserted, not proven — no action needed.',
+                items: filed.map(v => v.claim),
+            });
+        }
+        // Same rule: skipping is allowed to stop the nag, not to make the
+        // claim disappear from the last look before it becomes a skill.
+        if (setAside.length && sections.length) {
+            sections.push({
+                head: `Claims you set aside (${setAside.length})`,
+                note: 'Never checked, and not filed as expert knowledge.',
+                items: setAside.map(v => v.claim),
+            });
         }
     }
     if (sections.length) { openExportGuard(sections); return; }
@@ -4240,6 +4495,22 @@ function openNextDraft() {
             body: 'Add any of these by hand below if you still want them:', list: heldBack,
         });
     }
+    // Siblings this skill reads too much like. Avatar's agent chooses between
+    // skills on the description line ALONE — it never sees keywords or rules at
+    // selection time — so two that read alike get picked between arbitrarily.
+    // Worth saying before Save, while the description is still one edit away.
+    const siblings = draft.sibling_conflicts || [];
+    if (siblings.length) {
+        notices.push({
+            kind: 'warn', icon: '🔀',
+            title: 'Reads much like ' + (siblings.length === 1 ? 'an existing skill'
+                                                              : siblings.length + ' existing skills'),
+            body: 'Avatar picks between skills on the description alone, so these '
+                + 'would compete. Say what this one covers that they do not — '
+                + 'a runtime "stop if the other is running" rule cannot work.',
+            list: siblings.map(s => `${s.name} (${Math.round(s.score * 100)}% alike): ${s.description}`),
+        });
+    }
     // `note` (if present) explains what distinct scenario a multi-draft
     // split isolates — surfaced alongside the judge's reasoning, if any.
     if (draft.note) notices.push({kind: 'info', icon: '📝', body: draft.note});
@@ -4251,7 +4522,23 @@ function openNextDraft() {
         saveUrl: LV.url.learning_save,
         approvalMode: true,
         onSaved: function (d2) {
-            alert('Skill saved!' + (draftQueue.length ? ` Now reviewing the next one (${draftQueue.length} left)…` : ''));
+            // The exact file, not just "saved": which COPY of Copycat was
+            // launched decides where this lands, and an engineer running a
+            // second copy has no other way to notice.
+            const more = draftQueue.length ? `\n\nNow reviewing the next one (${draftQueue.length} left)…` : '';
+            if (d2.saved_to) {
+                if (confirm(`Skill saved to:\n${d2.saved_to}\n\nOpen that folder?${more}`)) {
+                    fetch('/skills/data_location/open', {
+                        method: 'POST',
+                        headers: {'Content-Type': 'application/json'},
+                        body: JSON.stringify({path: ''}),
+                    }).then(r => r.json()).then(function (d3) {
+                        if (!d3.success) alert(d3.message || 'Could not open that folder');
+                    }).catch(function (e) { alert('Could not open that folder: ' + e); });
+                }
+            } else {
+                alert('Skill saved to the local skill library.' + more);
+            }
             // The just-saved skill becomes the session's baseline server-side
             // (learning_routes.save), but its keywords are NOT loaded into the
             // filter table — so this is exactly the divergent case the badge
@@ -4301,6 +4588,14 @@ document.addEventListener('scroll', (e) => {
     toggleSkillLoadPicker(false);
 }, true);
 window.addEventListener('resize', positionSkillLoadMenu);
+
+document.addEventListener('scroll', (e) => {
+    const menu = document.getElementById('skillDocPickerMenu');
+    if (!menu || menu.hidden) return;
+    if (e.target instanceof Node && menu.contains(e.target)) return;
+    toggleSkillDocPicker(false);
+}, true);
+window.addEventListener('resize', positionSkillDocMenu);
 
 renderFilters();
 renderStepTagSelector();
@@ -4474,6 +4769,11 @@ applyAssessment({
     coverage: LV.boot.lastCoverage,
     gaps: LV.boot.lastGaps,
     validation: LV.boot.lastValidation,
+    new_gaps: LV.boot.lastNewGaps,
+    // Both counters run from the start of the session, so a reload without
+    // these would bill the whole session to the next round.
+    settled: LV.boot.lastSettled,
+    raised: LV.boot.lastRaised,
 });
 }
 // Replay any chat history from a prior page load through appendMsg (rather

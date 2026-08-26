@@ -41,7 +41,7 @@ import re
 from typing import Dict, List, Optional, Tuple
 
 from utils.json_utils import parse_json_loose
-from utils import skill_dedup
+from utils import skill_dedup, tat_parser
 from . import skill_retrieval
 from .skill_service import Skill
 
@@ -94,7 +94,11 @@ and seeing the same thing twice is what makes the engineer stop reading either
 of them. Treat every material filter edit the engineer has NOT explained (see
 the operation journal / unexplained-edits list) as a gap — the reasoning behind
 an add/exclude is exactly the skill knowledge to capture.
-Empty list only if nothing material is missing.
+An empty list is a normal and GOOD outcome, not a failure to be thorough: only
+raise a new gap when the engineer's latest answer actually opened one, or when
+something genuinely blocks a trustworthy skill. Never invent one to fill the
+list — an interview that always has one more question is one the engineer
+learns to stop reading.
 
 VALIDATE every substantive claim the engineer has made (防呆 / sanity-check).
 Classify each:
@@ -291,11 +295,49 @@ list gaps or score coverage, only count knowledge that is NEW relative to the
 existing skills — knowledge they already hold is not a gap."""
 
 
+# Where the signal in these logs actually lives. Appended to every interview
+# prompt because the same misreading showed up in all of them: the filter list
+# is a set of bare tokens with hit counts next to it, which invites the model
+# to reason about a keyword as if the token WERE the meaning. In a driver log
+# it is not — the bracketed columns are routing, and the diagnosis is in the
+# message text and in which terms show up together there.
+_LOG_ANATOMY_CLAUSE = """
+
+HOW TO READ A LINE OF THIS LOG — this governs everything above.
+
+A line looks like:
+  06/03/2026-05:40:09.063 [9] [BG_SCAN] [SPECIAL] [prvBgScanClientGetDistanceFromAp]:BG_SCAN - PRIMARY - distance from AP: FAR_FROM_AP
+  <timestamp>            <n> <MODULE>   <level>   <function>                        :<MESSAGE>
+
+The bracketed MODULE/level/function columns are ROUTING — they say which
+component emitted the line. They are far too coarse to identify a scenario:
+"[BG_SCAN]" fires on every background scan in every capture, healthy or not.
+Matching one carries almost no information on its own.
+
+The diagnosis lives in the MESSAGE — the free text after the final colon —
+and, above all, in WHICH TERMS CO-OCCUR THERE. "FAR_FROM_AP" plus
+"DELAY_TYPE_SHORT" plus "Skips left (6)" in the same stretch of messages is a
+finding; "[BG_SCAN]" alone is not.
+
+So:
+ - When you judge whether a keyword is load-bearing, judge it by what the
+   MESSAGES containing it actually say, not by the module tag it sits under.
+ - Prefer the message-level string an engineer would grep for ("FAR_FROM_AP",
+   "distance from AP", "RSSI CHANGE - rescheduling") over the module column.
+ - State findings as COMBINATIONS of message terms and their order, not as a
+   list of module names. A single token that merely names a subsystem is
+   almost never the knowledge worth keeping.
+ - A keyword that only ever matches its own module tag is a routing filter,
+   not evidence. Say so rather than calling it key."""
+
+
 def _interview_system_prompt(base: str, use_prior_knowledge: bool) -> str:
     """The interview/assess system prompt with the conversation-mode clause
     appended — one string per (base, mode) pair, so prompt-caching still gets a
     stable prefix within each mode."""
-    return base + (_INTERVIEW_PRIOR_CLAUSE if use_prior_knowledge else _INTERVIEW_FRESH_CLAUSE)
+    return (base
+            + (_INTERVIEW_PRIOR_CLAUSE if use_prior_knowledge else _INTERVIEW_FRESH_CLAUSE)
+            + _LOG_ANATOMY_CLAUSE)
 
 # A short excerpt lifted verbatim from this project's own data/skills/skills.yaml
 # (the connection_flow skill's ownership-check rule) — used purely to anchor the
@@ -398,8 +440,41 @@ Rules:
  - `keywords`: prefer the MINIMAL set that still isolates the scenario. Use
    the operation journal's marginal stats: drop any include-keyword with ~0
    UNIQUE hits (everything it caught, another keyword already caught — it's
-   redundant), keep the ones carrying unique hits. Move genuine noise the
-   engineer excluded into "exclusive".
+   redundant), keep the ones carrying unique hits.
+ - Prefer MESSAGE-level strings over module tags. A bracketed component name
+   ("[BG_SCAN]", "[TFDQUEUE]") fires in every capture from that subsystem, so
+   a skill keyed on one matches healthy logs just as well as broken ones. The
+   strings worth keeping are the ones from the message text that an engineer
+   would actually grep for ("FAR_FROM_AP", "distance from AP",
+   "RSSI CHANGE - rescheduling"). If the engineer's filter only gave you
+   module tags, put the discriminating detail in `expert_rules` as the
+   combination of message terms to look for, rather than pretending the tag
+   alone identifies the scenario.
+ - `keywords` and `exclusive` are DIFFERENT LEVELS — do not treat exclusive as
+   "reverse keywords". `keywords` are log-content anchors that identify THIS
+   scenario. `exclusive` is message-noise policy that sits above the scenario:
+   chatter that should be dropped when reading this class of capture at all,
+   whether or not this particular issue is present. So:
+     * A term only worth dropping BECAUSE of this specific issue is not noise —
+       it is scenario knowledge, and belongs in `expert_rules`, not `exclusive`.
+     * Put a term in `exclusive` only when the engineer's reason generalizes
+       ("periodic housekeeping", "unrelated subsystem chatter"). If the reason
+       was case-specific, or no reason was given, leave it OUT rather than
+       freezing this capture's noise into a reusable skill.
+ - NEVER put a control instruction in `expert_rules` — no "if <other skill> is
+   also running, stop", no "return no findings", no "skip this analysis", no
+   "abort". Two reasons, both structural:
+     * It cannot work. Avatar runs a skill's expert_rules as the system prompt
+       of a per-skill call whose only other input is the filtered log; that
+       call is never told which other skills are active, so the condition is
+       unobservable and the model can only pattern-match the other skill's NAME
+       appearing somewhere in the text.
+     * When it does fire it returns an empty analysis, which is indistinguishable
+       from "checked, nothing wrong" — a silent failure nobody can see.
+   A boundary between two skills belongs in `description`, which is the ONLY
+   field the agent reads when CHOOSING a skill. Write the limit as scope
+   ("Covers X. For the full connect/disconnect lifecycle use <other skill>.")
+   or as a trigger condition, never as a runtime abort.
  - `expert_rules`: fold in the engineer's stated REASONS from the operation
    journal — an edit's reason ("excluded Mcc because it's periodic housekeeping
    unrelated to scoring") often IS a diagnostic rule. Mark any threshold/claim
@@ -480,6 +555,28 @@ skills.
 # the skill in wireless_ce_avatar). A question implying the engineer must
 # justify themselves against the model's read would both misrepresent that
 # boundary and, in practice, get shorter and more defensive answers.
+def _filter_level_line(target: Dict) -> str:
+    """Tell the model WHICH LEVEL this edit sits at, because the useful
+    question is different at each one.
+
+    An INCLUDE is log-content-level: it names the evidence this scenario
+    leaves behind, so the open question is what that keyword proves here.
+
+    An EXCLUDE is message-noise-level and sits ABOVE the scenario — in Avatar
+    it is closer to standing noise-collection policy than to a per-case call.
+    Asking "why doesn't this keyword matter for this issue?" about a noise
+    term gets a shrug, because the answer is almost never scenario-specific.
+    The question worth its interruption is whether the noise generalizes.
+    """
+    if target.get("excluding"):
+        return ("Filter level: EXCLUDE — a message-NOISE term, not a log keyword for this "
+                "scenario. Noise policy mostly carries across captures of this type, so ask "
+                "whether it is always noise or only noise in this situation, and what would "
+                "make it worth keeping. Do NOT ask why it is irrelevant to this issue.")
+    return ("Filter level: INCLUDE — a log-content keyword for this scenario. "
+            "Ask what its presence or absence proves about the issue.")
+
+
 CLARIFY_SYS_PROMPT = """\
 You are a senior Wi-Fi/BT debug expert. Earlier you committed to a first read
 of a filter set. The engineer has since done something your read did not
@@ -645,6 +742,7 @@ def clarify_divergence(llm_helper, target: Dict, use_prior_knowledge: bool = Fal
         lines = [
             f"Domain: {(target.get('domain') or 'wifi').upper()}",
             f"Keyword: \"{target.get('text')}\"",
+            _filter_level_line(target),
             "Your earlier read never had a stance on this keyword either way — it simply wasn't considered.",
             f"What the engineer just did: {target.get('action_phrase')}",
             f"Measured effect of that action: {target.get('effect_phrase') or '(no effect measured)'}",
@@ -657,6 +755,7 @@ def clarify_divergence(llm_helper, target: Dict, use_prior_knowledge: bool = Fal
         lines = [
             f"Domain: {(target.get('domain') or 'wifi').upper()}",
             f"Keyword: \"{target.get('text')}\"",
+            _filter_level_line(target),
             f"Your earlier read called it {stance_txt}, because: {target.get('baseline_why') or '(no reason recorded)'}",
             f"What the engineer just did: {target.get('action_phrase')}",
             f"Measured effect of that action: {target.get('effect_phrase') or '(no effect measured)'}",
@@ -872,15 +971,24 @@ def _build_context_block(context: Dict) -> str:
             ]
             keywords = ", ".join(name for name in keyword_names if name)
             keyword_note = f" | matched: {keywords}" if keywords else ""
+            raw = str(item.get("text") or "").strip()
             rows.append(
-                f"  - [{label}] line {item.get('line_no')}: "
-                f"{str(item.get('text') or '').strip()}{keyword_note}"
+                f"  - [{label}] line {item.get('line_no')}: {raw}{keyword_note}"
             )
+            # The message half, called out separately. These are the lines the
+            # engineer pointed AT, so they are where a reusable term is most
+            # likely to be drawn from — and it must come from the message, not
+            # the module column the line happens to sit under.
+            message = tat_parser.message_of(raw)
+            if message and message != raw:
+                rows.append(f"      MESSAGE: {message}")
         if len(annotations) > len(rows):
             rows.append(f"  - ... {len(annotations) - len(rows)} more labeled observation(s) omitted")
         lines.append(
             "Engineer-labeled key log observations (E supports the scenario/rule; "
-            "X is a counterexample or exception):\n" + "\n".join(rows)
+            "X is a counterexample, an exception, or chatter to drop). The MESSAGE "
+            "line under each one is the part to quote and to draw any keyword or "
+            "noise term from — never the bracketed module column:\n" + "\n".join(rows)
         )
 
     sample = context.get("sample_lines") or []
@@ -893,12 +1001,28 @@ def _build_context_block(context: Dict) -> str:
         # tail back off.
         preview = "\n".join(sample)
         lines.append(f"Sample surviving log lines (head + tail, chronological order within each half):\n{preview}")
+    # Short strings, but the only record of a SKIP that exists anywhere: waving
+    # an item off leaves no trace in the conversation, so without this the model
+    # re-derives it every round forever. Answers can vanish the same way once
+    # they scroll past the 12-turn window below.
+    settled = context.get("settled_gaps") or {}
+    answered = settled.get("answered") or []
+    skipped = settled.get("skipped") or []
+    if answered or skipped:
+        rows = [f"  - [ANSWERED] {g}" for g in answered[-20:]]
+        rows += [f"  - [NOT APPLICABLE] {g}" for g in skipped[-20:]]
+        lines.append(
+            "Already settled this session — do NOT list any of these as a gap again, in "
+            "any wording. ANSWERED: the engineer has already taught it. NOT APPLICABLE: "
+            "they judged it irrelevant to this case, which is their call, not yours:\n"
+            + "\n".join(rows)
+        )
+
     chat_history = context.get("chat_history") or []
     if chat_history:
         convo = "\n".join(f"{m['role']}: {m['content']}" for m in chat_history[-12:])
         lines.append(f"Interview so far:\n{convo}")
     return "\n\n".join(lines)
-
 
 def _normalize_question(q) -> Optional[Dict]:
     """Coerce one LLM-emitted question into {question, type, options} —
@@ -1340,7 +1464,11 @@ def synthesize_skill_draft(llm_helper, context: Dict, qa_pairs: List[Dict],
     context_block = _build_context_block(context)
     qa_block = "\n".join(f"Q: {qa['question']}\nA: {qa['answer']}" for qa in qa_pairs)
     user_prompt = f"{context_block}\n\nEngineer Q&A:\n{qa_block}"
-    system_content = SYNTHESIS_SYS_PROMPT_PRIOR if use_prior_knowledge else SYNTHESIS_SYS_PROMPT_FRESH
+    # Synthesis needs the log-anatomy rule as much as the interview does — it
+    # is the step that decides which strings become `keywords`, and a skill
+    # whose keywords are module tags matches every capture ever taken.
+    system_content = ((SYNTHESIS_SYS_PROMPT_PRIOR if use_prior_knowledge
+                       else SYNTHESIS_SYS_PROMPT_FRESH) + _LOG_ANATOMY_CLAUSE)
     raw = llm_helper.chat(
         messages=[{"role": "user", "content": user_prompt}],
         system_content=system_content,

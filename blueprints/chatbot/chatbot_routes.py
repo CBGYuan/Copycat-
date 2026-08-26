@@ -237,6 +237,25 @@ def _parse_chat_response(raw, expect_structured: bool):
     }
 
 
+def _answer_without_gap_echo(message: str, answered_gap) -> str:
+    """What to scan the OTHER "still missing" items against.
+
+    A gap card sends `Re: <the gap>\\n<answer>` so the transcript and the model
+    can see which item is being answered — but that echo carries the gap's own
+    log keywords, and matching it against the rest of the list would close
+    every neighbouring item about the same symbol. The card's own item (and
+    any rewording of it) is closed by name instead, via close_gaps_covered_by's
+    `answered`, so nothing is lost by taking the echo back out here.
+    """
+    gap = str(answered_gap or "").strip()
+    if not gap:
+        return message
+    head, sep, rest = message.partition("\n")
+    if sep and head.strip() == f"Re: {gap}":
+        return rest.strip()
+    return message
+
+
 @chatbot_bp.route("/send", methods=["POST"])
 def send():
     data = request.get_json(silent=True) or {}
@@ -279,7 +298,10 @@ def send():
     )
     # A "still missing" item answered in passing here is answered. The strip
     # picks this up through the refreshAssessment the client fires next.
-    state.close_gaps_covered_by(message)
+    answered_gap = str(data.get("answered_gap") or "").strip()
+    state.close_gaps_covered_by(
+        _answer_without_gap_echo(message, answered_gap), answered=answered_gap,
+    )
     try:
         # Strip the "step" tag before handing history to the API — it's UI
         # metadata for this app's own message-tagging (see chat_history.step
@@ -371,7 +393,10 @@ def send_stream():
         data.get("decision_id") or (decision_ledger.latest_open(state, step_tag) or {}).get("id"),
         data.get("decision_answer") or message,
     )
-    state.close_gaps_covered_by(message)
+    answered_gap = str(data.get("answered_gap") or "").strip()
+    state.close_gaps_covered_by(
+        _answer_without_gap_echo(message, answered_gap), answered=answered_gap,
+    )
     api_messages = [{"role": m["role"], "content": m["content"]} for m in state.chat_history[-20:]]
     system_content = _build_system_prompt(state)
     expect_structured = state.has_current_baseline() and state.interview_mode != "quiet"

@@ -82,6 +82,7 @@ if __name__ == "__main__":
         # requests the page.
         time.sleep(1.2)
         if not browser_window.open(url):
+            print("ℹ️  No app window to watch — press Ctrl+C here to stop the server.")
             return
         # Closing the app window is the natural "I'm done" gesture, so treat
         # the managed Chrome process exiting as a shutdown request — otherwise

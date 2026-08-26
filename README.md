@@ -671,6 +671,14 @@ python app.py
 Opens automatically in Chrome on a freshly-picked free port (never a fixed
 `:5000`, so a leftover process from an earlier run can't collide with it).
 
+**Don't run it as administrator.** Copycat needs no elevation — it writes
+only to its own `data\` folder — and elevation actively breaks the launch:
+Chrome refuses to run with an elevated token, and a child process inherits
+the parent's. The window is created and dies immediately. `ManagedChromeWindow`
+now checks that Chrome is still alive a few seconds after launch, so this ends
+in a default-browser fallback and a printed URL instead of the app reading the
+instant exit as "the user closed the window" and shutting itself down.
+
 Startup does the minimum synchronously and pushes the slow parts onto daemon
 threads, so the server is listening and the UI is usable immediately:
 
@@ -712,6 +720,35 @@ on exit, so `templates/` and `static/` are read from there, while
 `PROJECT_ROOT` is the folder the exe sits in and is the only place the app
 writes. `data\skills\` therefore appears **next to the exe** and survives
 restarts — keep the exe somewhere permanent, not in Downloads.
+
+That also means a **second copy of the exe is a second, empty skill library**,
+and the only symptom is a library that looks emptier than you remember. Two
+things make it recoverable rather than silent:
+
+- The Skill Library page always shows the folder it is saving to, and Export
+  reports the exact file it wrote.
+- Every launch records its data folder in
+  `%LOCALAPPDATA%\Copycat\data-locations.json` (that file, and nothing else,
+  lives there). A copy that starts out empty offers to bring the skills over
+  from any folder you have actually run a Copycat from — it never scans the
+  disk, so it can only offer locations you really opened.
+
+Bringing them over **copies, and never deletes the source**. A key present in
+both folders is usually two different edits of the same skill; the incoming
+one is skipped (yours wins) and reported as left behind, and that skipped
+edit exists nowhere else. The source folder gets a
+`SKILLS-COPIED-ELSEWHERE.txt` breadcrumb instead, and stops being offered
+unless it later gains skills this copy has never seen.
+
+**Close Copycat before moving its folder.** Windows allows renaming a folder
+that holds a running exe (same volume), and every path here was resolved from
+`sys.executable` at startup, so the process cannot notice. `os.makedirs` would
+otherwise rebuild `data\skills\local` at the old path and every later Export
+would land in a ghost library. Saving now checks that the data folder's parent
+still exists and fails with an explanation instead — the draft stays in the
+modal, and the Skill Library marks the path as gone.
+
+Set `COPYCAT_DATA_DIR` to keep one shared data folder across copies.
 
 The build is unsigned, so Windows SmartScreen will warn on first run.
 

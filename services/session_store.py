@@ -12,6 +12,10 @@ from utils import question_match
 
 _STORE: dict = {}
 
+# Enough to cover a teaching session's answers without rescanning an hour of
+# chat on every assessment.
+_TEACHING_TEXTS_KEPT = 20
+
 
 class WorkingState:
     def __init__(self):
@@ -191,6 +195,29 @@ class WorkingState:
         # the strip re-asks work they consider done. What the model thinks
         # of that answer belongs in the readiness score, not in a repeat.
         self.answered_gaps: list = []
+        # The echo-stripped answers the engineer has actually written, kept so
+        # the same coverage test can be re-applied when the model rewords its
+        # own list (see drop_gaps_already_taught).
+        self.teaching_texts: list = []
+        # Questions ever put on the list, counted as they arrive: the list
+        # length can't tell an answered item from one that was never asked.
+        self.gaps_raised: int = 0
+        # The most recent arrivals, kept until newer ones replace them rather
+        # than cleared each round: an item nobody has looked at yet is still
+        # new to them after a round that asked nothing.
+        self.new_gaps: list = []
+        # "asserted" claims the engineer has confirmed are DELIBERATE domain
+        # knowledge. Not the same as verified, and deliberately cannot become
+        # it: a rule the log physically cannot print (a firmware weighting
+        # formula) would otherwise warn forever, so supplying expert knowledge
+        # -- the whole point of the interview -- only ever grew the warning
+        # count. Acknowledging silences the nag; the claim still exports as
+        # asserted. Never applies to a contradiction.
+        self.acknowledged_claims: list = []
+        # Claims set aside: not confirmed as expert knowledge, just not this
+        # session's argument. Stops the nag; still listed at Export, because
+        # one that vanished would make the skill look cleaner than it is.
+        self.skipped_claims: list = []
         # Engineer-confirmed teaching evidence from the Log Preview, one entry
         # per labeled source line: {"line_no", "label": evidence|counterexample,
         # "text", "matched_keywords": [{"text", "excluding"}]}. matched_keywords
@@ -234,7 +261,7 @@ class WorkingState:
             f"\x01summary={self.case_summary.strip()}"
         )
 
-    def close_gaps_covered_by(self, *texts) -> list:
+    def close_gaps_covered_by(self, *texts, answered: str = "", remember: bool = True) -> list:
         """Close the "still missing" items a piece of teaching just answered.
 
         The gap list is re-derived from the whole conversation, but only by
@@ -244,20 +271,53 @@ class WorkingState:
         supposed to matter, so this is called from every answer path rather
         than from the one that happens to own the strip.
 
+        `answered` is the item an answer box was opened FOR, and it closes on
+        the strength of that click alone: "yes" typed under a question is an
+        answer to that question, and there is no wording there for a matcher
+        to work with. Any other open item that is a REWORDING of it goes with
+        it — the model relists the same gap in new words between assessments,
+        and one answer settling only one of the two copies is an artefact of
+        its phrasing, not of what the engineer taught. Near-verbatim only
+        (same_question, not same_topic): two items about the same symbol are
+        usually two different questions about it.
+
         Counts as answered, not skipped: the engineer did give the knowledge,
         just not through this item's own box. Returns what it closed.
         """
         covering = [str(t).strip() for t in texts if str(t or "").strip()]
-        if not covering:
+        answered = str(answered or "").strip()
+        if not covering and not answered:
             return []
+        if remember:
+            for text in covering:
+                if text not in self.teaching_texts:
+                    self.teaching_texts.append(text)
+            del self.teaching_texts[:-_TEACHING_TEXTS_KEPT]
         closed = []
         for gap in list(self.last_gaps or []):
             if gap in self.answered_gaps or gap in self.skipped_gaps:
                 continue
-            if any(question_match.answer_covers(gap, t) for t in covering):
+            settled = answered and (gap == answered or question_match.same_question(gap, answered))
+            if settled or any(question_match.answer_covers(gap, t) for t in covering):
                 self.answered_gaps.append(gap)
                 closed.append(gap)
         return closed
+
+    def drop_gaps_already_taught(self, gaps: list) -> list:
+        """Filter a freshly re-derived gap list against teaching already given.
+
+        Each assessment rebuilds its list from the whole conversation and
+        rewords as it goes, so an item the engineer answered five minutes ago
+        comes back as a different string — which answered_gaps, matching on the
+        sentence that happened to be on screen at the time, cannot recognise.
+        The test is the same one that closed it originally, so a follow-up the
+        answer genuinely did not cover still gets through and still takes its
+        slot as the round's new question.
+        """
+        if not self.teaching_texts:
+            return list(gaps or [])
+        return [g for g in (gaps or [])
+                if not any(question_match.answer_covers(g, t) for t in self.teaching_texts)]
 
     def restamp_baseline(self) -> None:
         """Keep an existing baseline valid across bookkeeping that moves the
@@ -294,6 +354,11 @@ class WorkingState:
         self.last_validation = []
         self.skipped_gaps = []
         self.answered_gaps = []
+        self.teaching_texts = []
+        self.gaps_raised = 0
+        self.new_gaps = []
+        self.acknowledged_claims = []
+        self.skipped_claims = []
         self.skill_draft = []
         self.last_export_chat_len = 0
         self.last_round_op_count = 0

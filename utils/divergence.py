@@ -104,6 +104,11 @@ def _row(op: Dict) -> Dict:
         "seq": op["seq"],
         "text": op.get("text", ""),
         "action": op.get("action", ""),
+        # Carried so the interview can ask at the right LEVEL: an include is a
+        # log-content keyword for this scenario, an exclude is message-noise
+        # policy that mostly generalizes across captures. Asking "why doesn't
+        # this matter here?" about a noise term is the wrong question.
+        "excluding": bool(op.get("excluding")),
         "effect_phrase": operation_journal._effect_phrase(op),
     }
 

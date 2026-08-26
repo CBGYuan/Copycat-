@@ -19,6 +19,8 @@ import httpx
 import openai
 from anthropic import Anthropic
 
+from services import pricing_service
+
 
 def _convert_messages_to_anthropic(messages):
     """Split OpenAI-style messages into (system_text, anthropic_messages)."""
@@ -133,7 +135,12 @@ class LLM_helper:
         # see the effect of things like the operation-delta trimming and the
         # prompt-caching above without wiring up a full dashboard.
         self.last_usage = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
-        self.session_usage = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0, "calls": 0}
+        self.session_usage = {
+            "prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0, "calls": 0,
+            "cost_estimate_available": True, "estimated_cost_usd": 0.0,
+            "cost_breakdown": {"input_usd": 0.0, "output_usd": 0.0},
+            "unpriced_calls": 0, "models": [],
+        }
 
     def set_up(self, gpt_token: str, gpt_url: str, model: str = "claude-4-6-sonnet") -> None:
         """Connect to the internal LLM proxy. Mirrors IntelAvatar's
@@ -277,11 +284,33 @@ class LLM_helper:
         p = getattr(usage, "prompt_tokens", 0) or 0
         c = getattr(usage, "completion_tokens", 0) or 0
         t = getattr(usage, "total_tokens", p + c) or (p + c)
-        self.last_usage = {"prompt_tokens": p, "completion_tokens": c, "total_tokens": t}
+        estimate = pricing_service.estimate_usage_cost(self.model, p, c)
+        self.last_usage = {
+            "prompt_tokens": p, "completion_tokens": c, "total_tokens": t,
+            **estimate,
+        }
         self.session_usage["prompt_tokens"] += p
         self.session_usage["completion_tokens"] += c
         self.session_usage["total_tokens"] += t
         self.session_usage["calls"] += 1
+        model_name = str(self.model or "")
+        if model_name and model_name not in self.session_usage["models"]:
+            self.session_usage["models"].append(model_name)
+        if estimate["cost_estimate_available"]:
+            breakdown = estimate["cost_breakdown"]
+            self.session_usage["cost_breakdown"]["input_usd"] += breakdown["input_usd"]
+            self.session_usage["cost_breakdown"]["output_usd"] += breakdown["output_usd"]
+            if self.session_usage["unpriced_calls"] == 0:
+                self.session_usage["estimated_cost_usd"] = (
+                    self.session_usage["cost_breakdown"]["input_usd"]
+                    + self.session_usage["cost_breakdown"]["output_usd"]
+                )
+            self.session_usage["rate_source"] = estimate["rate_source"]
+            self.session_usage["rates_usd_per_mtok"] = estimate["rates_usd_per_mtok"]
+        else:
+            self.session_usage["unpriced_calls"] += 1
+            self.session_usage["cost_estimate_available"] = False
+            self.session_usage["estimated_cost_usd"] = None
         print(
             f" tokens: +{p} in / +{c} out / +{t} total "
             f"(session: {self.session_usage['total_tokens']} across {self.session_usage['calls']} calls)"

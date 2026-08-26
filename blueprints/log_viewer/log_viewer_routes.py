@@ -7,7 +7,7 @@ from flask import Blueprint, render_template, request, jsonify
 from configs.global_configs import app_config
 from services import session_store, skill_memory, event_log_service, decision_ledger
 from utils import file_picker, tat_parser, helpers, operation_journal, divergence
-from blueprints.learning.learning_routes import open_gaps
+from blueprints.learning.learning_routes import open_gaps, validation_payload
 
 log_viewer_bp = Blueprint("log_viewer", __name__, url_prefix="/log_viewer")
 
@@ -198,6 +198,8 @@ def index():
                             operations=operation_journal.payload(state),
                             decision_ledger=decision_ledger.payload(state),
                             open_gaps=open_gaps(state),
+                            open_validation=validation_payload(state),
+                            new_gaps=list(state.new_gaps or []),
                             has_baseline=state.has_current_baseline())
 
 
@@ -312,8 +314,19 @@ def row_for_line():
     else:
         pos = min(max(line_no - 1 - state.view_start_idx, 0), state.view_total - 1)
         landed = state.view_start_idx + pos + 1
+    # The text too: a claim card cites a line as evidence, and a bare number
+    # is not evidence to a model that can't scroll the pane.
+    text = ""
+    try:
+        anchor_date = date.fromisoformat(state.log_date_anchor) if state.log_date_anchor else None
+        log_lines = _cached_log_lines(state.log_path, anchor_date)
+        rows = (_filtered_rows(log_lines, state, pos, 1) if state.view_mode == "filtered"
+                else _raw_rows(log_lines, state.view_start_idx, pos, 1, state.view_total))
+        text = rows[0]["text"] if rows else ""
+    except Exception:
+        pass
     return jsonify({"success": True, "index": pos, "line_no": landed,
-                    "exact": landed == line_no})
+                    "text": text, "exact": landed == line_no})
 
 
 @log_viewer_bp.route("/nearest_row", methods=["POST"])

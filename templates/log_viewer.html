@@ -327,7 +327,7 @@
            down into tokens and the conversion formula. -->
       <button type="button" class="session-col" id="spendCol" onclick="toggleSpendPanel(event)"
               title="This session's US-dollar cost (input/output priced separately). Click to expand.">
-        <span id="tokenBadge" class="token-badge">🪙 $0.0000</span>
+        <span id="tokenBadge" class="token-badge">🪙 Cost n/a</span>
         <i class="fas fa-chevron-down session-menu-chevron"></i>
       </button>
       <div id="spendPanel" class="session-popover" style="display:none;"></div>
@@ -554,6 +554,8 @@
       learning_defer_decision: "{{ url_for('learning.defer_decision') }}",
       learning_resolve_decision: "{{ url_for('learning.resolve_decision') }}",
       learning_skip_gap: "{{ url_for('learning.skip_gap') }}",
+      learning_ack_claim: "{{ url_for('learning.acknowledge_claim') }}",
+      learning_skip_claim: "{{ url_for('learning.skip_claim') }}",
       log_viewer_add_filter: "{{ url_for('log_viewer.add_filter') }}",
       log_viewer_annotate_line: "{{ url_for('log_viewer.annotate_line') }}",
       log_viewer_answer_red_flag: "{{ url_for('log_viewer.answer_red_flag') }}",
@@ -603,7 +605,10 @@
       lastReadiness: {{ (state.last_readiness or {})|tojson }},
       lastCoverage: {{ (state.last_coverage or {})|tojson }},
       lastGaps: {{ (open_gaps or [])|tojson }},
-      lastValidation: {{ (state.last_validation or [])|tojson }},
+      lastValidation: {{ (open_validation or [])|tojson }},
+      lastSettled: {{ ((state.answered_gaps or [])|length + (state.skipped_gaps or [])|length)|tojson }},
+      lastRaised: {{ (state.gaps_raised or 0)|tojson }},
+      lastNewGaps: {{ (new_gaps or [])|tojson }},
       llmReady: {{ llm_ready|tojson }},
       hasAssessment: {{ ((state.last_readiness or state.last_gaps or state.last_validation)|length > 0)|tojson }}
     },

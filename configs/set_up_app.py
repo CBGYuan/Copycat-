@@ -4,7 +4,7 @@ import threading
 from configs import path_configs
 from configs.global_configs import app_config
 from services.llm_service import LLM_helper
-from services import skill_service
+from services import data_location, skill_service
 from utils import helpers
 
 
@@ -100,6 +100,11 @@ def _configure_llm(llm_helper: "LLM_helper") -> None:
 
 def set_up():
     app_config.set_project_root(path_configs.PROJECT_ROOT)
+    # Which copy of Copycat is writing, said out loud once per launch — this
+    # is the folder Export lands in, and running a second copy is the one way
+    # to lose track of it.
+    data_location.record_current()
+    print(f"\U0001F4C1 Data folder: {data_location.current_root()}")
 
     # Register an as-yet-unconfigured LLM_helper synchronously (llm_ready ==
     # False until the background thread below fills in its .client) — the

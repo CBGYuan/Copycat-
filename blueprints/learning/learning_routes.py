@@ -77,20 +77,34 @@ def _store_assessment(state, result: dict) -> None:
     that back the live badge + details panel."""
     state.last_readiness = result.get("readiness") or {}
     state.last_coverage = result.get("coverage") or {}
-    incoming = result.get("gaps") or []
+    reported = result.get("gaps") or []
+    # Before the one-new-gap slot below, so a reworded repeat of something
+    # already answered can't take the slot away from a genuinely new question.
+    incoming = state.drop_gaps_already_taught(reported)
     previous = state.last_gaps or []
     # One new question per round. The model re-derives its list from the whole
     # conversation every time, so answering one thing routinely produced three
     # replacements — the list never got shorter and stopped being read at all.
-    # Whatever doesn't make the cut is not lost: it is still missing, so the
-    # next assessment lists it again, and the model's own ranking (most
-    # blocking first) decides which one gets the slot.
     if previous:
         carried = [g for g in incoming if any(_same_question(g, p) for p in previous)]
         fresh = [g for g in incoming if g not in carried]
-        state.last_gaps = carried + fresh[:1]
+        # An item stays listed until the ENGINEER answers or skips it. The model
+        # re-derives its list from scratch every round and routinely returns one
+        # or two items about whatever it is thinking about now — treating that
+        # as "the rest are resolved" silently retired four questions nobody had
+        # touched, in a strip whose whole job is to be the to-do list.
+        held = [p for p in previous if not any(_same_question(p, g) for g in carried)]
+        raised = fresh[:1]
+        # Re-checked against the teaching, not just the arrivals: an item that
+        # sticks around has to be able to leave once it has been answered,
+        # including by an answer given before the coverage test could see it.
+        state.last_gaps = state.drop_gaps_already_taught(carried + held) + raised
     else:
+        raised = incoming
         state.last_gaps = incoming
+    state.gaps_raised += len(raised)
+    if raised:
+        state.new_gaps = list(raised)
     state.last_validation = result.get("validation") or []
 
 
@@ -99,6 +113,19 @@ def _store_assessment(state, result: dict) -> None:
 # of questions the same way — they are two symptoms of one problem.
 _same_question = question_match.same_question
 _same_topic = question_match.same_topic
+
+
+def _asserted_claims(state) -> list:
+    """The claims this session's assessment judged `asserted` — stated by the
+    engineer, never demonstrated by a log line here. `verified` is left out
+    (the log already shows it) and so is `contradiction` (an unresolved
+    disagreement is not knowledge to record as if it were settled)."""
+    return [
+        str(item.get("claim") or "").strip()
+        for item in (getattr(state, "last_validation", None) or [])
+        if str(item.get("status") or "").strip().lower() == "asserted"
+        and str(item.get("claim") or "").strip()
+    ]
 
 
 def open_gaps(state) -> list:
@@ -121,6 +148,31 @@ def open_gaps(state) -> list:
             and not any(_same_topic(g, q) for q in asked)]
 
 
+def validation_payload(state) -> list:
+    """The claim check, each entry marked with whether the engineer has already
+    confirmed it is deliberate domain knowledge.
+
+    Public for the same reason open_gaps is: the workbench page seeds its first
+    render from it, and reading state.last_validation raw there would bring
+    every acknowledged claim back as a warning after a plain reload.
+
+    A contradiction is never acknowledged, even if an earlier round listed the
+    same sentence as merely asserted and the engineer waved it through then.
+    The model re-grades every claim each round, and a claim that has since
+    turned into a conflict is exactly the one that must not stay silenced.
+    """
+    acked = list(getattr(state, "acknowledged_claims", []) or [])
+    skipped = list(getattr(state, "skipped_claims", []) or [])
+    out = []
+    for item in (state.last_validation or []):
+        claim = (item.get("claim") or "").strip()
+        out.append(dict(item, acknowledged=(
+            item.get("status") != "contradiction"
+            and any(_same_question(claim, c) for c in acked)
+        ), skipped=any(_same_question(claim, c) for c in skipped)))
+    return out
+
+
 def _assessment_payload(state) -> dict:
     """The assessment shape the frontend consumes (badge + panel + export gate).
 
@@ -130,11 +182,24 @@ def _assessment_payload(state) -> dict:
     teaching, and quietly inflating it because someone dismissed a question
     would make the number mean nothing.
     """
+    gaps = open_gaps(state)
     return {
         "readiness": state.last_readiness,
         "coverage": state.last_coverage,
-        "gaps": open_gaps(state),
-        "validation": state.last_validation,
+        "gaps": gaps,
+        # What the ENGINEER has settled. The list itself shrinking means only
+        # that the model listed fewer items this round (it emits at most three,
+        # re-derived every time) — crediting that as progress told them their
+        # answer had closed four questions it had never touched.
+        "settled": len(state.answered_gaps) + len(state.skipped_gaps),
+        # Counted separately from settled so a round that closes two and asks
+        # one says so, instead of reading as net progress of one.
+        "raised": getattr(state, "gaps_raised", 0),
+        # Which rows to flag: items now stick around, so the one question that
+        # actually arrived this round is otherwise indistinguishable from six
+        # the engineer has already read and left.
+        "new_gaps": [g for g in gaps if g in (getattr(state, "new_gaps", None) or [])],
+        "validation": validation_payload(state),
     }
 
 
@@ -316,6 +381,8 @@ def _context_from_state(state, exclude_skill_key: str = "", include_existing: bo
         "case_summary": state.case_summary,
         "focus_reason": state.focus_reason,
         "log_annotations": state.log_annotations,
+        "settled_gaps": {"answered": list(state.answered_gaps),
+                         "skipped": list(state.skipped_gaps)},
         "chat_history": state.chat_history,
     }
 
@@ -651,7 +718,7 @@ def clarify():
         target = {
             "kind": "contradiction", "domain": domain, "text": c["text"],
             "action_phrase": operation_journal._ACTION_VERB.get(c["action"], c["action"]),
-            "effect_phrase": c["effect_phrase"],
+            "effect_phrase": c["effect_phrase"], "excluding": c.get("excluding", False),
             "baseline_stance": c["baseline_stance"], "baseline_why": c["baseline_why"],
             "seq": c["seq"],
         }
@@ -666,7 +733,7 @@ def clarify():
             target = {
                 "kind": "omission", "domain": domain, "text": o["text"],
                 "action_phrase": operation_journal._ACTION_VERB.get(o["action"], o["action"]),
-                "effect_phrase": o["effect_phrase"],
+                "effect_phrase": o["effect_phrase"], "excluding": o.get("excluding", False),
                 "seq": o["seq"],
             }
 
@@ -892,6 +959,56 @@ def skip_gap():
     bucket = state.answered_gaps if data.get("answered") else state.skipped_gaps
     if gap not in bucket:
         bucket.append(gap)
+    return jsonify({"success": True, "assessment": _assessment_payload(state)})
+
+
+@learning_bp.route("/claim/acknowledge", methods=["POST"])
+def acknowledge_claim():
+    """Confirm that an "asserted" claim is domain knowledge on purpose.
+
+    NOT a way to mark it verified — nothing local may do that, and the claim
+    still leaves as asserted at Export. It says "I know this session's log
+    cannot prove this", which for a firmware weighting rule is simply true and
+    will never stop being true. Without it the interview punished the engineer
+    for teaching: every expert rule they supplied became another permanent
+    warning, until a real contradiction was indistinguishable from the pile.
+    Refused for a contradiction, which has to be answered rather than filed.
+    """
+    data = request.get_json(silent=True) or {}
+    claim = (data.get("claim") or "").strip()
+    if not claim:
+        return jsonify({"success": False, "message": "Empty claim"}), 400
+    state = session_store.get_state()
+    status = next((v.get("status") for v in (state.last_validation or [])
+                   if (v.get("claim") or "").strip() == claim), None)
+    if status is None:
+        return jsonify({"success": False, "message": "Unknown claim"}), 404
+    if status == "contradiction":
+        return jsonify({"success": False, "message":
+                        "A contradiction can't be filed away — answer it in the chat."}), 400
+    if claim not in state.acknowledged_claims:
+        state.acknowledged_claims.append(claim)
+    return jsonify({"success": True, "assessment": _assessment_payload(state)})
+
+
+@learning_bp.route("/claim/skip", methods=["POST"])
+def skip_claim():
+    """Set a claim aside without saying anything about whether it is true.
+
+    Distinct from acknowledging: that one states the log can never prove it,
+    which is a claim about the world. This one only says it isn't this
+    session's argument. It stays in the Export dialog under its own heading —
+    a claim that vanished on one click is how a draft ends up looking better
+    checked than it is. Allowed for a contradiction too: the strip is not
+    allowed to become unclearable.
+    """
+    data = request.get_json(silent=True) or {}
+    claim = (data.get("claim") or "").strip()
+    if not claim:
+        return jsonify({"success": False, "message": "Empty claim"}), 400
+    state = session_store.get_state()
+    if claim not in state.skipped_claims:
+        state.skipped_claims.append(claim)
     return jsonify({"success": True, "assessment": _assessment_payload(state)})
 
 
@@ -1306,6 +1423,20 @@ def converge():
                 "source": "prior",
             }
         routed["domain"] = domain
+        # Carry the "engineer said it, the log never showed it" split into the
+        # draft itself. It is session-only state otherwise (last_validation is
+        # not a Skill field), so at Export it vanishes and an asserted claim
+        # becomes indistinguishable from a measured one. Added HERE, before the
+        # Edit-Skill modal opens, so the engineer reviews and can edit it like
+        # any other rule rather than finding it injected after Save.
+        routed["expert_rules"] = skill_service.with_asserted_block(
+            routed.get("expert_rules", ""), _asserted_claims(state))
+        # Siblings this could be confused with at selection time. Advisory —
+        # shown in the modal, never blocks. The parent relationship already has
+        # its own check; excluding it here keeps one overlap from warning twice.
+        routed["sibling_conflicts"] = skill_dedup.sibling_description_conflicts(
+            routed.get("description", ""), routed.get("triggers"), domain_pool,
+            exclude_keys=(state.active_skill_key, routed.get("skill_key")))
         drafts.append(routed)
 
     # In PRIOR mode the related drafts inherit the loaded parent's complete
@@ -1400,10 +1531,19 @@ def save():
     data = request.get_json(silent=True) or {}
     state = session_store.get_state()
     domain = (data.get("domain") or state.log_domain or "wifi").lower()
+
+    description = str(data.get("description") or "").strip()
+    # See skill_service.description_rejection — an empty description makes the
+    # saved skill invisible to Avatar's agent, silently and with no error.
+    rejection = skill_service.description_rejection(description)
+    if rejection:
+        return jsonify({"success": False, "field": "description",
+                        "message": rejection}), 400
+
     try:
         skill = skill_service.Skill(
             name=data.get("name", "New_Skill"),
-            description=data.get("description", ""),
+            description=description,
             keywords=data.get("keywords") or [],
             exclusive=data.get("exclusive") or [],
             tat_path=data.get("tat_path") or state.tat_path or None,
@@ -1465,12 +1605,17 @@ def save():
     state.last_gaps = []
     state.skipped_gaps = []
     state.answered_gaps = []
+    state.teaching_texts = []
+    state.gaps_raised = 0
+    state.new_gaps = []
     # round_count / prior_knowledge / last_readiness / last_coverage /
-    # last_validation / operations / prev_survivors are
+    # last_validation / acknowledged_claims / skipped_claims / operations /
+    # prev_survivors are
     # deliberately NOT reset here anymore — an engineer often exports
     # several rounds from the SAME ongoing log session, and wiping the
     # readiness state on every single Save made it look like teaching
     # progress kept vanishing. Only an explicit "start over" (Clear /
     # loading a different log — see WorkingState.reset_teaching_progress)
     # clears that state now.
-    return jsonify({"success": True, "skill_key": saved_key})
+    return jsonify({"success": True, "skill_key": saved_key,
+                    "saved_to": skill_service.local_path_for(domain)})

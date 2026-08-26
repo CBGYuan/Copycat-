@@ -161,6 +161,91 @@ def compiled_description(description: str, triggers: List[str]) -> str:
     return f"{base} {_TRIGGER_MARKER} " + "; ".join(clean) + "."
 
 
+# Marks the block of claims the engineer stated but the teaching log never
+# demonstrated. A FIXED string, because the block has to be findable again to be
+# replaced — see with_asserted_block.
+ASSERTED_MARKER = "Engineer-stated, not demonstrated in the teaching log:"
+_ASSERTED_RE = re.compile(
+    r"\n*" + re.escape(ASSERTED_MARKER) + r"(?:\n[ \t]*-[^\n]*)*", re.M)
+
+
+def strip_asserted_block(expert_rules: str) -> str:
+    """`expert_rules` with any previously-appended asserted block removed."""
+    return _ASSERTED_RE.sub("", expert_rules or "").rstrip()
+
+
+def with_asserted_block(expert_rules: str, claims) -> str:
+    """Append the engineer's un-demonstrated claims to `expert_rules`, verbatim.
+
+    Why append text instead of checking that the rules already mark them:
+    "is this claim marked as unproven?" cannot be decided by matching a claim
+    against rule prose. Measured on real pairs, that approach failed three ways
+    at once — it could not tell a marked rule from an unmarked one (the marker
+    is free-text with no fixed form), it MISSED the rule that restated the claim
+    in the diagnostic wording synthesis is asked to produce, and it flagged an
+    unrelated rule that merely shared an acronym. Appending needs no inference,
+    so it can neither miss nor over-report.
+
+    What this fixes: the verified/asserted split is session-only — it is not a
+    field on Skill and so dies at Export, leaving a claim the engineer merely
+    stated byte-identical to one backed by 4000 log lines. This carries the
+    distinction into the YAML, where Avatar injects expert_rules verbatim and a
+    reviewer can see it.
+
+    Deliberately NOT a filter on what may be exported: legitimate domain
+    knowledge (an enum table, a bit-field map) is never "demonstrated" by a log
+    line either, and refusing it would fight the engineer over exactly the
+    content that makes these skills worth having.
+
+    Replaces any earlier block rather than stacking, so re-exporting the same
+    session — or round-tripping through the Edit-Skill modal — does not grow a
+    pile of duplicates.
+    """
+    body = strip_asserted_block(expert_rules)
+    lines = []
+    for claim in claims or []:
+        text = str(claim or "").strip().replace("\n", " ")
+        if text and text not in lines:
+            lines.append(text)
+    if not lines:
+        return body
+    block = ASSERTED_MARKER + "\n" + "\n".join(f"- {t}" for t in lines)
+    return (body + "\n\n" + block) if body else block
+
+
+# Long enough to be a real sentence about WHEN the skill applies. That line is
+# the ONLY thing Avatar's agent selects on — it never sees keywords at
+# selection time — so a bare non-empty check would pass "x" and still leave the
+# skill unselectable.
+MIN_DESCRIPTION_CHARS = 15
+
+
+def description_rejection(description: str) -> Optional[str]:
+    """Why this description cannot be saved, or None if it is fine.
+
+    A skill with no description loads into Avatar without any error and is then
+    silently unusable: `_build_analyze_system_prompt` lists available skills as
+    "name: description" and SKIPS any entry whose description is falsy, so the
+    agent never learns the skill exists. Its keywords and expert_rules become
+    dead weight on disk while the load log still cheerfully reports "skills
+    loaded". Nothing downstream can report this, so it has to be refused at the
+    point of writing. (Verified against wireless_ce_avatar/services/
+    log_chatbot_service.py, not assumed.)
+
+    Lives here rather than in a route because BOTH save paths — Export's
+    /learning/save and the Skill Library's /skills/save — write through this
+    module, and a gate on only one of them is a gate the other walks around.
+    """
+    if len(base_description(description or "").strip()) >= MIN_DESCRIPTION_CHARS:
+        return None
+    return (
+        "Add a description before saving. Avatar picks a skill from its "
+        "description alone — with this empty the skill loads without any error "
+        "and is then never selected, so everything taught here would sit on "
+        "disk unused. One sentence saying WHEN to use it is enough."
+    )
+
+
 def _now_iso() -> str:
     """Seconds-precision local timestamp for a version snapshot's `saved_at`."""
     return datetime.now().isoformat(timespec="seconds")
@@ -254,6 +339,86 @@ def _find_user_contribution_path(username: str, contrib_dir: str) -> Optional[st
 
 def _local_path(domain: str) -> str:
     return path_configs.SKILLS_BT_YAML_PATH if domain == "bt" else path_configs.SKILLS_YAML_PATH
+
+
+def local_path_for(domain: str) -> str:
+    """The file a save in this domain lands in — worth reporting back to the
+    engineer, since which COPY of the app they launched decides it."""
+    return os.path.abspath(_local_path(domain))
+
+
+def _local_paths_in(data_dir: str) -> Dict[str, str]:
+    """The two local skill files inside ANOTHER copy's data folder."""
+    local = os.path.join(data_dir, "skills", "local")
+    return {"wifi": os.path.join(local, "skills.yaml"),
+            "bt": os.path.join(local, "bt_skills.yaml")}
+
+
+def local_skill_counts(data_dir: Optional[str] = None) -> Dict[str, int]:
+    """How many locally-originated skills a data folder holds, per domain.
+    `data_dir` omitted = the one this app is writing to."""
+    paths = _local_paths_in(data_dir) if data_dir else {
+        "wifi": path_configs.SKILLS_YAML_PATH, "bt": path_configs.SKILLS_BT_YAML_PATH}
+    return {domain: len(_load_yaml_skills_from_path(p)) for domain, p in paths.items()}
+
+
+def import_local_skills_from(data_dir: str) -> Dict[str, Dict[str, int]]:
+    """Bring another Copycat data folder's local skills into this one.
+
+    Entries are carried over verbatim — key, version and history intact.
+    This is one knowledge base rejoining itself after the engineer ran a
+    second copy of the app, not a new authorship event, so save_skill's key
+    minting and version bump would both be wrong here. A key that already
+    exists locally is left alone: what is in front of the engineer now wins
+    over the copy being recovered from.
+
+    Copy, never move. Two copies of a key are usually two DIFFERENT edits of
+    the same skill, and the one being skipped here is the one nobody can get
+    back if the source folder is deleted. `conflicts` counts exactly those,
+    so the caller can say so instead of implying everything came over.
+    """
+    src = _local_paths_in(data_dir)
+    imported = {"wifi": 0, "bt": 0}
+    conflicts = {"wifi": 0, "bt": 0}
+    with _WRITE_LOCK:
+        for domain in ("wifi", "bt"):
+            incoming = _load_yaml_skills_from_path(src[domain])
+            if not incoming:
+                continue
+            ensure_skills_file(domain)
+            raw = {k: _skill_to_raw(v) for k, v in load_all_skills(domain).items()}
+            added = {k: _skill_to_raw(v) for k, v in incoming.items() if k not in raw}
+            conflicts[domain] = len(incoming) - len(added)
+            if not added:
+                continue
+            raw.update(added)
+            _write_skills_yaml(raw, domain)
+            imported[domain] = len(added)
+    _leave_copied_note(data_dir, imported["wifi"] + imported["bt"])
+    return {"imported": imported, "conflicts": conflicts}
+
+
+def _leave_copied_note(data_dir: str, total: int) -> None:
+    """A note in the folder we just read from, so the next person who opens it
+    in Explorer learns where its skills went instead of editing a copy that
+    nothing reads any more."""
+    folder = os.path.join(data_dir, "skills", "local")
+    if not os.path.isdir(folder):
+        return
+    try:
+        with open(os.path.join(folder, "SKILLS-COPIED-ELSEWHERE.txt"), "w",
+                  encoding="utf-8") as f:
+            f.write(
+                f"On {datetime.now().strftime('%Y-%m-%d %H:%M')}, {total} skill(s) from this\n"
+                f"folder were copied into another copy of Copycat:\n\n"
+                f"    {os.path.dirname(local_path_for('wifi'))}\n\n"
+                "Nothing here was deleted -- if a skill existed in BOTH places, the\n"
+                "copy over there was kept and the one here was NOT overwritten, so\n"
+                "this folder can still hold edits that exist nowhere else.\n"
+                "Work in the copy above from now on.\n"
+            )
+    except Exception:
+        pass
 
 
 def _current_username() -> str:
@@ -483,7 +648,29 @@ def _is_contribution_path(path: str) -> bool:
         return False
 
 
+def _assert_data_root_available() -> None:
+    """Refuse to recreate a data folder whose anchor has vanished.
+
+    os.makedirs(exist_ok=True) will happily rebuild the whole chain, so if the
+    app folder is moved (or deleted) while Copycat is running, every later
+    Export silently rebuilds `data\\skills\\local` at the OLD path and writes
+    there — a ghost library nobody will ever open again. The paths were
+    resolved from sys.executable at startup and cannot notice the move, so
+    this is the only point that can.
+    """
+    anchor = os.path.dirname(os.path.abspath(path_configs.DATA_DIR))
+    if not os.path.isdir(anchor):
+        raise SkillStoreError(
+            f"Nothing was saved: {anchor} no longer exists. The folder Copycat is "
+            "running from was moved or deleted while it was open, so this copy can "
+            "no longer reach its own data folder. Your draft is still here — move "
+            "the folder back to save now, or close Copycat, reopen it from the new "
+            "location and export again."
+        )
+
+
 def ensure_skills_file(domain: str = "wifi") -> None:
+    _assert_data_root_available()
     os.makedirs(path_configs.SKILLS_LOCAL_DIR, exist_ok=True)
     path = _local_path(domain)
     if not os.path.exists(path):
@@ -682,6 +869,7 @@ def _write_skills_yaml(raw: dict, domain: str = "wifi") -> None:
     """
     content = _dump_skills_yaml(raw)   # (1) may raise; file still intact
 
+    _assert_data_root_available()
     path = _local_path(domain)
     directory = os.path.dirname(path) or "."
     os.makedirs(directory, exist_ok=True)

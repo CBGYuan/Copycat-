@@ -112,6 +112,54 @@ def _leading_timestamp(line: str):
     return m.group(1) if m else None
 
 
+# One [bracketed] routing column, plus the whitespace after it.
+_COLUMN_RE = re.compile(r'\s*\[([^\]]*)\]')
+
+
+def split_log_line(line: str) -> Dict:
+    """Split one driver-log line into its routing columns and its MESSAGE.
+
+        06/03/2026-05:40:09.063 [9] [BG_SCAN] [SPECIAL] [prvBgScan...]:BG_SCAN - PRIMARY - distance from AP: FAR_FROM_AP
+        `-------- timestamp ---'  `------- columns -------------------' `------------------ message ------------------'
+
+    Why this exists: filtering matches the WHOLE line, so a keyword that only
+    ever hits a module tag looks identical to one that hits a real finding.
+    The bracketed columns are routing — which component emitted the line — and
+    fire in every capture from that subsystem, healthy or broken. The
+    diagnosis is in the message. Separating them lets noise terms be drawn
+    from the half that actually carries meaning.
+
+    Returns {"timestamp", "columns": [...], "message"}. Never raises: a line
+    that does not fit the shape (a bare continuation line, a hex dump) comes
+    back with everything it did find and the remainder as `message`, which is
+    the useful degradation — the caller still gets text to search.
+    """
+    rest = clean_row_text(line or "")
+    ts = _leading_timestamp(rest)
+    if ts:
+        rest = rest[rest.index(ts) + len(ts):]
+
+    columns = []
+    while True:
+        m = _COLUMN_RE.match(rest)
+        if not m:
+            break
+        columns.append(m.group(1).strip())
+        rest = rest[m.end():]
+
+    # The separator after the last column is one or more colons, sometimes with
+    # spaces between them ("]:  : Command ID = ..."). Strip only that run — the
+    # message itself contains colons ("distance from AP: FAR_FROM_AP") and
+    # splitting on the first one would cut the finding in half.
+    rest = re.sub(r'^[\s:]+', '', rest)
+    return {"timestamp": ts or "", "columns": columns, "message": rest.strip()}
+
+
+def message_of(line: str) -> str:
+    """Just the message half — the part worth drawing a noise term from."""
+    return split_log_line(line)["message"]
+
+
 # ---- Issue-time focus window --------------------------------------------
 # Every /apply_filter call re-scans the WHOLE loaded file, which is fine for
 # a log with a few thousand lines but a multi-second stall per checkbox

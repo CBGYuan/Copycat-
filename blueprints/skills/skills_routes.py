@@ -4,7 +4,7 @@ from flask import Blueprint, render_template, request, jsonify
 
 from configs import set_up_app
 from configs.global_configs import app_config
-from services import session_store, skill_memory, skill_service
+from services import data_location, session_store, skill_memory, skill_service
 from utils import file_picker, skill_dedup
 
 skills_bp = Blueprint("skills", __name__, url_prefix="/skills")
@@ -39,6 +39,59 @@ def _domain_of(skill_key: str) -> str:
 @skills_bp.route("/")
 def index():
     return render_template("skills.html", skills=_all_skills(), bt_keys=list(app_config.bt_skills.keys()))
+
+
+@skills_bp.route("/data_location")
+def data_location_route():
+    """Where this copy of Copycat is writing, and any other folder this user
+    has previously run one from that still holds skills. The second half is
+    what answers "I exported a skill and the library is empty" — see
+    services.data_location."""
+    return jsonify({
+        "success": True,
+        "current": data_location.current_root(),
+        # False after the app folder is moved or deleted mid-session: the
+        # paths were resolved at startup and still point at the old place.
+        "reachable": os.path.isdir(os.path.dirname(data_location.current_root())),
+        "counts": skill_service.local_skill_counts(),
+        "others": data_location.other_locations(),
+    })
+
+
+@skills_bp.route("/data_location/import", methods=["POST"])
+def import_data_location():
+    path = ((request.get_json(silent=True) or {}).get("path") or "").strip()
+    if not data_location.is_known(path):
+        return jsonify({"success": False,
+                        "message": "That is not a data folder this app has run from."}), 400
+    try:
+        result = skill_service.import_local_skills_from(path)
+    except skill_service.SkillStoreError as e:
+        return _store_error(e)
+    set_up_app.reload_pools()
+    total = result["imported"]["wifi"] + result["imported"]["bt"]
+    conflicts = result["conflicts"]["wifi"] + result["conflicts"]["bt"]
+    data_location.mark_imported(path, total + conflicts)
+    return jsonify({"success": True, "imported": result["imported"],
+                    "total": total, "conflicts": conflicts})
+
+
+@skills_bp.route("/data_location/open", methods=["POST"])
+def open_data_location():
+    """Reveal a data folder in Explorer. Restricted to folders this app runs
+    (or has run) from: the page could otherwise name any path on disk."""
+    path = ((request.get_json(silent=True) or {}).get("path") or "").strip()
+    path = path or data_location.current_root()
+    if not data_location.is_app_folder(path):
+        return jsonify({"success": False,
+                        "message": "That is not a data folder this app has run from."}), 400
+    if not os.path.isdir(path):
+        return jsonify({"success": False, "message": "That folder no longer exists."}), 404
+    try:
+        data_location.reveal(path)
+    except Exception as e:
+        return jsonify({"success": False, "message": f"Could not open the folder: {e}"}), 500
+    return jsonify({"success": True})
 
 
 @skills_bp.route("/sources")
@@ -293,10 +346,18 @@ def list_skills():
 @skills_bp.route("/save", methods=["POST"])
 def save_skill_route():
     data = request.get_json(silent=True) or {}
+    # Same gate as Export's /learning/save — see
+    # skill_service.description_rejection. Guarding only one of the two write
+    # paths is a guard the other one walks straight around.
+    description = str(data.get("description") or "").strip()
+    rejection = skill_service.description_rejection(description)
+    if rejection:
+        return jsonify({"success": False, "field": "description",
+                        "message": rejection}), 400
     try:
         skill = skill_service.Skill(
             name=data.get("name", ""),
-            description=data.get("description", ""),
+            description=description,
             keywords=data.get("keywords") or [],
             exclusive=data.get("exclusive") or [],
             tat_path=data.get("tat_path") or None,

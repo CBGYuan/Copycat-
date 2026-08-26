@@ -487,6 +487,13 @@
       .then((r) => r.json())
       .then((d) => {
         if (!d.success) {
+          // A rejection naming a field is a "fix this here" answer, not a dead
+          // end — put the engineer's cursor in the field that has to change
+          // rather than leaving them to find it after dismissing an alert.
+          if (d.field) {
+            focusField(d.field, d.message);
+            return;
+          }
           alert(d.message || "Save failed");
           return;
         }
@@ -494,6 +501,37 @@
         if (state.options.onSaved) state.options.onSaved(d);
       })
       .catch((e) => alert("Save failed: " + e));
+  }
+
+  // Field id per rejected field name, so the server can point at one without
+  // knowing this modal's markup.
+  const FIELD_INPUTS = { description: "skm-desc", name: "skm-name" };
+
+  function focusField(field, message) {
+    const input = document.getElementById(FIELD_INPUTS[field] || "");
+    if (!input) {
+      alert(message || "Save failed");
+      return;
+    }
+    let note = document.getElementById("skm-field-error");
+    if (!note) {
+      note = document.createElement("div");
+      note.id = "skm-field-error";
+      note.className = "skm-field-error";
+      input.parentNode.insertBefore(note, input.nextSibling);
+    }
+    note.textContent = message || "This field is required.";
+    input.classList.add("is-invalid");
+    input.scrollIntoView({ block: "center", behavior: "smooth" });
+    input.focus();
+    // Clears itself the moment they start fixing it — a red field that stays
+    // red while you type reads as "still wrong" and is why people give up.
+    const clear = () => {
+      input.classList.remove("is-invalid");
+      note.remove();
+      input.removeEventListener("input", clear);
+    };
+    input.addEventListener("input", clear);
   }
 
   function del() {

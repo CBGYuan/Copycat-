@@ -42,7 +42,28 @@ KEY_PATH_bkup = r"\\infs089.iil.intel.com\HOME\WirelessCE\Intel_WirelessCE_Avata
 #                      whatever was cached from the last successful sync —
 #                      shared skills don't just vanish because the network
 #                      dropped mid-session. Regenerated content — gitignored.
-DATA_DIR = os.path.join(PROJECT_ROOT, "data")
+#
+# The data folder stays BESIDE THE RUNNING EXE. That is the only location the
+# engineer ever chose, so it is the only one this app creates: writing to a
+# fixed per-user folder instead would put their skills somewhere they never
+# opened, and would move with the Windows account rather than with the copy of
+# Copycat they are actually using (a "Run as administrator" launch is a
+# different account, and a different %LOCALAPPDATA%).
+#
+# The cost is that a SECOND copy of Copycat is a second, EMPTY knowledge base,
+# with nothing on screen to say so — an engineer ran the Downloads copy, moved
+# the folder to C:\BT-work, and every skill they had exported stayed behind.
+# USER_STATE_DIR is how that becomes noticeable: each launch records the data
+# folder it used, so a copy that starts out empty can point at the folders
+# this user has genuinely run before. Only that small registry lives there —
+# never a skill (see services.data_location).
+DATA_DIR = os.environ.get("COPYCAT_DATA_DIR", "").strip() or os.path.join(PROJECT_ROOT, "data")
+USER_STATE_DIR = os.path.join(
+    os.environ.get("LOCALAPPDATA") or os.path.join(os.path.expanduser("~"), ".copycat"),
+    "Copycat",
+)
+DATA_LOCATIONS_PATH = os.path.join(USER_STATE_DIR, "data-locations.json")
+
 SKILLS_DIR = os.path.join(DATA_DIR, "skills")
 
 SKILLS_LOCAL_DIR = os.path.join(SKILLS_DIR, "local")

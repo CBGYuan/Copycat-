@@ -386,6 +386,63 @@ def description_conflict(child_description: str, parent, child_triggers=None) ->
             "distinguishing_triggers": distinguishing}
 
 
+def sibling_description_conflicts(description: str, triggers, pool,
+                                  exclude_keys=()) -> List[Dict]:
+    """Existing same-domain skills whose description this draft's is too close to.
+
+    The parent check above guards ONE relationship. Avatar's agent picks from
+    the whole domain's `name: description` lines at once, so two SIBLINGS that
+    read alike are the same failure with none of the same protection — and that
+    gap is what pushes an engineer to write a "if the other skill is running,
+    abort" rule into expert_rules, which cannot work (the per-skill sub-call
+    never learns which other skills are active) and returns an empty analysis
+    that is indistinguishable from "nothing wrong".
+
+    Advisory, exactly like the parent check: a difflib ratio catches blatantly
+    similar WORDING and says nothing about differently-worded overlap. On the
+    real 8-skill library this flags one pair out of 28, so it is a notice worth
+    reading rather than one worth training people to dismiss.
+
+    Compares the engineer's own sentence on both sides (base_description), with
+    triggers handled separately — a stored skill has its triggers compiled INTO
+    its description, so comparing raw text would score the same pair
+    differently depending on whether either side happened to declare any.
+    """
+    from services import skill_service  # local: skill_service imports this module
+
+    mine = skill_service.base_description(description or "").strip()
+    if not mine:
+        return []
+    my_trg = {t.strip().casefold() for t in (triggers or []) if t and t.strip()}
+    skip = {k for k in exclude_keys if k}
+
+    out = []
+    for key, skill in (pool or {}).items():
+        if key in skip:
+            continue
+        theirs = skill_service.base_description(
+            getattr(skill, "description", "") or "").strip()
+        if not theirs:
+            continue
+        score = ratio(mine, theirs)
+        if score < DESC_CONFLICT_RATIO:
+            continue
+        their_trg = {t.strip().casefold()
+                     for t in (getattr(skill, "triggers", []) or []) if t.strip()}
+        # A condition only one of them declares IS the discriminator, and a
+        # structural one — it is compiled into the saved description, so the
+        # agent sees it at selection time.
+        if my_trg - their_trg:
+            continue
+        out.append({
+            "key": key,
+            "name": getattr(skill, "name", key),
+            "description": theirs,
+            "score": round(score, 3),
+        })
+    return sorted(out, key=lambda x: -x["score"])
+
+
 def diff_against_parent(draft: Dict, parent) -> Dict:
     """Full comparison of a skill draft against its parent skill.
 

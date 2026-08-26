@@ -227,6 +227,22 @@ def _effect_phrase(op: Dict) -> str:
     return ", ".join(bits)
 
 
+# INCLUDE and EXCLUDE are not the same kind of decision, so they must not
+# share a materiality bar.
+#
+# An include keyword is log-content-level and case-specific: it names the
+# evidence this particular issue leaves behind, so ANY line it uniquely
+# contributes is judgment worth capturing.
+#
+# An exclude is message-noise-level and largely case-INDEPENDENT — closer to a
+# standing configuration than to a per-case call. Dropping lines is its whole
+# job, so "it dropped something" says nothing: measured on the include bar,
+# every noise filter looked maximally material and the Steps panel lit up on
+# routine trimming. What is actually worth a second look is an unusually big
+# cut, where over-broad noise removal may have taken real evidence with it.
+_EXCLUDE_MATERIAL_DROPPED_MIN = 25
+
+
 def unreasoned_material_ops(state) -> List[Dict]:
     """Operations that had a real effect but the engineer hasn't explained —
     these are the highest-value "why did you do this?" targets for the
@@ -238,20 +254,28 @@ def unreasoned_material_ops(state) -> List[Dict]:
         if op["action"] in ("load_skill", "load_tat"):
             continue
         eff = op.get("effect") or {}
-        # A DISABLED filter has no unique_hits — compute_filter_stats only
-        # computes those for enabled ones — so a toggle_off would otherwise
-        # look immaterial no matter how load-bearing the keyword was. Judge it
-        # by the hits the keyword still carries instead: switching off
-        # something that matches nothing is genuinely trivial, switching off
-        # something that matches hundreds of lines is one of the most
-        # significant judgments an engineer makes (and, when it contradicts
-        # the baseline read, the highest-value thing to ask about).
-        material = bool(
-            eff.get("unique_hits")
-            or eff.get("dropped")
-            or op["action"] == "remove"
-            or (op["action"] == "toggle_off" and eff.get("hits"))
-        )
+        if op.get("excluding"):
+            # Noise-level edit — see _EXCLUDE_MATERIAL_DROPPED_MIN above.
+            # `remove`/`toggle_off` of an exclude is undoing noise removal,
+            # which puts lines BACK; judged by what it had been dropping.
+            material = (eff.get("dropped") or 0) >= _EXCLUDE_MATERIAL_DROPPED_MIN
+            if not material and op["action"] in ("remove", "toggle_off"):
+                material = (eff.get("hits") or 0) >= _EXCLUDE_MATERIAL_DROPPED_MIN
+        else:
+            # A DISABLED filter has no unique_hits — compute_filter_stats only
+            # computes those for enabled ones — so a toggle_off would otherwise
+            # look immaterial no matter how load-bearing the keyword was. Judge
+            # it by the hits the keyword still carries instead: switching off
+            # something that matches nothing is genuinely trivial, switching
+            # off something that matches hundreds of lines is one of the most
+            # significant judgments an engineer makes (and, when it
+            # contradicts the baseline read, the highest-value thing to ask
+            # about).
+            material = bool(
+                eff.get("unique_hits")
+                or op["action"] == "remove"
+                or (op["action"] == "toggle_off" and eff.get("hits"))
+            )
         if material:
             out.append(op)
     return out

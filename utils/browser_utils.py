@@ -71,6 +71,11 @@ def get_chrome_binary_path():
     return None
 
 
+# Chrome that is going to run has not exited by now; Chrome that refuses to
+# run (see _took_off) is gone in well under a second.
+_LIFTOFF_SECONDS = 3.0
+
+
 class ManagedChromeWindow:
     """Own the Chrome window opened for one local Flask server run.
 
@@ -96,8 +101,9 @@ class ManagedChromeWindow:
             chrome_path = get_chrome_binary_path()
             if chrome_path:
                 profile_dir = tempfile.mkdtemp(prefix="log-triage-chrome-")
+                process = None
                 try:
-                    self._process = subprocess.Popen([
+                    process = subprocess.Popen([
                         chrome_path,
                         f"--user-data-dir={profile_dir}",
                         "--new-window",
@@ -107,8 +113,6 @@ class ManagedChromeWindow:
                         "--disable-background-mode",
                         url,
                     ])
-                    self._profile_dir = profile_dir
-                    return True
                 except Exception as e:
                     shutil.rmtree(profile_dir, ignore_errors=True)
                     _safe_print(
@@ -116,11 +120,51 @@ class ManagedChromeWindow:
                         "falling back to the default browser."
                     )
 
+                if process is not None:
+                    if self._took_off(process):
+                        self._process = process
+                        self._profile_dir = profile_dir
+                        return True
+                    shutil.rmtree(profile_dir, ignore_errors=True)
+                    _safe_print(
+                        f"⚠️  Chrome started and exited immediately (code "
+                        f"{process.returncode}). The usual cause is running "
+                        "Copycat as administrator: the child process inherits "
+                        "that token and Chrome refuses to run elevated. "
+                        "Falling back to the default browser."
+                    )
+
             # There is no portable way to close a tab handed to an arbitrary
             # default browser, so this fallback remains intentionally unmanaged.
-            webbrowser.open(url)
-            _safe_print("⚠️  This fallback browser tab must be closed manually.")
+            opened = False
+            try:
+                opened = webbrowser.open(url)
+            except Exception:
+                opened = False
+            if opened:
+                _safe_print("⚠️  This fallback browser tab must be closed manually.")
+            else:
+                _safe_print(
+                    "⚠️  No browser could be opened. The app IS running — "
+                    f"paste this into a browser yourself: {url}"
+                )
             return False
+
+    @staticmethod
+    def _took_off(process) -> bool:
+        """Did the Chrome we just started actually stay up?
+
+        Popen succeeding only means the process was created. A Chrome that
+        refuses its environment -- elevated token, broken profile, missing
+        dependency -- is created and then exits at once, and the caller would
+        otherwise read that exit as "the engineer closed the window" and shut
+        the whole app down before the UI ever appeared.
+        """
+        try:
+            process.wait(timeout=_LIFTOFF_SECONDS)
+        except subprocess.TimeoutExpired:
+            return True
+        return False
 
     def wait_for_exit(self) -> bool:
         """Block until this app's Chrome instance exits (user closed the window).

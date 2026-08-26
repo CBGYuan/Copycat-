@@ -185,6 +185,21 @@ a.btn-primary {
 .export-guard-note { flex: 1 1 200px; font-size: 0.7rem; color: var(--text-muted); }
 .export-guard-sub { margin: -2px 0 6px; font-size: 0.72rem; color: var(--text-muted); }
 
+/* A save the server refused, shown ON the field that has to change. Distinct
+   from .desc-strength below, which is advisory scoring — this one means the
+   skill was NOT written. */
+.skm-field-error {
+  margin-top: 5px;
+  padding: 6px 9px;
+  border-left: 3px solid var(--bad);
+  border-radius: 4px;
+  background: rgba(217, 72, 72, 0.08);
+  color: #8c2f2f;
+  font-size: 0.72rem;
+  line-height: 1.4;
+}
+.form-control.is-invalid { border-color: var(--bad); }
+
 .desc-strength { height: 5px; border-radius: 3px; background: var(--border); overflow: hidden; }
 .desc-strength-bar { height: 100%; width: 0; transition: width 0.2s ease, background 0.2s ease; background: var(--bad); }
 .desc-strength-bar.weak { background: var(--bad); }
@@ -1337,22 +1352,29 @@ a.btn-primary {
   background: #e7edf2; text-align: center; font-size: 0.62rem;
 }
 .has-docs .skill-doc-count { background: var(--primary-dark); color: #fff; }
+/* position:fixed for the same reason as .skill-load-menu below: this one
+   hangs off the chat card's header, and .workbench-panel is overflow:hidden,
+   so an absolute menu is clipped to the card. placeAnchoredMenu() sets
+   top/left and flips it above the button when there isn't room below. */
 .skill-doc-picker-menu {
-  position: absolute; z-index: 1080; top: calc(100% + 7px); left: 0;
+  position: fixed; z-index: 1080;
   width: min(390px, 78vw); overflow: hidden;
+  display: flex; flex-direction: column;
   border: 1px solid #cfd9e2; border-radius: 10px;
   background: #fff; box-shadow: 0 12px 30px rgba(32, 52, 70, 0.18);
 }
 .skill-doc-picker-menu[hidden] { display: none; }
 .skill-doc-picker-head,
 .skill-doc-picker-foot { display: flex; align-items: center; gap: 10px; padding: 9px 11px; }
+.skill-doc-picker-head,
+.skill-doc-picker-foot { flex: 0 0 auto; }
 .skill-doc-picker-head { justify-content: space-between; border-bottom: 1px solid #e4e9ee; }
 .skill-doc-picker-head b { display: block; color: #2c3c4d; font-size: 0.78rem; }
 .skill-doc-picker-head small { display: block; color: #7b8792; font-size: 0.64rem; }
 .skill-doc-picker-head > button {
   border: 0; background: transparent; color: var(--primary-dark); font-size: 0.66rem; font-weight: 700;
 }
-.skill-doc-picker-list { max-height: 260px; overflow-y: auto; padding: 5px; }
+.skill-doc-picker-list { flex: 1 1 auto; min-height: 0; max-height: 260px; overflow-y: auto; padding: 5px; }
 .skill-doc-option {
   display: grid; grid-template-columns: 18px minmax(0, 1fr); gap: 7px;
   margin: 0; padding: 7px 6px; border-radius: 7px; cursor: pointer;
@@ -1550,7 +1572,14 @@ a.btn-primary {
    recoverable, silently clipping Clear and Export skill off the card is not. */
 .chat-header-actions { flex: 0 0 auto; }
 .chat-header-primary > .skill-doc-picker,
-.chat-header-primary > #baselineBtn { min-width: 0; overflow: hidden; }
+.chat-header-primary > #baselineBtn { min-width: 0; }
+/* Clip the LABEL, not the picker: the picker is the containing block for its
+   absolutely-positioned menu, which sits entirely below the button — an
+   overflow:hidden there leaves nothing of the menu to see. */
+.chat-header-primary > #baselineBtn { overflow: hidden; }
+.chat-header-primary > .skill-doc-picker > .skill-doc-picker-toggle {
+  max-width: 100%; overflow: hidden;
+}
 .session-menu-chevron {
   color: var(--text-muted);
   font-size: 0.58rem;
@@ -2538,6 +2567,10 @@ textarea.chat-main-input {
 }
 .chat-q-custom.is-dropping { outline: 2px dashed var(--primary); outline-offset: 3px; border-radius: 8px; }
 .chat-q-actions { display: flex; align-items: center; gap: 5px; }
+.chat-q-lineref { display: flex; align-items: center; gap: 5px; flex-wrap: wrap; }
+.chat-q-lineref-label { font-size: 0.63rem; color: var(--text-muted); }
+.chat-q-lineno { width: 88px; flex: 0 0 auto; }
+.chat-q-lineref-note { font-size: 0.63rem; color: #8a6116; }
 .chat-q-hint {
   flex: 1 1 auto;
   min-width: 0;
@@ -2589,9 +2622,37 @@ textarea.chat-main-input {
 .open-items-title { font-size: 0.7rem; font-weight: 650; color: #8a6116; }
 .open-items-tab.is-warn .open-items-caret,
 .open-items-tab.is-warn .open-items-title { color: #b02a37; }
+/* Darker and heavier than is-warn: a contradiction is the one claim in the
+   strip that is actually wrong, and it sits next to warnings the engineer
+   raised on purpose. */
+.open-items-tab.is-bad .open-items-caret,
+.open-items-tab.is-bad .open-items-title { color: #8b1420; font-weight: 750; }
 .open-items-delta {
   margin-left: auto;
   font-size: 0.64rem; color: #1a7f4b;
+}
+/* Neutral on purpose: it sits next to the green one, and questions arriving
+   is not progress. */
+.open-items-asked {
+  margin-left: auto;
+  font-size: 0.64rem; color: var(--text-muted);
+}
+.open-items-delta ~ .open-items-asked { margin-left: 8px; }
+/* Stays on the left, next to the counts it is currently making stale. */
+.open-items-busy {
+  display: inline-flex; align-items: center; gap: 5px;
+  margin-left: 8px;
+  font-size: 0.64rem; color: var(--text-muted); font-style: italic;
+}
+.open-items-spin {
+  display: inline-block; width: 9px; height: 9px;
+  border: 2px solid rgba(138, 97, 22, 0.25); border-top-color: #8a6116;
+  border-radius: 50%;
+  animation: open-items-spin 0.7s linear infinite;
+}
+@keyframes open-items-spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) {
+  .open-items-spin { animation-duration: 2.4s; }
 }
 .open-items-list {
   position: absolute;
@@ -2618,6 +2679,16 @@ textarea.chat-main-input {
   cursor: pointer;
 }
 .open-items-row:hover { background: #f6ecd8; }
+.open-items-new {
+  display: inline-block;
+  margin-right: 5px;
+  padding: 0 5px;
+  border-radius: 8px;
+  background: #1a7f4b; color: #fff;
+  font-size: 0.56rem; font-weight: 700; letter-spacing: 0.04em;
+  text-transform: uppercase;
+  vertical-align: 1px;
+}
 .open-items-skip {
   flex: 0 0 auto;
   margin-top: 2px;
@@ -2628,6 +2699,10 @@ textarea.chat-main-input {
   cursor: pointer;
 }
 .open-items-skip:hover { background: #efe2c9; color: #8a6116; }
+/* The override, not the tidy-up: it has to read differently from Skip sitting
+   right next to it. */
+.open-items-force { color: #b02a37; font-weight: 650; }
+.open-items-force:hover { background: #f7dcdf; color: #8b1420; }
 /* A staged image (attached but not yet read — see wireAttachments'
    resolvePending) shows as a removable chip here, between the textarea and
    the action row. Nothing about the image itself is known yet beyond its
@@ -2827,6 +2902,33 @@ textarea.chat-main-input {
 }
 .lib-source select { width: auto; min-width: 210px; max-width: 340px; font-size: 0.78rem; }
 .lib-source-meta { font-size: 0.68rem; color: var(--text-muted); white-space: nowrap; }
+
+/* The folder Export writes to, and the recovery prompt for skills a second
+   copy of the app left somewhere else. */
+.lib-datadir {
+  display: flex; align-items: center; gap: 6px; flex-wrap: wrap;
+  margin-top: 6px; font-size: 0.68rem; color: var(--text-muted);
+}
+.lib-datadir code { color: var(--text-main); word-break: break-all; }
+.lib-datadir-open {
+  border: 1px solid var(--border); border-radius: 5px; background: var(--bg-soft);
+  color: var(--text-muted); font-size: 0.66rem; line-height: 1;
+  padding: 3px 8px; cursor: pointer;
+}
+.lib-datadir-open:hover { color: var(--text-main); border-color: var(--text-muted); }
+.lib-datadir.is-gone code { color: #c0392b; text-decoration: line-through; }
+.lib-datadir-warn { color: #c0392b; font-weight: 600; }
+.lib-strays { margin-bottom: 14px; }
+.lib-stray {
+  display: flex; align-items: center; justify-content: space-between;
+  gap: 14px; flex-wrap: wrap;
+  padding: 10px 13px; margin-bottom: 8px;
+  border: 1px solid #f0d48a; border-left: 3px solid #e0a800; border-radius: 8px;
+  background: #fffaed; font-size: 0.74rem;
+}
+.lib-stray code { font-size: 0.7rem; color: #6b5a2a; word-break: break-all; }
+.lib-stray-when { color: var(--text-muted); }
+.lib-stray-actions { display: inline-flex; gap: 6px; flex-shrink: 0; }
 
 .lib-grid {
   display: grid; grid-template-columns: minmax(280px, 4fr) 6fr; gap: 14px;
